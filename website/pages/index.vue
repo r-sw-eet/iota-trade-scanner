@@ -374,8 +374,10 @@ const projectStorageChartOptions = {
               <thead>
                 <tr class="text-[#71717a] text-sm border-b border-scanner-border">
                   <th class="text-left pb-2 pr-4">Project</th>
+                  <th class="text-left pb-2 pr-4">Team</th>
                   <th class="text-left pb-2 pr-4">Category</th>
                   <th class="text-right pb-2 pr-4">Events</th>
+                  <th class="text-right pb-2 pr-4" title="Unique sender addresses across all modules">Wallets</th>
                   <th class="text-right pb-2 pr-4">Storage (IOTA)</th>
                   <th class="text-right pb-2 pr-4">TVL</th>
                   <th class="text-right pb-2 pr-4">Packages</th>
@@ -403,8 +405,10 @@ const projectStorageChartOptions = {
                       </div>
                     </div>
                   </td>
+                  <td class="py-3 pr-4 text-sm" :class="p.team ? 'text-[#d4d4d8]' : 'text-[#52525b]'">{{ p.team?.name || '—' }}</td>
                   <td class="py-3 pr-4 text-sm text-scanner-accent">{{ p.category }}</td>
                   <td class="py-3 pr-4 text-right font-mono text-base" :class="p.events > 0 ? 'text-[#f4f4f5]' : 'text-[#52525b]'">{{ p.events.toLocaleString() }}{{ p.eventsCapped ? '+' : '' }}</td>
+                  <td class="py-3 pr-4 text-right font-mono text-base" :class="p.uniqueSenders > 0 ? 'text-[#f4f4f5]' : 'text-[#52525b]'">{{ (p.uniqueSenders || 0).toLocaleString() }}</td>
                   <td class="py-3 pr-4 text-right font-mono text-base text-[#a1a1aa]">{{ p.storageIota.toFixed(4) }}</td>
                   <td class="py-3 pr-4 text-right font-mono text-base text-[#a1a1aa]">{{ p.tvl ? `$${formatCompact(p.tvl)}` : '—' }}</td>
                   <td class="py-3 pr-4 text-right font-mono text-base text-[#71717a]">{{ p.packages }}</td>
