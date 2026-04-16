@@ -94,7 +94,7 @@ let observer: IntersectionObserver | null = null
 function scrollToSection(id: string) {
   const el = document.getElementById(id)
   if (!el) return
-  if (['network', 'economics', 'ecosystem', 'developers'].includes(id)) {
+  if (['network', 'economics', 'ecosystem', 'how-it-works', 'developers'].includes(id)) {
     activeSection.value = id
   }
   // Ecosystem section has an extra sub-tier row in the sticky nav, so reserve more space
@@ -125,6 +125,7 @@ const navItems = [
   { id: 'network', label: 'Network' },
   { id: 'economics', label: 'Economics' },
   { id: 'ecosystem', label: 'Ecosystem' },
+  { id: 'how-it-works', label: 'How it works' },
   { id: 'developers', label: 'Developers' },
 ]
 
@@ -852,6 +853,32 @@ const projectStorageChartOptions = {
               </div>
             </div>
           </template>
+        </section>
+
+        <!-- ==================================================== -->
+        <!-- === HOW IT WORKS                                  === -->
+        <!-- ==================================================== -->
+        <section id="how-it-works" class="mb-16 scroll-mt-20">
+          <div class="mb-8">
+            <h2 class="text-2xl font-bold text-[#f4f4f5] mb-1">How it works</h2>
+            <p class="text-[#71717a] text-sm">What we mean by "package", "module", "object", and "event" — and how a single user action on-chain turns into the numbers on this page.</p>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+            <figure class="bg-scanner-card border border-scanner-border rounded p-4 m-0">
+              <img src="/architecture-simple.png" alt="IOTA on-chain concepts in plain English" class="w-full h-auto" loading="lazy" />
+              <figcaption class="text-xs text-[#71717a] mt-3">IOTA on-chain concepts, in plain English.</figcaption>
+            </figure>
+            <figure class="bg-scanner-card border border-scanner-border rounded p-4 m-0">
+              <img src="/architecture-process.png" alt="How one NFT sale flows through the chain and into our scanner" class="w-full h-auto" loading="lazy" />
+              <figcaption class="text-xs text-[#71717a] mt-3">A concrete NFT sale: one user transaction can create and destroy multiple objects and emit multiple events in a single step.</figcaption>
+            </figure>
+          </div>
+
+          <p class="text-xs text-[#71717a]">
+            Want the full technical schema (registry → package matching → team attribution)?
+            <a href="https://github.com/r-sw-eet/iota-trade-scanner#architecture" target="_blank" rel="noopener" class="text-scanner-accent hover:text-scanner-accent-secondary">See the detailed diagram on GitHub ↗</a>
+          </p>
         </section>
 
         <!-- ==================================================== -->

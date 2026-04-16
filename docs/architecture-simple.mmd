@@ -1,0 +1,24 @@
+flowchart TB
+    subgraph Setup["One-time setup — by the dev team"]
+        DeployTx["Deploy transaction<br/>= 'publish my app to the chain'<br/>happens once per dApp<br/>(and again for each upgrade)"]
+    end
+
+    subgraph dApp["A dApp on IOTA — think 'an app on your phone'"]
+        Pkg[("Package<br/>= the whole app<br/>e.g. an NFT marketplace,<br/>a DEX, a lending protocol")]
+        Mod["Module<br/>= one feature inside the app<br/>e.g. 'mint', 'list', 'trade',<br/>'deposit', 'borrow'"]
+        Struct["Type<br/>= the shape of a record<br/>e.g. 'an NFT = owner + image + price'"]
+        Obj["Object<br/>= a real item someone owns<br/>e.g. an NFT, a coin balance,<br/>a game sword, a loan position"]
+    end
+
+    subgraph Usage["What users do — millions of times"]
+        UserTx["User transaction<br/>= one user action<br/>e.g. 'Alice lists NFT #42 for 100 IOTA'<br/>then later: 'Bob buys NFT #42'"]
+        Evt["Event<br/>= a public receipt of that action<br/>(our scanner counts these)"]
+    end
+
+    DeployTx -- "publishes" --> Pkg
+    Pkg -- "is made of" --> Mod
+    Mod -- "defines" --> Struct
+    Struct -- "blueprint for" --> Obj
+    UserTx -- "creates / changes / destroys" --> Obj
+    UserTx -- "writes" --> Evt
+    Evt -- "comes from" --> Mod

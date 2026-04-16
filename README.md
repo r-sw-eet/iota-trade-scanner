@@ -27,6 +27,14 @@ On-chain data analytics dashboard for the IOTA mainnet. Tracks real network acti
 | Website   | Nuxt 3 (SPA), Tailwind CSS, Chart.js |
 | Infra     | Docker Compose, Node.js 22           |
 
+## Architecture
+
+How the scanner maps on-chain Move artefacts to projects it tracks: our registry (`ProjectDefinition`) identifies packages via one of three match paths (`packageAddresses` → module matchers → `fingerprint`), then attributes packages, modules, objects, and events back to projects and teams.
+
+![Architecture](docs/architecture.png)
+
+> **New to IOTA / Move?** See [`docs/architecture-simple.mmd`](docs/architecture-simple.mmd) for a non-technical walkthrough (what a package / module / object / event are, in plain English), and [`docs/architecture-process.mmd`](docs/architecture-process.mmd) for a concrete example showing how one NFT sale produces the numbers on the dashboard. The same diagrams are also rendered on the live dashboard under **How it works**.
+
 ## Quick Start
 
 ```bash

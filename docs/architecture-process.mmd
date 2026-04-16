@@ -1,0 +1,20 @@
+sequenceDiagram
+    actor Dev as Dev team
+    actor Alice
+    actor Bob
+    participant Chain as IOTA mainnet
+    participant Scanner as Our scanner
+
+    Dev->>Chain: Deploy tx — publish marketplace package
+    Note over Chain: Package + modules now live on-chain
+
+    Alice->>Chain: Tx — list NFT 42 for 100 IOTA
+    Note right of Chain: creates 1 Listing object<br/>emits 1 ListEvent
+
+    Bob->>Chain: Tx — buy NFT 42
+    Note right of Chain: transfers NFT to Bob<br/>destroys Listing object<br/>emits SaleEvent + FeeEvent<br/>(1 tx → 3 object changes, 2 events)
+
+    Note over Scanner: every 6 hours
+    Scanner->>Chain: "any new events from tracked projects?"
+    Chain-->>Scanner: [ListEvent, SaleEvent, FeeEvent, ...]
+    Scanner->>Scanner: count per project, save snapshot

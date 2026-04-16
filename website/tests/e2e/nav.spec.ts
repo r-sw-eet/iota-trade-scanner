@@ -86,12 +86,13 @@ test.describe('dashboard nav', () => {
     )
   })
 
-  test('sticky nav exposes all four buckets', async ({ page }) => {
+  test('sticky nav exposes all five buckets', async ({ page }) => {
     await page.goto('/')
     const nav = page.locator('nav').first()
     await expect(nav.getByRole('button', { name: 'Network' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Economics' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Ecosystem' })).toBeVisible()
+    await expect(nav.getByRole('button', { name: 'How it works' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Developers' })).toBeVisible()
   })
 
