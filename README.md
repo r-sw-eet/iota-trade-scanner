@@ -1,5 +1,8 @@
 # IOTA Trade Scanner
 
+[![CI](https://github.com/r-sw-eet/iota-trade-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/r-sw-eet/iota-trade-scanner/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/r-sw-eet/iota-trade-scanner/graph/badge.svg)](https://codecov.io/gh/r-sw-eet/iota-trade-scanner)
+
 On-chain data analytics dashboard for the IOTA mainnet. Tracks real network activity and monitors 40+ ecosystem projects.
 
 > ⚠️ **Work in progress** — this project is under active development. Data may contain errors, some claims are not yet independently verified, and breaking changes can happen at any time. Treat numbers as indicative, not definitive.

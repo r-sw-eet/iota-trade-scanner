@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { useIota } from '~/composables/useIota'
 
 describe('useIota', () => {
-  const { formatIota, formatCompact, formatPercent } = useIota()
+  const { formatIota, formatCompact, formatPercent, explorerAddress, explorerObject, explorerTx, shortAddr } = useIota()
 
   describe('formatIota', () => {
     it('returns em-dash for null/undefined/NaN', () => {
@@ -55,6 +55,43 @@ describe('useIota', () => {
 
     it('respects the decimals argument', () => {
       expect(formatPercent(12.345, 0)).toBe('12%')
+    })
+  })
+
+  describe('explorer URL builders', () => {
+    const addr = '0x6b41121305e1e63bcbdf43e8335d19038c13707818d7dabef65d3d35732a6ed4'
+
+    it('explorerAddress targets the /address path with mainnet', () => {
+      expect(explorerAddress(addr)).toBe(`https://explorer.iota.org/address/${addr}?network=mainnet`)
+    })
+
+    it('explorerObject targets the /object path with mainnet', () => {
+      expect(explorerObject(addr)).toBe(`https://explorer.iota.org/object/${addr}?network=mainnet`)
+    })
+
+    it('explorerTx targets the /txblock path with mainnet', () => {
+      const digest = 'ABC123digest'
+      expect(explorerTx(digest)).toBe(`https://explorer.iota.org/txblock/${digest}?network=mainnet`)
+    })
+  })
+
+  describe('shortAddr', () => {
+    it('returns empty string for null/undefined', () => {
+      expect(shortAddr(null)).toBe('')
+      expect(shortAddr(undefined)).toBe('')
+    })
+
+    it('leaves short addresses untouched', () => {
+      expect(shortAddr('0xabcd')).toBe('0xabcd')
+    })
+
+    it('truncates long addresses with the default 8+6 window', () => {
+      const addr = '0x6b41121305e1e63bcbdf43e8335d19038c13707818d7dabef65d3d35732a6ed4'
+      expect(shortAddr(addr)).toBe('0x6b4112…2a6ed4')
+    })
+
+    it('respects custom head/tail sizes', () => {
+      expect(shortAddr('0x1234567890abcdef', 4, 4)).toBe('0x12…cdef')
     })
   })
 })

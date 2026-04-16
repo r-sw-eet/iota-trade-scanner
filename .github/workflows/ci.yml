@@ -22,10 +22,16 @@ jobs:
         working-directory: api
       - run: npm run typecheck
         working-directory: api
-      - run: npm run test
+      - run: npm run test:cov
         working-directory: api
       - run: npm run test:functional
         working-directory: api
+      - name: Upload API coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./api/coverage/lcov.info
+          flags: api
+          fail_ci_if_error: false
 
   web-test:
     runs-on: ubuntu-latest
@@ -38,8 +44,14 @@ jobs:
           cache-dependency-path: website/package-lock.json
       - run: npm ci
         working-directory: website
-      - run: npm run test:unit
+      - run: npm run test:unit:coverage
         working-directory: website
+      - name: Upload web coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./website/coverage/lcov.info
+          flags: web
+          fail_ci_if_error: false
 
   web-e2e:
     runs-on: ubuntu-latest
