@@ -23,6 +23,7 @@ const logoMap: Record<string, string> = {
   'swirl': '/logos/swirl.svg',
   'swirl validator': '/logos/swirl.svg',
   'tlip (trade)': '/logos/tlip.svg',
+  'salus platform': '/logos/salus.png',
   'layerzero': '/logos/layerzero.png',
   'layerzero oft': '/logos/layerzero.png',
   'pyth oracle': '/logos/pyth.png',
