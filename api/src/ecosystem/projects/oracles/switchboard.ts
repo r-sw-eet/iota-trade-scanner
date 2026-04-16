@@ -8,5 +8,6 @@ export const switchboardOracle: ProjectDefinition = {
   urls: [
     { label: 'Website', href: 'https://switchboard.xyz' },
   ],
+  teamId: 'switchboard',
   match: { all: ['aggregator', 'aggregator_init_action'], minModules: 10 },
 };

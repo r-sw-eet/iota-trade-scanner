@@ -9,6 +9,7 @@ export const swirl: ProjectDefinition = {
     { label: 'App', href: 'https://swirlstake.com' },
     { label: 'Docs', href: 'https://docs.swirlstake.com' },
   ],
+  teamId: 'swirl',
   match: { exact: ['pool', 'riota'] },
 };
 
@@ -20,5 +21,6 @@ export const swirlValidator: ProjectDefinition = {
   urls: [
     { label: 'App', href: 'https://swirlstake.com' },
   ],
+  teamId: null,
   match: { all: ['cert', 'native_pool', 'validator'] },
 };

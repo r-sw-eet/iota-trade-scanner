@@ -8,5 +8,6 @@ export const tradeport: ProjectDefinition = {
   urls: [
     { label: 'Website', href: 'https://tradeport.xyz' },
   ],
+  teamId: 'tradeport',
   match: { all: ['tradeport_biddings'] },
 };

@@ -4,6 +4,7 @@ import { Cron } from '@nestjs/schedule';
 import { Model } from 'mongoose';
 import { EcosystemSnapshot } from './schemas/ecosystem-snapshot.schema';
 import { ALL_PROJECTS, ProjectDefinition } from './projects';
+import { Team, getTeam } from './teams';
 
 const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
 
@@ -24,12 +25,21 @@ export interface Project {
   eventsCapped: boolean;
   modules: string[];
   tvl: number | null;
+  /** Owning team snapshot (resolved from def.teamId). `null` for aggregates / L2 */
+  team: Team | null;
+  /** Disclaimer text from the project definition (aggregates warn here). */
+  disclaimer: string | null;
+  /** Addresses that actually published this project's matched packages. */
+  detectedDeployers: string[];
+  /** Subset of `detectedDeployers` not present in the team's known deployer list — worth inspecting. */
+  anomalousDeployers: string[];
 }
 
 interface PackageInfo {
   address: string;
   storageRebate: string;
   modules: { nodes: { name: string }[] };
+  previousTransactionBlock: { sender: { address: string } | null } | null;
 }
 
 @Injectable()
@@ -85,7 +95,12 @@ export class EcosystemService implements OnModuleInit {
       const afterClause: string = cursor ? `, after: "${cursor}"` : '';
       const data: any = await this.graphql(`{
         packages(first: 50${afterClause}) {
-          nodes { address storageRebate modules { nodes { name } } }
+          nodes {
+            address
+            storageRebate
+            modules { nodes { name } }
+            previousTransactionBlock { sender { address } }
+          }
           pageInfo { hasNextPage endCursor }
         }
       }`);
@@ -119,9 +134,14 @@ export class EcosystemService implements OnModuleInit {
     return { count: total, capped: total >= maxPages * 50 };
   }
 
-  private matchProject(mods: Set<string>): ProjectDefinition | null {
+  private matchProject(mods: Set<string>, address: string): ProjectDefinition | null {
+    const lowerAddr = address.toLowerCase();
     for (const def of ALL_PROJECTS) {
       const { match } = def;
+      if (match.packageAddresses?.length) {
+        if (match.packageAddresses.some((a) => a.toLowerCase() === lowerAddr)) return def;
+        continue;
+      }
       if (match.exact) {
         const expected = new Set(match.exact);
         if (mods.size === expected.size && [...expected].every((m) => mods.has(m))) return def;
@@ -135,6 +155,37 @@ export class EcosystemService implements OnModuleInit {
     return null;
   }
 
+  private async probeFingerprint(
+    pkgAddress: string,
+    fp: NonNullable<ProjectDefinition['match']['fingerprint']>,
+  ): Promise<boolean> {
+    try {
+      const data: any = await this.graphql(`{
+        objects(filter: { type: "${pkgAddress}::${fp.type}" }, first: 1) {
+          nodes { asMoveObject { contents { json } } }
+        }
+      }`);
+      const fields = data.objects?.nodes?.[0]?.asMoveObject?.contents?.json;
+      if (!fields) return false;
+      if (fp.issuer && String(fields.issuer ?? '').toLowerCase() !== fp.issuer.toLowerCase()) return false;
+      if (fp.tag && fields.tag !== fp.tag) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async matchByFingerprint(mods: Set<string>, address: string): Promise<ProjectDefinition | null> {
+    for (const def of ALL_PROJECTS) {
+      const fp = def.match.fingerprint;
+      if (!fp) continue;
+      const fpModule = fp.type.split('::')[0];
+      if (!mods.has(fpModule)) continue;
+      if (await this.probeFingerprint(address, fp)) return def;
+    }
+    return null;
+  }
+
   private async fetchFull() {
     const allPackages = await this.getAllPackages();
 
@@ -142,7 +193,8 @@ export class EcosystemService implements OnModuleInit {
     for (const pkg of allPackages) {
       if (pkg.address.startsWith('0x000000000000000000000000000000000000000000000000000000000000000')) continue;
       const mods = new Set((pkg.modules?.nodes || []).map((m) => m.name));
-      const def = this.matchProject(mods);
+      let def = this.matchProject(mods, pkg.address);
+      if (!def) def = await this.matchByFingerprint(mods, pkg.address);
       if (!def) continue;
       const existing = projectMap.get(def.name);
       if (existing) { existing.packages.push(pkg); } else { projectMap.set(def.name, { def, packages: [pkg] }); }
@@ -162,6 +214,22 @@ export class EcosystemService implements OnModuleInit {
         if (result.capped) eventsCapped = true;
       }
 
+      const team = getTeam(def.teamId) ?? null;
+      const detectedDeployers = [
+        ...new Set(
+          packages
+            .map((p) => p.previousTransactionBlock?.sender?.address?.toLowerCase())
+            .filter((a): a is string => !!a),
+        ),
+      ];
+      const knownDeployers = new Set((team?.deployers ?? []).map((d) => d.toLowerCase()));
+      const anomalousDeployers = detectedDeployers.filter((d) => !knownDeployers.has(d));
+      if (team && anomalousDeployers.length) {
+        this.logger.warn(
+          `[${def.name}] ${anomalousDeployers.length} deployer(s) not in team "${team.id}": ${anomalousDeployers.join(', ')}`,
+        );
+      }
+
       const firstPkg = packages[0]; // original deployment — address never changes
       const addrPrefix = firstPkg.address.slice(2, 8);
       projects.push({
@@ -174,6 +242,10 @@ export class EcosystemService implements OnModuleInit {
         storageIota: Math.round(totalStorage * 10000) / 10000,
         events, eventsCapped, modules: mods,
         tvl: null,
+        team,
+        disclaimer: def.disclaimer ?? null,
+        detectedDeployers,
+        anomalousDeployers,
       });
     }
 
@@ -223,6 +295,10 @@ export class EcosystemService implements OnModuleInit {
           eventsCapped: false,
           modules: [],
           tvl: proto.tvl ?? null,
+          team: null,
+          disclaimer: null,
+          detectedDeployers: [],
+          anomalousDeployers: [],
         });
       }
     } catch (e) {

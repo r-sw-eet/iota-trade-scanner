@@ -1,5 +1,6 @@
 import { Controller, Get, Param, Query, NotFoundException } from '@nestjs/common';
 import { EcosystemService } from './ecosystem.service';
+import { ALL_TEAMS } from './teams';
 
 const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
 
@@ -11,6 +12,30 @@ export class EcosystemController {
   async getProjects() {
     const data = await this.ecosystemService.getLatest();
     return data ?? { l1: [], l2: [], totalProjects: 0, totalEvents: 0, totalStorageIota: 0, networkTxTotal: 0, txRates: {} };
+  }
+
+  @Get('teams')
+  async getTeams() {
+    const data = await this.ecosystemService.getLatest();
+    const all = [...(data?.l1 || []), ...(data?.l2 || [])];
+    return ALL_TEAMS.map((team) => ({
+      ...team,
+      projects: all
+        .filter((p: any) => p.team?.id === team.id)
+        .map((p: any) => ({ slug: p.slug, name: p.name, category: p.category, layer: p.layer })),
+    }));
+  }
+
+  @Get('teams/:id')
+  async getTeam(@Param('id') id: string) {
+    const team = ALL_TEAMS.find((t) => t.id === id);
+    if (!team) throw new NotFoundException(`Team "${id}" not found`);
+    const data = await this.ecosystemService.getLatest();
+    const all = [...(data?.l1 || []), ...(data?.l2 || [])];
+    return {
+      ...team,
+      projects: all.filter((p: any) => p.team?.id === id),
+    };
   }
 
   @Get('project/:slug')

@@ -6,5 +6,6 @@ export const identityWot: ProjectDefinition = {
   category: 'Identity',
   description: 'Web of Trust identity system on IOTA Rebased. Enables decentralized identity verification where trust relationships between entities are recorded on-chain, forming a verifiable trust graph.',
   urls: [],
+  teamId: 'if-identity',
   match: { all: ['wot_identity', 'wot_trust'] },
 };

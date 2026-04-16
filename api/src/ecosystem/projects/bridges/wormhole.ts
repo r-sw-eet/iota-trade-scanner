@@ -8,5 +8,6 @@ export const wormhole: ProjectDefinition = {
   urls: [
     { label: 'Website', href: 'https://wormhole.com' },
   ],
+  teamId: 'wormhole-foundation',
   match: { all: ['consumed_vaas', 'cursor'] },
 };

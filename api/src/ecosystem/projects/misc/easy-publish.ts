@@ -6,5 +6,6 @@ export const easyPublish: ProjectDefinition = {
   category: 'Tooling',
   description: 'Simplified Move package publishing tool for IOTA Rebased. Lowers the barrier for developers to deploy smart contracts by abstracting the publish transaction flow.',
   urls: [],
+  teamId: 'easy-publish',
   match: { all: ['easy_publish'] },
 };

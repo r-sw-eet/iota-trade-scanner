@@ -8,6 +8,7 @@ export const layerZero: ProjectDefinition = {
   urls: [
     { label: 'Website', href: 'https://layerzero.network' },
   ],
+  teamId: 'layerzero',
   match: { any: ['endpoint_quote', 'lz_compose'] },
 };
 
@@ -19,5 +20,7 @@ export const layerZeroOft: ProjectDefinition = {
   urls: [
     { label: 'Website', href: 'https://layerzero.network' },
   ],
+  teamId: null,
+  disclaimer: "Aggregate bucket — LayerZero's OFT (Omnichain Fungible Token) standard is instantiated per-token by whoever wraps a token (6+ unrelated deployers observed). They're not one team.",
   match: { all: ['oft', 'oft_impl'] },
 };

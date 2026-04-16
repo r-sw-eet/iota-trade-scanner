@@ -17,6 +17,10 @@ export class ProjectDoc {
   @Prop() eventsCapped: boolean;
   @Prop({ type: [String] }) modules: string[];
   @Prop() tvl: number;
+  @Prop({ type: Object }) team: Record<string, any> | null;
+  @Prop() disclaimer: string;
+  @Prop({ type: [String] }) detectedDeployers: string[];
+  @Prop({ type: [String] }) anomalousDeployers: string[];
 }
 
 @Schema({ timestamps: true })

@@ -8,6 +8,7 @@ export const poolsFinance: ProjectDefinition = {
   urls: [
     { label: 'App', href: 'https://pools.finance' },
   ],
+  teamId: 'pools-finance',
   match: { all: ['amm_config', 'amm_router'] },
 };
 
@@ -19,5 +20,6 @@ export const poolsFarming: ProjectDefinition = {
   urls: [
     { label: 'App', href: 'https://pools.finance' },
   ],
+  teamId: 'pools-farming',
   match: { all: ['farm', 'irt'] },
 };

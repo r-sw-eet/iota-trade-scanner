@@ -1,0 +1,23 @@
+flowchart TB
+    subgraph Registry["Our registry (code)"]
+        PDef["ProjectDefinition<br/>• name, category, urls<br/>• match:<br/>&nbsp;&nbsp;– packageAddresses[]<br/>&nbsp;&nbsp;– all / any / exact module names<br/>&nbsp;&nbsp;– fingerprint { type, issuer, tag }"]
+    end
+
+    subgraph OnChain["IOTA L1 mainnet (Move, on-chain)"]
+        Pkg[("Package<br/>0x… address<br/>immutable after publish")]
+        Mod["Module<br/>name: e.g. 'nft', 'ebl'<br/>lives inside a package"]
+        Struct["Struct / Type<br/>e.g. 0x…::nft::NFT<br/>the 'schema' for objects"]
+        Obj["Object<br/>0x… id, owner, version<br/>fields: { issuer, tag, … }"]
+        Tx["Transaction<br/>sender, gas, digest<br/>has effects + events"]
+        Evt["Event<br/>emittingModule<br/>event type, payload"]
+    end
+
+    PDef -. "identifies<br/>(3 match paths)" .-> Pkg
+
+    Tx -- "publish (once)" --> Pkg
+    Pkg -- "contains 1..N" --> Mod
+    Mod -- "defines 0..N" --> Struct
+    Struct -- "instantiated as" --> Obj
+    Tx -- "creates / mutates /<br/>deletes" --> Obj
+    Tx -- "emits 0..N" --> Evt
+    Evt -- "emitted by" --> Mod

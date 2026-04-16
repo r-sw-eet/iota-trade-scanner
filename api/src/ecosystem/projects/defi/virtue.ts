@@ -9,6 +9,7 @@ export const virtue: ProjectDefinition = {
     { label: 'App', href: 'https://virtue.money' },
     { label: 'Docs', href: 'https://docs.virtue.money' },
   ],
+  teamId: 'virtue',
   match: { all: ['liquidity_pool', 'delegates'] },
 };
 
@@ -20,6 +21,7 @@ export const virtueStability: ProjectDefinition = {
   urls: [
     { label: 'App', href: 'https://virtue.money' },
   ],
+  teamId: null,
   match: { all: ['stability_pool', 'borrow_incentive'] },
 };
 
@@ -31,5 +33,6 @@ export const virtuePool: ProjectDefinition = {
   urls: [
     { label: 'App', href: 'https://virtue.money' },
   ],
+  teamId: 'virtue-pool',
   match: { all: ['balance_number', 'stability_pool'] },
 };

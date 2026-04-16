@@ -128,8 +128,12 @@ function copyToClipboard(text: string) {
           </div>
         </div>
         <p class="text-[#a1a1aa]">{{ project.description }}</p>
-        <div v-if="project.urls?.length" class="flex gap-3 mt-2">
-          <a v-for="u in project.urls" :key="u.href" :href="u.href" target="_blank" class="text-scanner-accent text-sm hover:underline">{{ u.label }}</a>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
+          <NuxtLink v-if="project.team" :to="`/team/${project.team.id}`" class="text-sm text-[#a1a1aa] hover:text-scanner-accent transition-colors">
+            Built by <span class="text-scanner-accent underline">{{ project.team.name }}</span> →
+          </NuxtLink>
+          <span v-else-if="project.layer === 'L1'" class="text-sm text-[#52525b] italic">Team unattributed</span>
+          <a v-for="u in (project.urls || [])" :key="u.href" :href="u.href" target="_blank" class="text-scanner-accent text-sm hover:underline">{{ u.label }}</a>
         </div>
       </div>
 
@@ -155,6 +159,31 @@ function copyToClipboard(text: string) {
               {{ mod }}
             </span>
           </div>
+        </div>
+      </section>
+
+      <!-- Aggregate disclaimer (rendered separately so it stays visible without the team table) -->
+      <div v-if="project.disclaimer" class="mb-6 p-3 bg-amber-950/30 border border-amber-900/50 rounded text-sm text-amber-200 flex gap-2">
+        <svg class="w-5 h-5 flex-shrink-0 text-amber-400 mt-0.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        </svg>
+        <div><span class="font-semibold">Aggregate bucket:</span> {{ project.disclaimer }}</div>
+      </div>
+
+      <!-- Project-specific identification (deployers detected on-chain) -->
+      <section v-if="project.layer === 'L1' && project.detectedDeployers?.length" class="mb-8">
+        <h2 class="text-lg font-bold text-[#f4f4f5] mb-3">Identification</h2>
+        <div class="bg-scanner-card border border-scanner-border rounded p-4">
+          <p class="text-sm text-[#71717a] mb-2">Addresses observed publishing this project's matched packages:</p>
+          <div class="space-y-1">
+            <div v-for="addr in project.detectedDeployers" :key="addr" class="font-mono text-xs break-all" :class="project.anomalousDeployers?.includes(addr) ? 'text-amber-400' : 'text-[#a1a1aa]'">
+              {{ addr }}<span v-if="project.anomalousDeployers?.includes(addr)" class="ml-2 text-[10px] uppercase tracking-wider">⚠ anomaly</span>
+            </div>
+          </div>
+          <p v-if="project.anomalousDeployers?.length && project.team" class="text-xs text-amber-400/80 mt-3">
+            {{ project.anomalousDeployers.length }} address(es) above are not in
+            <NuxtLink :to="`/team/${project.team.id}`" class="underline">{{ project.team.name }}</NuxtLink>'s known deployer list.
+          </p>
         </div>
       </section>
 

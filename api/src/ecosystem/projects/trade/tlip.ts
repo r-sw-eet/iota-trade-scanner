@@ -9,5 +9,6 @@ export const tlip: ProjectDefinition = {
     { label: 'Website', href: 'https://tlip.io' },
     { label: 'IOTA Foundation', href: 'https://www.iota.org/solutions/trade' },
   ],
+  teamId: 'if-tlip',
   match: { all: ['ebl'] },
 };

@@ -8,11 +8,26 @@ export interface ProjectDefinition {
   urls: { label: string; href: string }[];
   /** Path to logo file relative to the project's folder, e.g. './logo.svg' */
   logo?: string;
-  /** Module names that uniquely identify this project's packages */
+  /** ID of the owning team (references ALL_TEAMS in ../teams). `null` for aggregate buckets like NFT Collections that have no single team. */
+  teamId: string | null;
+  /** Optional caveat shown to users. Use for aggregate buckets that almost certainly mix distinct projects we can't yet distinguish. */
+  disclaimer?: string;
+  /** How to identify this project's packages. `packageAddresses` wins over module matchers; `fingerprint` enables auto-discovery of unknown packages by sampling a Move object's fields. */
   match: {
     all?: string[];
     any?: string[];
     exact?: string[];
     minModules?: number;
+    /** Exact mainnet package addresses (lowercased on compare). Use when module names are too generic to match reliably. */
+    packageAddresses?: string[];
+    /** Fingerprint a sample object from the package. All specified fields must match (AND). Enables discovery of new packages deployed by this project. */
+    fingerprint?: {
+      /** Struct path within the package, e.g. 'nft::NFT'. Sampled type is `<pkg>::<type>`. */
+      type: string;
+      /** Expected value of the object's `issuer` Move field (lowercased on compare). */
+      issuer?: string;
+      /** Expected value of the object's `tag` Move field. */
+      tag?: string;
+    };
   };
 }

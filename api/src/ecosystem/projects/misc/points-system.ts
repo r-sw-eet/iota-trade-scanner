@@ -6,5 +6,6 @@ export const pointsSystem: ProjectDefinition = {
   category: 'Loyalty',
   description: 'On-chain points and profile system on IOTA Rebased. Tracks user engagement across the ecosystem with verifiable point balances and profile metadata stored as Move objects.',
   urls: [],
+  teamId: 'points-system',
   match: { exact: ['constant', 'event', 'point', 'profile'] },
 };

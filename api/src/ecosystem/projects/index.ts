@@ -1,7 +1,7 @@
 import { ProjectDefinition } from './project.interface';
 
 import { poolsFinance, poolsFarming, virtue, virtueStability, virtuePool, swirl, swirlValidator } from './defi/_index';
-import { tlip, notarization, traceability } from './trade/_index';
+import { tlip, notarization, traceability, salus } from './trade/_index';
 import { identityFull, identityWot, oidIdentity, credentials } from './identity/_index';
 import { ibtcBridge, layerZero, layerZeroOft, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle } from './oracles/_index';
@@ -20,7 +20,7 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   swirl, swirlValidator,
 
   // Trade / Enterprise
-  tlip, notarization, traceability,
+  tlip, notarization, traceability, salus,
 
   // Identity (identityFull before identityWot — more specific)
   identityFull, identityWot, oidIdentity, credentials,
