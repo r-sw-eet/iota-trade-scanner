@@ -27,6 +27,49 @@ const l1Filtered = computed(() => {
     : ecosystem.value.l1
 })
 
+// --- Sorting ---
+type SortDir = 'asc' | 'desc'
+type L1Key = 'name' | 'team' | 'category' | 'events' | 'uniqueSenders' | 'storageIota' | 'tvl' | 'packages'
+type L2Key = 'name' | 'category' | 'tvl'
+
+const l1Sort = ref<{ key: L1Key | null; dir: SortDir }>({ key: null, dir: 'desc' })
+const l2Sort = ref<{ key: L2Key | null; dir: SortDir }>({ key: null, dir: 'desc' })
+
+function toggleL1Sort(key: L1Key) {
+  l1Sort.value = l1Sort.value.key === key
+    ? { key, dir: l1Sort.value.dir === 'asc' ? 'desc' : 'asc' }
+    : { key, dir: 'desc' }
+}
+function toggleL2Sort(key: L2Key) {
+  l2Sort.value = l2Sort.value.key === key
+    ? { key, dir: l2Sort.value.dir === 'asc' ? 'desc' : 'asc' }
+    : { key, dir: 'desc' }
+}
+
+function sortValue(p: any, key: string): any {
+  if (key === 'team') return (p.team?.name || '').toLowerCase()
+  if (key === 'name' || key === 'category') return (p[key] || '').toLowerCase()
+  return p[key] ?? 0
+}
+function sortRows(rows: any[], sort: { key: string | null; dir: SortDir }) {
+  if (!sort.key) return rows
+  const { key, dir } = sort
+  const sign = dir === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    const av = sortValue(a, key), bv = sortValue(b, key)
+    if (av < bv) return -1 * sign
+    if (av > bv) return 1 * sign
+    return 0
+  })
+}
+function sortArrow(current: { key: string | null; dir: SortDir }, key: string): string {
+  if (current.key !== key) return ''
+  return current.dir === 'asc' ? ' ↑' : ' ↓'
+}
+
+const l1Sorted = computed(() => sortRows(l1Filtered.value, l1Sort.value))
+const l2Sorted = computed(() => sortRows(ecosystem.value?.l2 ?? [], l2Sort.value))
+
 function toSlug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
 }
@@ -391,19 +434,19 @@ const projectStorageChartOptions = {
           <div class="overflow-x-auto">
             <table class="w-full">
               <thead>
-                <tr class="text-[#71717a] text-sm border-b border-scanner-border">
-                  <th class="text-left pb-2 pr-4">Project</th>
-                  <th class="text-left pb-2 pr-4">Team</th>
-                  <th class="text-left pb-2 pr-4">Category</th>
-                  <th class="text-right pb-2 pr-4">Events</th>
-                  <th class="text-right pb-2 pr-4" title="Unique sender addresses across all modules">Wallets</th>
-                  <th class="text-right pb-2 pr-4">Storage (IOTA)</th>
-                  <th class="text-right pb-2 pr-4">TVL</th>
-                  <th class="text-right pb-2 pr-4">Packages</th>
+                <tr class="text-[#71717a] text-sm border-b border-scanner-border select-none">
+                  <th class="text-left pb-2 pr-4 cursor-pointer hover:text-scanner-accent" @click="toggleL1Sort('name')">Project{{ sortArrow(l1Sort, 'name') }}</th>
+                  <th class="text-left pb-2 pr-4 cursor-pointer hover:text-scanner-accent" @click="toggleL1Sort('team')">Team{{ sortArrow(l1Sort, 'team') }}</th>
+                  <th class="text-left pb-2 pr-4 cursor-pointer hover:text-scanner-accent" @click="toggleL1Sort('category')">Category{{ sortArrow(l1Sort, 'category') }}</th>
+                  <th class="text-right pb-2 pr-4 cursor-pointer hover:text-scanner-accent" @click="toggleL1Sort('events')">Events{{ sortArrow(l1Sort, 'events') }}</th>
+                  <th class="text-right pb-2 pr-4 cursor-pointer hover:text-scanner-accent" title="Unique sender addresses across all modules" @click="toggleL1Sort('uniqueSenders')">Wallets{{ sortArrow(l1Sort, 'uniqueSenders') }}</th>
+                  <th class="text-right pb-2 pr-4 cursor-pointer hover:text-scanner-accent" @click="toggleL1Sort('storageIota')">Storage (IOTA){{ sortArrow(l1Sort, 'storageIota') }}</th>
+                  <th class="text-right pb-2 pr-4 cursor-pointer hover:text-scanner-accent" @click="toggleL1Sort('tvl')">TVL{{ sortArrow(l1Sort, 'tvl') }}</th>
+                  <th class="text-right pb-2 pr-4 cursor-pointer hover:text-scanner-accent" @click="toggleL1Sort('packages')">Packages{{ sortArrow(l1Sort, 'packages') }}</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="p in l1Filtered.slice(0, l1Visible)" :key="p.name" class="border-t border-scanner-border-subtle hover:bg-scanner-card-hover cursor-pointer transition-opacity" :class="shadeTeamless && !p.team ? 'opacity-40' : ''" @click="navigateTo(`/project/${p.slug}`)">
+                <tr v-for="p in l1Sorted.slice(0, l1Visible)" :key="p.name" class="border-t border-scanner-border-subtle hover:bg-scanner-card-hover cursor-pointer transition-opacity" :class="shadeTeamless && !p.team ? 'opacity-40' : ''" @click="navigateTo(`/project/${p.slug}`)">
                   <td class="py-3 pr-4">
                     <div class="flex items-center gap-3">
                       <ProjectLogo :project="p" size="sm" />
@@ -435,9 +478,9 @@ const projectStorageChartOptions = {
               </tbody>
             </table>
           </div>
-          <div v-if="l1Visible < l1Filtered.length" class="mt-4 text-center">
+          <div v-if="l1Visible < l1Sorted.length" class="mt-4 text-center">
             <button @click="l1Visible += 10" class="px-4 py-2 text-sm text-scanner-accent border border-scanner-border rounded-sm hover:bg-scanner-card transition-colors">
-              Show more ({{ l1Filtered.length - l1Visible }} remaining)
+              Show more ({{ l1Sorted.length - l1Visible }} remaining)
             </button>
           </div>
         </div>
@@ -448,14 +491,14 @@ const projectStorageChartOptions = {
           <div class="overflow-x-auto">
             <table class="w-full">
               <thead>
-                <tr class="text-[#71717a] text-sm border-b border-scanner-border">
-                  <th class="text-left pb-2 pr-4">Project</th>
-                  <th class="text-left pb-2 pr-4">Category</th>
-                  <th class="text-right pb-2 pr-4">TVL</th>
+                <tr class="text-[#71717a] text-sm border-b border-scanner-border select-none">
+                  <th class="text-left pb-2 pr-4 cursor-pointer hover:text-status-active" @click="toggleL2Sort('name')">Project{{ sortArrow(l2Sort, 'name') }}</th>
+                  <th class="text-left pb-2 pr-4 cursor-pointer hover:text-status-active" @click="toggleL2Sort('category')">Category{{ sortArrow(l2Sort, 'category') }}</th>
+                  <th class="text-right pb-2 pr-4 cursor-pointer hover:text-status-active" @click="toggleL2Sort('tvl')">TVL{{ sortArrow(l2Sort, 'tvl') }}</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="p in ecosystem.l2.slice(0, l2Visible)" :key="p.name" class="border-t border-scanner-border-subtle hover:bg-scanner-card-hover cursor-pointer" @click="navigateTo(`/project/${p.slug}`)">
+                <tr v-for="p in l2Sorted.slice(0, l2Visible)" :key="p.name" class="border-t border-scanner-border-subtle hover:bg-scanner-card-hover cursor-pointer" @click="navigateTo(`/project/${p.slug}`)">
                   <td class="py-3 pr-4">
                     <div class="flex items-center gap-3">
                       <ProjectLogo :project="p" size="sm" />
@@ -471,9 +514,9 @@ const projectStorageChartOptions = {
               </tbody>
             </table>
           </div>
-          <div v-if="l2Visible < ecosystem.l2.length" class="mt-4 text-center">
+          <div v-if="l2Visible < l2Sorted.length" class="mt-4 text-center">
             <button @click="l2Visible += 10" class="px-4 py-2 text-sm text-status-active border border-scanner-border rounded-sm hover:bg-scanner-card transition-colors">
-              Show more ({{ ecosystem.l2.length - l2Visible }} remaining)
+              Show more ({{ l2Sorted.length - l2Visible }} remaining)
             </button>
           </div>
         </div>
