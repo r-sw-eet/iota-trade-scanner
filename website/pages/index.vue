@@ -62,7 +62,7 @@ const mainCurlExamples = [
   },
   {
     label: 'Discover all Move packages (projects)',
-    description: 'Paginate through all deployed packages. Each package has an address and a list of Move modules, written as package::module (emittingModule) below.',
+    description: 'Paginate through all deployed packages. Each package has an address and a list of Move modules, written as package::module — used as the GraphQL `emittingModule` filter when querying events.',
     command: `curl -s -X POST https://graphql.mainnet.iota.cafe \\
   -H 'Content-Type: application/json' \\
   -d '{"query":"{ packages(first: 50) { nodes { address storageRebate modules { nodes { name } } } pageInfo { hasNextPage endCursor } } }"}'`,

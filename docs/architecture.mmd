@@ -4,12 +4,12 @@ flowchart TB
     end
 
     subgraph OnChain["IOTA L1 mainnet (Move, on-chain)"]
-        Pkg[("Package<br/>0x… address<br/>immutable after publish")]
+        Pkg[("Package<br/>0x… address (immutable)<br/>upgradeable to new address")]
         Mod["Module<br/>name: e.g. 'nft', 'ebl'<br/>lives inside a package"]
         Struct["Struct / Type<br/>e.g. 0x…::nft::NFT<br/>the 'schema' for objects"]
-        Obj["Object<br/>0x… id, owner, version<br/>fields: { issuer, tag, … }"]
+        Obj["Object<br/>id, owner, version,<br/>transactionDigest<br/>+ fields"]
         Tx["Transaction<br/>sender, gas, digest<br/>has effects + events"]
-        Evt["Event<br/>emittingModule<br/>event type, payload"]
+        Evt["Event<br/>sender, sendingModule,<br/>type, payload (json/bcs)<br/>filter via: emittingModule"]
     end
 
     PDef -. "identifies<br/>(3 match paths)" .-> Pkg
