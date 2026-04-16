@@ -1,5 +1,11 @@
 # TODO
 
+## Operational
+
+- [ ] Add devnet support (alongside mainnet)
+- [ ] Set up backups (restic → Hetzner Object Storage; enable `iota_trade_scanner_backup_enabled` once S3 creds provisioned)
+- [ ] Add tests (API unit/integration, website component tests)
+
 ## Indexing depth
 
 Currently we index at epoch-level (332 records, ~65 KB). Deeper indexing levels for future consideration:
