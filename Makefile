@@ -1,4 +1,10 @@
-.PHONY: dev dev-api dev-web build build-api build-web image local down clean
+.PHONY: dev dev-api dev-web build build-api build-web image local down clean hooks
+
+# --- Setup ---
+
+hooks:
+	git config core.hooksPath .githooks
+	@echo "Pre-commit hook installed (blocks commits with out-of-sync npm lock files)."
 
 # --- Development ---
 

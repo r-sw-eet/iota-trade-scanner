@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Pre-commit hook: blocks commits where package.json or package-lock.json
+# changes leave the lock file out of sync. Catches the failure mode that
+# silently breaks CI's `npm ci` (cf. commits d8f59c3, 2c6e892).
+#
+# Install once with: `make hooks` (sets core.hooksPath to .githooks).
+
+set -e
+
+staged() {
+  git diff --cached --name-only --diff-filter=ACMR | grep -E "^$1\$" >/dev/null
+}
+
+check_dir() {
+  local dir="$1"
+  if ! staged "$dir/package.json" && ! staged "$dir/package-lock.json"; then
+    return 0
+  fi
+
+  echo "→ Verifying $dir lock file is in sync with package.json..."
+  if ! ( cd "$dir" && npm ci --dry-run --no-audit --no-fund >/dev/null 2>&1 ); then
+    cat <<EOF >&2
+
+✗ $dir/package-lock.json is out of sync with package.json.
+  CI will reject this with EUSAGE on \`npm ci\`.
+
+  Fix:
+    cd $dir && rm -rf node_modules package-lock.json && npm install
+    git add $dir/package-lock.json
+    git commit --amend --no-edit  # or re-run your commit
+
+EOF
+    exit 1
+  fi
+}
+
+check_dir api
+check_dir website
+exit 0
