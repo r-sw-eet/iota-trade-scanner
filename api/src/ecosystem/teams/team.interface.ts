@@ -7,4 +7,6 @@ export interface Team {
   urls?: { label: string; href: string }[];
   /** Mainnet addresses known to publish packages for this team (lowercased on compare). */
   deployers: string[];
+  /** Absolute public path to the team logo (e.g. `/logos/virtue.svg`). Inherited by every project on this team unless the project overrides via `ProjectDefinition.logo`. */
+  logo?: string;
 }

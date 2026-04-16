@@ -6,7 +6,7 @@ export interface ProjectDefinition {
   description: string;
   /** One or more URLs (website, docs, app, etc.) */
   urls: { label: string; href: string }[];
-  /** Path to logo file relative to the project's folder, e.g. './logo.svg' */
+  /** Absolute public path to the project logo, e.g. `/logos/virtue.svg`. Overrides `Team.logo` for this project only — leave unset to inherit from the team. */
   logo?: string;
   /** ID of the owning team (references ALL_TEAMS in ../teams). `null` for aggregate buckets like NFT Collections that have no single team. */
   teamId: string | null;

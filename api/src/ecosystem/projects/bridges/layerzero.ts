@@ -21,6 +21,7 @@ export const layerZeroOft: ProjectDefinition = {
     { label: 'Website', href: 'https://layerzero.network' },
   ],
   teamId: null,
+  logo: '/logos/layerzero.png',
   disclaimer: "Aggregate bucket split by deployer — each sub-project represents all OFT packages published by a single address (a token-wrapper), identified by a short hash of that deployer. Known deployers (e.g., Virtue) are routed to their team via the registry.",
   splitByDeployer: true,
   match: { all: ['oft', 'oft_impl'] },

@@ -22,5 +22,6 @@ export const swirlValidator: ProjectDefinition = {
     { label: 'App', href: 'https://swirlstake.com' },
   ],
   teamId: null,
+  logo: '/logos/swirl.svg',
   match: { all: ['cert', 'native_pool', 'validator'] },
 };

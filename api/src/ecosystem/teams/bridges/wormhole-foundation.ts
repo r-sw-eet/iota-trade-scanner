@@ -9,4 +9,5 @@ export const wormholeFoundation: Team = {
     { label: 'Pyth', href: 'https://pyth.network' },
   ],
   deployers: ['0x610a7c8f0e7cb73d3c93d1b4919de1b76fc30a8efa8e967ccdbb1f7862ee6d27'],
+  logo: '/logos/wormhole.ico',
 };

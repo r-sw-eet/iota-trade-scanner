@@ -10,5 +10,6 @@ export const pythOracle: ProjectDefinition = {
     { label: 'IOTA Docs', href: 'https://docs.pyth.network/price-feeds/core/use-real-time-data/pull-integration/iota' },
   ],
   teamId: 'wormhole-foundation',
+  logo: '/logos/pyth.png',
   match: { all: ['batch_price_attestation'] },
 };

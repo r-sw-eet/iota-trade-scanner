@@ -117,7 +117,7 @@ function copyToClipboard(text: string) {
       <!-- Header -->
       <div class="mb-8">
         <div class="flex items-center gap-4 mb-2">
-          <ProjectLogo :name="project.name" size="lg" />
+          <ProjectLogo :project="project" size="lg" />
           <div>
             <div class="flex items-center gap-3">
               <h1 class="text-3xl font-bold text-[#f4f4f5]">{{ project.name }}</h1>

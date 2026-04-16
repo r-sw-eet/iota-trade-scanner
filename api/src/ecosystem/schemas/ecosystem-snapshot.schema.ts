@@ -17,6 +17,7 @@ export class ProjectDoc {
   @Prop() eventsCapped: boolean;
   @Prop({ type: [String] }) modules: string[];
   @Prop() tvl: number;
+  @Prop() logo: string;
   @Prop({ type: Object }) team: Record<string, any> | null;
   @Prop() disclaimer: string;
   @Prop({ type: [String] }) detectedDeployers: string[];

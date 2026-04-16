@@ -29,6 +29,10 @@ Show grouped transactions that compose a single use case:
 - [ ] Detect operation groups on-chain by analyzing linked transactions (shared objects, sequential digests from same sender within a time window)
 - [ ] Display as "1 swap = N tx" breakdown per project
 
+## L2 / EVM team model
+
+- [ ] **Attach teams to L2 (EVM) projects** — L2 entries (MagicSea, Graphene, Symmio, Gamma, Wagmi, Iolend, Velocimeter, etc.) are synthesized from the DefiLlama `/protocols` feed at scan time and hardcoded to `team: null` (`ecosystem.service.ts:512`). They have no `ProjectDefinition`, so the whole Team/teamId lookup is skipped. Options: (a) curate L1-style `ProjectDefinition`s for each L2 project and reuse the teamId path; (b) add a lightweight name → teamId lookup table run during DefiLlama enrichment. Without either, L2 logos must stay in the frontend `logoMap` rather than inherit from their team.
+
 ## Ecosystem project-def audit
 
 Revisit after several ecosystem snapshots (to confirm the packages don't reappear post-matcher fixes):

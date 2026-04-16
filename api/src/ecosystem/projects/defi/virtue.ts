@@ -22,6 +22,7 @@ export const virtueStability: ProjectDefinition = {
     { label: 'App', href: 'https://virtue.money' },
   ],
   teamId: null,
+  logo: '/logos/virtue.svg',
   match: { all: ['stability_pool', 'borrow_incentive'] },
 };
 

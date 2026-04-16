@@ -387,7 +387,7 @@ const projectStorageChartOptions = {
                 <tr v-for="p in ecosystem.l1.slice(0, l1Visible)" :key="p.name" class="border-t border-scanner-border-subtle hover:bg-scanner-card-hover cursor-pointer transition-opacity" :class="shadeTeamless && !p.team ? 'opacity-40' : ''" @click="navigateTo(`/project/${p.slug}`)">
                   <td class="py-3 pr-4">
                     <div class="flex items-center gap-3">
-                      <ProjectLogo :name="p.name" size="sm" />
+                      <ProjectLogo :project="p" size="sm" />
                       <div>
                         <div class="flex items-center gap-2">
                           <span class="text-[#f4f4f5] font-medium text-base">{{ p.name }}</span>
@@ -439,7 +439,7 @@ const projectStorageChartOptions = {
                 <tr v-for="p in ecosystem.l2.slice(0, l2Visible)" :key="p.name" class="border-t border-scanner-border-subtle hover:bg-scanner-card-hover cursor-pointer" @click="navigateTo(`/project/${p.slug}`)">
                   <td class="py-3 pr-4">
                     <div class="flex items-center gap-3">
-                      <ProjectLogo :name="p.name" size="sm" />
+                      <ProjectLogo :project="p" size="sm" />
                       <div>
                         <span class="text-[#f4f4f5] font-medium text-base">{{ p.name }}</span>
                         <p class="text-sm text-[#71717a] truncate max-w-sm">{{ p.description.split('.')[0] }}</p>

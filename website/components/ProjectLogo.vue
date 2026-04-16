@@ -1,6 +1,12 @@
 <script setup lang="ts">
-const props = defineProps<{
+interface LogoProject {
   name: string
+  logo?: string | null
+  team?: { logo?: string | null } | null
+}
+
+const props = defineProps<{
+  project: LogoProject
   size?: 'sm' | 'md' | 'lg'
 }>()
 
@@ -14,25 +20,14 @@ const sizeClass = computed(() => {
   }
 })
 
-const logoMap: Record<string, string> = {
-  'pools finance': '/logos/pools-finance.svg',
-  'pools farming': '/logos/pools-finance.svg',
-  'virtue': '/logos/virtue.svg',
-  'virtue stability': '/logos/virtue.svg',
-  'virtue pool': '/logos/virtue.svg',
-  'swirl': '/logos/swirl.svg',
-  'swirl validator': '/logos/swirl.svg',
-  'tlip (trade)': '/logos/tlip.svg',
-  'salus platform': '/logos/salus.png',
-  'layerzero': '/logos/layerzero.png',
-  'layerzero oft': '/logos/layerzero.png',
-  'pyth oracle': '/logos/pyth.png',
-  'tradeport': '/logos/tradeport.svg',
+// Last-resort fallback for L2 / EVM projects synthesized from DefiLlama at
+// scan time — they have no ProjectDefinition + no team, so logo can't flow
+// through the data. See TODO "Attach teams to L2 (EVM) projects".
+const l2LogoMap: Record<string, string> = {
   'magicsea lb': '/logos/magicsea.png',
   'magicsea amm': '/logos/magicsea.png',
   'deepr finance': '/logos/deepr.png',
   'cyberperp': '/logos/cyberperp.svg',
-  'wormhole': '/logos/wormhole.ico',
   'symmio': '/logos/symmio.svg',
   'gamma': '/logos/gamma.svg',
   'wagmi': '/logos/wagmi.svg',
@@ -43,12 +38,14 @@ const logoMap: Record<string, string> = {
 }
 
 const logoUrl = computed(() => {
-  const key = props.name.toLowerCase()
-  return logoMap[key] || null
+  return props.project.logo
+    ?? props.project.team?.logo
+    ?? l2LogoMap[props.project.name.toLowerCase()]
+    ?? null
 })
 
 const initials = computed(() => {
-  return props.name
+  return props.project.name
     .split(/[\s()/]+/)
     .filter(Boolean)
     .slice(0, 2)
@@ -58,7 +55,7 @@ const initials = computed(() => {
 
 const bgColor = computed(() => {
   let hash = 0
-  for (const ch of props.name) hash = ((hash << 5) - hash + ch.charCodeAt(0)) | 0
+  for (const ch of props.project.name) hash = ((hash << 5) - hash + ch.charCodeAt(0)) | 0
   const hue = Math.abs(hash) % 360
   return `hsl(${hue}, 40%, 25%)`
 })
@@ -69,7 +66,7 @@ const bgColor = computed(() => {
     <img
       v-if="logoUrl && !imgError"
       :src="logoUrl"
-      :alt="name"
+      :alt="project.name"
       class="w-full h-full object-contain"
       @error="imgError = true"
     />

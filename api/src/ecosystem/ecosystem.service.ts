@@ -27,6 +27,8 @@ export interface Project {
   eventsCapped: boolean;
   modules: string[];
   tvl: number | null;
+  /** Resolved logo URL. Precedence: `ProjectDefinition.logo` → `Team.logo` → `null` (frontend falls back to initials). */
+  logo: string | null;
   /** Owning team snapshot (resolved from def.teamId). `null` for aggregates / L2 */
   team: Team | null;
   /** Disclaimer text from the project definition (aggregates warn here). */
@@ -455,6 +457,7 @@ export class EcosystemService implements OnModuleInit {
         storageIota: Math.round(totalStorage * 10000) / 10000,
         events, eventsCapped, modules: mods,
         tvl: null,
+        logo: def.logo ?? team?.logo ?? null,
         team,
         disclaimer: def.disclaimer ?? null,
         detectedDeployers,
@@ -509,6 +512,7 @@ export class EcosystemService implements OnModuleInit {
           eventsCapped: false,
           modules: [],
           tvl: proto.tvl ?? null,
+          logo: null,
           team: null,
           disclaimer: null,
           detectedDeployers: [],
