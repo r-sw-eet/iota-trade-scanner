@@ -2,6 +2,8 @@
 
 On-chain data analytics dashboard for the IOTA mainnet. Tracks real network activity, monitors 40+ ecosystem projects, and provides transparent claim verification — separating hype from reality.
 
+> ⚠️ **Work in progress** — this project is under active development. Data may contain errors, some claims are not yet independently verified, and breaking changes can happen at any time. Treat numbers as indicative, not definitive.
+
 ## Features
 
 - **Live mainnet data** — network metrics refreshed every 30 minutes via IOTA RPC/GraphQL
