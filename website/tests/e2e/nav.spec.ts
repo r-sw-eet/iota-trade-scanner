@@ -92,7 +92,7 @@ test.describe('dashboard nav', () => {
     await expect(nav.getByRole('button', { name: 'Network' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Economics' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Ecosystem' })).toBeVisible()
-    await expect(nav.getByRole('button', { name: 'How it works' })).toBeVisible()
+    await expect(nav.getByRole('button', { name: 'Architecture' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Developers' })).toBeVisible()
   })
 
