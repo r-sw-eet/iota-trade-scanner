@@ -124,7 +124,7 @@ export class EcosystemService implements OnModuleInit {
     return packages;
   }
 
-  private async countEvents(emittingModule: string, maxPages = 1000): Promise<{ count: number; capped: boolean }> {
+  private async countEvents(emittingModule: string, maxPages = 5000): Promise<{ count: number; capped: boolean }> {
     let total = 0;
     let cursor: string | null = null;
 
