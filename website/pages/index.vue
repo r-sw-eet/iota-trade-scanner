@@ -398,7 +398,7 @@ const projectStorageChartOptions = {
 <template>
   <div>
     <!-- === STICKY TOP NAV (sits below the disclaimer banner from layout) === -->
-    <nav class="sticky top-9 z-30 bg-scanner-bg/95 backdrop-blur border-b border-scanner-border">
+    <nav class="sticky top-0 md:top-9 z-30 bg-scanner-bg/95 backdrop-blur border-b border-scanner-border">
       <div class="max-w-7xl mx-auto px-6 md:px-10">
         <div class="overflow-x-auto scrollbar-hide h-14 flex items-center">
           <div class="flex items-center gap-1 md:gap-2 mx-auto whitespace-nowrap">
