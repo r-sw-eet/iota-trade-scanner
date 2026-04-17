@@ -130,7 +130,7 @@ const navItems = [
   { id: 'network', label: 'Network' },
   { id: 'ecosystem', label: 'Ecosystem' },
   { id: 'economics', label: 'Economics' },
-  { id: 'how-it-works', label: 'How it works' },
+  { id: 'how-it-works', label: 'Architecture' },
   { id: 'developers', label: 'Developers' },
 ]
 
@@ -400,16 +400,13 @@ const projectStorageChartOptions = {
     <!-- === STICKY TOP NAV (sits below the disclaimer banner from layout) === -->
     <nav class="sticky top-9 z-30 bg-scanner-bg/95 backdrop-blur border-b border-scanner-border">
       <div class="max-w-7xl mx-auto px-6 md:px-10">
-        <div class="flex items-center justify-between h-14">
-          <button @click="scrollToSection('network')" class="text-scanner-accent font-bold text-sm hover:opacity-80 transition-opacity whitespace-nowrap">
-            IOTA Trade Scanner
-          </button>
-          <div class="flex items-center gap-1 md:gap-2">
+        <div class="overflow-x-auto scrollbar-hide h-14 flex items-center">
+          <div class="flex items-center gap-1 md:gap-2 mx-auto whitespace-nowrap">
             <button
               v-for="item in navItems"
               :key="item.id"
               @click="scrollToSection(item.id)"
-              class="px-3 py-1.5 text-sm rounded-xs transition-colors relative"
+              class="px-3 py-1.5 text-sm rounded-xs transition-colors relative shrink-0"
               :class="activeSection === item.id
                 ? 'text-scanner-accent font-medium'
                 : 'text-[#a1a1aa] hover:text-[#f4f4f5]'"
