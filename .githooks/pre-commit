@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Pre-commit hook: blocks commits where package.json or package-lock.json
-# changes leave the lock file out of sync. Catches the failure mode that
-# silently breaks CI's `npm ci` (cf. commits d8f59c3, 2c6e892).
+# Pre-commit hook:
+#  1. Blocks commits where package.json / package-lock.json changes leave
+#     the lock file out of sync (failure mode that silently breaks CI's
+#     `npm ci`, cf. commits d8f59c3, 2c6e892).
+#  2. Runs the API coverage suite and blocks commits that regress below
+#     the coverageThreshold floor in api/test/jest-cov.config.js. Only
+#     fires when api/ source or test files are staged.
 #
 # Install once with: `make hooks` (sets core.hooksPath to .githooks).
 
@@ -11,7 +15,11 @@ staged() {
   git diff --cached --name-only --diff-filter=ACMR | grep -E "^$1\$" >/dev/null
 }
 
-check_dir() {
+staged_under() {
+  git diff --cached --name-only --diff-filter=ACMR | grep -E "^$1" >/dev/null
+}
+
+check_lockfile() {
   local dir="$1"
   if ! staged "$dir/package.json" && ! staged "$dir/package-lock.json"; then
     return 0
@@ -34,6 +42,57 @@ EOF
   fi
 }
 
-check_dir api
-check_dir website
+check_api_coverage() {
+  # Only fires when something under api/src or api/test is staged.
+  if ! staged_under "api/src/" && ! staged_under "api/test/"; then
+    return 0
+  fi
+
+  local log=/tmp/itsc-precommit-cov.log
+
+  echo "→ Running API coverage..."
+  if ! ( cd api && npm run test:cov --silent >"$log" 2>&1 ); then
+    cat <<EOF >&2
+
+✗ API test suite failed during coverage run.
+
+  Last 40 lines of output:
+
+EOF
+    tail -n 40 "$log" >&2
+    cat <<EOF >&2
+
+  Full log: $log
+  To bypass just this run (not recommended): git commit --no-verify
+
+EOF
+    exit 1
+  fi
+
+  echo "→ Checking coverage against baseline (ratcheting)..."
+  if ! ( cd api && node scripts/check-coverage.js ); then
+    cat <<EOF >&2
+
+✗ Coverage regressed below api/.coverage-baseline.json.
+  Restore coverage by adding tests, or edit the baseline if the drop is
+  deliberate (e.g. dead code deleted legitimately).
+
+  To bypass this check once: git commit --no-verify
+
+EOF
+    exit 1
+  fi
+
+  # If the script ratcheted the baseline upward, pull the update into the
+  # current commit so coverage gains propagate with the code that produced
+  # them. No-op if nothing changed.
+  if ! git diff --quiet -- api/.coverage-baseline.json; then
+    echo "→ Coverage baseline updated — staging api/.coverage-baseline.json"
+    git add api/.coverage-baseline.json
+  fi
+}
+
+check_lockfile api
+check_lockfile website
+check_api_coverage
 exit 0

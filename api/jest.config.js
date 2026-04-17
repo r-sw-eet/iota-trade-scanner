@@ -8,6 +8,17 @@ module.exports = {
   transform: {
     '^.+\\.ts$': ['ts-jest', { tsconfig: '<rootDir>/../tsconfig.test.json' }],
   },
-  collectCoverageFrom: ['**/*.(t|j)s'],
+  collectCoverageFrom: [
+    '**/*.ts',
+    '!**/*.spec.ts',
+    '!main.ts',
+    '!backfill-senders.ts',
+    '!app.module.ts',
+    '!**/*.module.ts',
+    '!**/schemas/**',
+    '!**/*.interface.ts',
+    '!ecosystem/projects/**',
+    '!ecosystem/teams/**',
+  ],
   coverageDirectory: '../coverage',
 };

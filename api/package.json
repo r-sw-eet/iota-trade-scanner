@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:cov": "jest --coverage",
+    "test:cov": "jest --config test/jest-cov.config.js --coverage",
+    "cov:check": "node scripts/check-coverage.js",
     "test:functional": "jest --config test/jest-functional.config.js",
     "backfill:senders": "node dist/backfill-senders"
   },

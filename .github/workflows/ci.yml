@@ -24,7 +24,8 @@ jobs:
         working-directory: api
       - run: npm run test:cov
         working-directory: api
-      - run: npm run test:functional
+      - name: Enforce coverage baseline (no regression)
+        run: npm run cov:check
         working-directory: api
       - name: Upload API coverage to Codecov
         uses: codecov/codecov-action@v5
