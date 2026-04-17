@@ -99,7 +99,7 @@ let observer: IntersectionObserver | null = null
 function scrollToSection(id: string) {
   const el = document.getElementById(id)
   if (!el) return
-  if (['network', 'economics', 'ecosystem', 'architecture', 'developers'].includes(id)) {
+  if (['network', 'economics', 'ecosystem', 'architecture', 'sources'].includes(id)) {
     activeSection.value = id
   }
   // Ecosystem section has an extra sub-tier row in the sticky nav, so reserve more space
@@ -131,7 +131,7 @@ const navItems = [
   { id: 'ecosystem', label: 'Ecosystem' },
   { id: 'economics', label: 'Economics' },
   { id: 'architecture', label: 'Architecture' },
-  { id: 'developers', label: 'Developers' },
+  { id: 'sources', label: 'Sources' },
 ]
 
 const ecosystemLinks = [
@@ -228,7 +228,13 @@ onMounted(async () => {
       const visible = entries
         .filter(e => e.isIntersecting)
         .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
-      if (visible.length) activeSection.value = visible[0].target.id
+      if (visible.length) {
+        activeSection.value = visible[0].target.id
+        nextTick(() => {
+          const btn = document.querySelector(`nav button[data-section="${visible[0].target.id}"]`)
+          btn?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+        })
+      }
     },
     { rootMargin: '-72px 0px -60% 0px', threshold: 0 },
   )
@@ -405,6 +411,7 @@ const projectStorageChartOptions = {
             <button
               v-for="item in navItems"
               :key="item.id"
+              :data-section="item.id"
               @click="scrollToSection(item.id)"
               class="px-3 py-1.5 text-sm rounded-xs transition-colors relative shrink-0"
               :class="activeSection === item.id
@@ -886,11 +893,11 @@ const projectStorageChartOptions = {
         </section>
 
         <!-- ==================================================== -->
-        <!-- === DEVELOPERS                                    === -->
+        <!-- === SOURCES                                       === -->
         <!-- ==================================================== -->
-        <section id="developers" class="mb-16 scroll-mt-20">
+        <section id="sources" class="mb-16 scroll-mt-20">
           <div class="mb-8">
-            <h2 class="text-2xl font-bold text-[#f4f4f5] mb-1">Developers</h2>
+            <h2 class="text-2xl font-bold text-[#f4f4f5] mb-1">Sources</h2>
             <p class="text-[#71717a] text-sm">All data on this dashboard is derived from public IOTA mainnet APIs. No API keys required — the commands below are ready to run.</p>
           </div>
 

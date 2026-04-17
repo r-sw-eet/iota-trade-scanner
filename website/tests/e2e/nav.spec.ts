@@ -93,7 +93,7 @@ test.describe('dashboard nav', () => {
     await expect(nav.getByRole('button', { name: 'Economics' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Ecosystem' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Architecture' })).toBeVisible()
-    await expect(nav.getByRole('button', { name: 'Developers' })).toBeVisible()
+    await expect(nav.getByRole('button', { name: 'Sources' })).toBeVisible()
   })
 
   test('ecosystem sub-tier is hidden until ecosystem is active', async ({ page }) => {
@@ -120,9 +120,9 @@ test.describe('dashboard nav', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Virtue Pool (separate deployer)' })).toBeVisible()
   })
 
-  test('useful ecosystem links are rendered at the bottom of Developers', async ({ page }) => {
+  test('useful ecosystem links are rendered at the bottom of Sources', async ({ page }) => {
     await page.goto('/')
-    await page.locator('nav').first().getByRole('button', { name: 'Developers' }).click()
+    await page.locator('nav').first().getByRole('button', { name: 'Sources' }).click()
     const explorerLink = page.getByRole('link', { name: /IOTA Explorer/ })
     await expect(explorerLink).toBeVisible()
     await expect(explorerLink).toHaveAttribute('href', /explorer\.iota\.org/)
