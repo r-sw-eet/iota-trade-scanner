@@ -14,7 +14,7 @@ const l1Visible = ref(10)
 const l2Visible = ref(10)
 const teamsVisible = ref(10)
 const shadeTeamless = ref(true)
-const hideIotaFoundation = ref(false)
+const hideIotaFoundation = ref(true)
 
 function isIotaFoundation(p: any): boolean {
   const id = p?.team?.id || ''
