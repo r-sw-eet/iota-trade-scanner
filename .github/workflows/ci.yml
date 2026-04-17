@@ -48,6 +48,9 @@ jobs:
         working-directory: website
       - run: npm run test:unit:coverage
         working-directory: website
+      - name: Enforce coverage baseline (no regression)
+        run: npm run cov:check
+        working-directory: website
       - name: Upload web coverage to Codecov
         uses: codecov/codecov-action@v5
         with:

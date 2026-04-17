@@ -8,8 +8,17 @@ export default defineVitestConfig({
       provider: 'v8',
       reporter: ['text', 'lcov', 'json-summary'],
       reportsDirectory: './coverage',
-      include: ['composables/**/*.ts', 'components/**/*.vue', 'pages/**/*.vue'],
-      exclude: ['**/*.d.ts', '**/node_modules/**'],
+      // Pages are exercised by Playwright e2e (tests/e2e), not Vitest — e2e
+      // runs don't feed Vitest coverage, so including them here would just
+      // drag the reported numbers down with false uncovered lines.
+      // ProjectCharts is a thin Chart.js wrapper with no branching logic
+      // worth unit-testing; e2e covers its rendering.
+      include: ['composables/**/*.ts', 'components/**/*.vue'],
+      exclude: [
+        '**/*.d.ts',
+        '**/node_modules/**',
+        'components/ProjectCharts.vue',
+      ],
     },
   },
 })

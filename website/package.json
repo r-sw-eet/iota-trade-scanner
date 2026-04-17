@@ -10,6 +10,7 @@
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
     "test:unit:coverage": "vitest run --coverage",
+    "cov:check": "node ../scripts/check-coverage.js website",
     "test:e2e": "playwright test"
   },
   "dependencies": {

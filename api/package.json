@@ -13,7 +13,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --config test/jest-cov.config.js --coverage",
-    "cov:check": "node scripts/check-coverage.js",
+    "cov:check": "node ../scripts/check-coverage.js api",
     "test:functional": "jest --config test/jest-functional.config.js",
     "backfill:senders": "node dist/backfill-senders"
   },
