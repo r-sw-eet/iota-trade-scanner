@@ -54,6 +54,11 @@ function toggleTeamsSort(key: TeamsKey) {
     : { key, dir: 'desc' }
 }
 
+function formatSyncTime(ts: string | undefined): string {
+  if (!ts) return '—'
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
 function sortValue(p: any, key: string): any {
   if (key === 'team') return (p.team?.name || '').toLowerCase()
   if (key === 'name' || key === 'category' || key === 'categories') return (p[key] || '').toLowerCase()
@@ -123,8 +128,8 @@ function copyCmd(text: string) {
 
 const navItems = [
   { id: 'network', label: 'Network' },
-  { id: 'economics', label: 'Economics' },
   { id: 'ecosystem', label: 'Ecosystem' },
+  { id: 'economics', label: 'Economics' },
   { id: 'how-it-works', label: 'How it works' },
   { id: 'developers', label: 'Developers' },
 ]
@@ -462,6 +467,7 @@ const projectStorageChartOptions = {
           <div class="mb-8">
             <h2 class="text-2xl font-bold text-[#f4f4f5] mb-1">Network</h2>
             <p class="text-[#71717a] text-sm">The state of the chain and how busy it is.</p>
+            <p class="text-[#52525b] text-xs mt-1">Last sync: {{ formatSyncTime(snapshot?.timestamp) }} · Next sync in 30 min</p>
           </div>
 
           <!-- Core Metrics -->
@@ -510,161 +516,13 @@ const projectStorageChartOptions = {
         </section>
 
         <!-- ==================================================== -->
-        <!-- === ECONOMICS                                     === -->
-        <!-- ==================================================== -->
-        <section id="economics" class="mb-20 scroll-mt-20">
-          <div class="mb-8">
-            <h2 class="text-2xl font-bold text-[#f4f4f5] mb-1">Economics</h2>
-            <p class="text-[#71717a] text-sm">Does the tokenomics work? Gas burn, storage pricing, and a reality check.</p>
-          </div>
-
-          <!-- Gas Burn -->
-          <div class="mb-10">
-            <h3 class="text-xs font-semibold text-[#71717a] uppercase tracking-wide mb-1">Gas Burn (previous epoch)</h3>
-            <p class="text-[#71717a] text-sm mb-4">Gas computation fees are burned — the only real deflationary force. Storage deposits are fully refundable.</p>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <MetricCard label="Gas Burned" :value="`${(snapshot.epochGasBurned || 0).toFixed(2)} IOTA`" subtitle="Permanently removed" />
-              <MetricCard label="Epoch Transactions" :value="formatCompact(snapshot.epochTransactions || 0)" subtitle="Previous epoch" />
-              <MetricCard label="Gas per Transaction" :value="`${((snapshot.gasPerTransaction || 0) * 1_000_000).toFixed(2)} µIOTA`" subtitle="Average cost" />
-              <MetricCard label="Storage Net Inflow" :value="`${(snapshot.epochStorageNetInflow || 0).toFixed(4)} IOTA`" subtitle="Temporary lock (refundable)" />
-            </div>
-          </div>
-
-          <!-- Inflation chart + Storage Pricing -->
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
-            <div class="bg-scanner-card border border-scanner-border rounded p-5">
-              <h3 class="text-sm font-semibold text-[#a1a1aa] mb-2">Inflation vs Deflation (log scale)</h3>
-              <p class="text-xs text-[#52525b] mb-3">Daily inflation dwarfs gas burn and storage fund by orders of magnitude</p>
-              <div class="h-56">
-                <Bar v-if="inflationChartData" :data="inflationChartData" :options="inflationChartOptions" />
-              </div>
-            </div>
-            <div class="bg-scanner-card border border-scanner-border rounded p-5">
-              <h3 class="text-sm font-semibold text-[#a1a1aa] mb-4">Protocol Storage Pricing</h3>
-              <table class="w-full text-sm">
-                <thead>
-                  <tr class="text-[#71717a] text-xs">
-                    <th class="text-left pb-2">Object Size</th>
-                    <th class="text-right pb-2">Cost (NANOS)</th>
-                    <th class="text-right pb-2">Cost (IOTA)</th>
-                  </tr>
-                </thead>
-                <tbody class="font-mono text-[#a1a1aa]">
-                  <tr v-for="size in [100, 500, 1000, 2000, 10000]" :key="size" class="border-t border-scanner-border-subtle">
-                    <td class="py-1.5">{{ size }} bytes</td>
-                    <td class="text-right">{{ (size * 100 * snapshot.storagePrice + 40 * snapshot.storagePrice).toLocaleString() }}</td>
-                    <td class="text-right">{{ ((size * 100 * snapshot.storagePrice + 40 * snapshot.storagePrice) / 1_000_000_000).toFixed(6) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <p class="text-xs text-[#52525b] mt-3">Formula: (bytes x obj_data_cost_refundable + obj_access_cost) x storage_gas_price ({{ snapshot.storagePrice }} NANOS/unit). Storage deposits are fully refundable.</p>
-            </div>
-          </div>
-
-          <!-- Reality Check -->
-          <div v-if="rcData">
-            <h3 class="text-xs font-semibold text-[#71717a] uppercase tracking-wide mb-1">Reality Check</h3>
-            <p class="text-[#71717a] text-sm mb-6">When does IOTA mainnet become deflationary? Adjust the sliders to model different adoption scenarios.</p>
-
-            <div class="bg-scanner-card border border-scanner-border rounded p-6">
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-6">
-                <!-- TX multiplier slider -->
-                <div>
-                  <label class="text-sm text-[#a1a1aa] block mb-2">
-                    Transaction volume: <span class="text-scanner-accent font-mono">{{ formatCompact(rcTxMultiplier) }}x</span> current
-                    <span class="text-[#52525b]">({{ formatCompact(rcData.projectedDailyTx) }} tx/day)</span>
-                  </label>
-                  <input type="range" :value="rcTxSlider" @input="rcTxSlider = Number(($event.target as HTMLInputElement).value)" min="0" max="100" step="1" class="w-full accent-scanner-accent" />
-                  <div class="flex justify-between text-xs text-[#52525b] mt-1">
-                    <span>1x</span>
-                    <span>100,000x</span>
-                  </div>
-                </div>
-
-                <!-- Gas per tx slider -->
-                <div>
-                  <label class="text-sm text-[#a1a1aa] block mb-2">
-                    Gas cost per tx: <span class="text-scanner-accent font-mono">{{ rcGasMultiplier }}x</span> current
-                    <span class="text-[#52525b]">({{ (rcData.projectedGasPerTx * 1_000_000).toFixed(1) }} µIOTA)</span>
-                  </label>
-                  <input type="range" :value="rcGasSlider" @input="rcGasSlider = Number(($event.target as HTMLInputElement).value)" min="0" max="100" step="1" class="w-full accent-scanner-accent" />
-                  <div class="flex justify-between text-xs text-[#52525b] mt-1">
-                    <span>1x</span>
-                    <span>100x</span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Results -->
-              <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div class="bg-scanner-bg rounded p-4">
-                  <p class="text-xs text-[#71717a] mb-1">Daily Inflation</p>
-                  <p class="text-lg font-bold font-mono text-claimed">+{{ formatCompact(rcData.dailyInflation) }} IOTA</p>
-                </div>
-                <div class="bg-scanner-bg rounded p-4">
-                  <p class="text-xs text-[#71717a] mb-1">Projected Daily Gas Burn</p>
-                  <p class="text-lg font-bold font-mono text-reality">-{{ formatCompact(rcData.projectedDailyGasBurn) }} IOTA</p>
-                </div>
-                <div class="bg-scanner-bg rounded p-4">
-                  <p class="text-xs text-[#71717a] mb-1">Net Daily Change</p>
-                  <p class="text-lg font-bold font-mono" :class="rcData.isDeflationary ? 'text-reality' : 'text-claimed'">
-                    {{ rcData.isDeflationary ? '' : '+' }}{{ formatCompact(rcData.netDailyInflation) }} IOTA
-                  </p>
-                </div>
-                <div class="bg-scanner-bg rounded p-4">
-                  <p class="text-xs text-[#71717a] mb-1">Deflation Coverage</p>
-                  <p class="text-lg font-bold font-mono" :class="rcData.deflationRatio >= 100 ? 'text-reality' : 'text-[#a1a1aa]'">
-                    {{ rcData.deflationRatio.toFixed(rcData.deflationRatio < 1 ? 4 : 1) }}%
-                  </p>
-                </div>
-              </div>
-
-              <!-- Progress bar -->
-              <div class="mb-4">
-                <div class="flex justify-between text-xs text-[#71717a] mb-1">
-                  <span>Gas burn vs inflation</span>
-                  <span>{{ Math.min(rcData.deflationRatio, 100).toFixed(2) }}% of break-even</span>
-                </div>
-                <div class="w-full h-3 bg-scanner-bg rounded-xs overflow-hidden">
-                  <div
-                    class="h-full rounded-xs transition-all duration-300"
-                    :class="rcData.deflationRatio >= 100 ? 'bg-reality' : 'bg-scanner-accent'"
-                    :style="{ width: `${Math.min(rcData.deflationRatio, 100)}%` }"
-                  />
-                </div>
-              </div>
-
-              <!-- Verdict -->
-              <div class="border-t border-scanner-border-subtle pt-4">
-                <p v-if="rcTxSlider === 0 && rcGasSlider === 0" class="text-sm text-[#a1a1aa]">
-                  At current usage: gas burn covers <span class="text-scanner-accent font-mono">{{ rcData.deflationRatio.toFixed(4) }}%</span> of daily inflation.
-                  Break-even requires <span class="text-scanner-accent font-mono">{{ formatCompact(rcData.breakEvenMultiplier) }}x</span> more transaction volume
-                  ({{ formatCompact(rcData.currentDailyTx * rcData.breakEvenMultiplier) }} tx/day vs current {{ formatCompact(rcData.currentDailyTx) }}).
-                </p>
-                <p v-else-if="rcData.isDeflationary" class="text-sm text-reality">
-                  Deflationary at this scenario. Net {{ formatCompact(Math.abs(rcData.netDailyInflation)) }} IOTA removed from circulation per day.
-                </p>
-                <p v-else class="text-sm text-[#a1a1aa]">
-                  Still inflationary. {{ formatCompact(rcData.netDailyInflation) }} IOTA net added per day.
-                  Need {{ formatCompact(rcData.dailyInflation / rcData.projectedGasPerTx) }} tx/day to reach break-even at this gas cost.
-                </p>
-
-                <div class="mt-3 text-xs text-[#52525b] space-y-1">
-                  <p>How it works: Validators mint {{ formatCompact(rcData.dailyInflation) }} new IOTA per epoch (validator_target_reward). Every transaction burns its gas computation fee permanently. Storage deposits are fully refundable and do not contribute to deflation.</p>
-                  <p>Sources: iota_getProtocolConfig, GraphQL epoch.totalGasFees, epoch.netInflow</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- ==================================================== -->
         <!-- === ECOSYSTEM                                     === -->
         <!-- ==================================================== -->
         <section id="ecosystem" class="mb-20 scroll-mt-20">
           <div class="mb-8">
             <h2 class="text-2xl font-bold text-[#f4f4f5] mb-1">Ecosystem</h2>
             <p class="text-[#71717a] text-sm">Who's building on IOTA — projects deployed to mainnet and the teams behind them.</p>
+            <p class="text-[#52525b] text-xs mt-1">Last sync: {{ formatSyncTime(ecosystem?.createdAt) }} · Next sync in 6 hours</p>
           </div>
 
           <p v-if="ecosystemLoading" class="text-[#71717a] text-sm mb-6">Loading ecosystem data (scanning all mainnet packages)...</p>
@@ -853,6 +711,155 @@ const projectStorageChartOptions = {
               </div>
             </div>
           </template>
+        </section>
+
+        <!-- ==================================================== -->
+        <!-- === ECONOMICS                                     === -->
+        <!-- ==================================================== -->
+        <section id="economics" class="mb-20 scroll-mt-20">
+          <div class="mb-8">
+            <h2 class="text-2xl font-bold text-[#f4f4f5] mb-1">Economics</h2>
+            <p class="text-[#71717a] text-sm">Does the tokenomics work? Gas burn, storage pricing, and a reality check.</p>
+          </div>
+
+          <!-- Gas Burn -->
+          <div class="mb-10">
+            <h3 class="text-xs font-semibold text-[#71717a] uppercase tracking-wide mb-1">Gas Burn (previous epoch)</h3>
+            <p class="text-[#71717a] text-sm mb-4">Gas computation fees are burned — the only real deflationary force. Storage deposits are fully refundable.</p>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <MetricCard label="Gas Burned" :value="`${(snapshot.epochGasBurned || 0).toFixed(2)} IOTA`" subtitle="Permanently removed" />
+              <MetricCard label="Epoch Transactions" :value="formatCompact(snapshot.epochTransactions || 0)" subtitle="Previous epoch" />
+              <MetricCard label="Gas per Transaction" :value="`${((snapshot.gasPerTransaction || 0) * 1_000_000).toFixed(2)} µIOTA`" subtitle="Average cost" />
+              <MetricCard label="Storage Net Inflow" :value="`${(snapshot.epochStorageNetInflow || 0).toFixed(4)} IOTA`" subtitle="Temporary lock (refundable)" />
+            </div>
+          </div>
+
+          <!-- Inflation chart + Storage Pricing -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
+            <div class="bg-scanner-card border border-scanner-border rounded p-5">
+              <h3 class="text-sm font-semibold text-[#a1a1aa] mb-2">Inflation vs Deflation (log scale)</h3>
+              <p class="text-xs text-[#52525b] mb-3">Daily inflation dwarfs gas burn and storage fund by orders of magnitude</p>
+              <div class="h-56">
+                <Bar v-if="inflationChartData" :data="inflationChartData" :options="inflationChartOptions" />
+              </div>
+            </div>
+            <div class="bg-scanner-card border border-scanner-border rounded p-5">
+              <h3 class="text-sm font-semibold text-[#a1a1aa] mb-4">Protocol Storage Pricing</h3>
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-[#71717a] text-xs">
+                    <th class="text-left pb-2">Object Size</th>
+                    <th class="text-right pb-2">Cost (NANOS)</th>
+                    <th class="text-right pb-2">Cost (IOTA)</th>
+                  </tr>
+                </thead>
+                <tbody class="font-mono text-[#a1a1aa]">
+                  <tr v-for="size in [100, 500, 1000, 2000, 10000]" :key="size" class="border-t border-scanner-border-subtle">
+                    <td class="py-1.5">{{ size }} bytes</td>
+                    <td class="text-right">{{ (size * 100 * snapshot.storagePrice + 40 * snapshot.storagePrice).toLocaleString() }}</td>
+                    <td class="text-right">{{ ((size * 100 * snapshot.storagePrice + 40 * snapshot.storagePrice) / 1_000_000_000).toFixed(6) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p class="text-xs text-[#52525b] mt-3">Formula: (bytes x obj_data_cost_refundable + obj_access_cost) x storage_gas_price ({{ snapshot.storagePrice }} NANOS/unit). Storage deposits are fully refundable.</p>
+            </div>
+          </div>
+
+          <!-- Reality Check -->
+          <div v-if="rcData">
+            <h3 class="text-xs font-semibold text-[#71717a] uppercase tracking-wide mb-1">Reality Check</h3>
+            <p class="text-[#71717a] text-sm mb-6">When does IOTA mainnet become deflationary? Adjust the sliders to model different adoption scenarios.</p>
+
+            <div class="bg-scanner-card border border-scanner-border rounded p-6">
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-6">
+                <!-- TX multiplier slider -->
+                <div>
+                  <label class="text-sm text-[#a1a1aa] block mb-2">
+                    Transaction volume: <span class="text-scanner-accent font-mono">{{ formatCompact(rcTxMultiplier) }}x</span> current
+                    <span class="text-[#52525b]">({{ formatCompact(rcData.projectedDailyTx) }} tx/day)</span>
+                  </label>
+                  <input type="range" :value="rcTxSlider" @input="rcTxSlider = Number(($event.target as HTMLInputElement).value)" min="0" max="100" step="1" class="w-full accent-scanner-accent" />
+                  <div class="flex justify-between text-xs text-[#52525b] mt-1">
+                    <span>1x</span>
+                    <span>100,000x</span>
+                  </div>
+                </div>
+
+                <!-- Gas per tx slider -->
+                <div>
+                  <label class="text-sm text-[#a1a1aa] block mb-2">
+                    Gas cost per tx: <span class="text-scanner-accent font-mono">{{ rcGasMultiplier }}x</span> current
+                    <span class="text-[#52525b]">({{ (rcData.projectedGasPerTx * 1_000_000).toFixed(1) }} µIOTA)</span>
+                  </label>
+                  <input type="range" :value="rcGasSlider" @input="rcGasSlider = Number(($event.target as HTMLInputElement).value)" min="0" max="100" step="1" class="w-full accent-scanner-accent" />
+                  <div class="flex justify-between text-xs text-[#52525b] mt-1">
+                    <span>1x</span>
+                    <span>100x</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Results -->
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="bg-scanner-bg rounded p-4">
+                  <p class="text-xs text-[#71717a] mb-1">Daily Inflation</p>
+                  <p class="text-lg font-bold font-mono text-claimed">+{{ formatCompact(rcData.dailyInflation) }} IOTA</p>
+                </div>
+                <div class="bg-scanner-bg rounded p-4">
+                  <p class="text-xs text-[#71717a] mb-1">Projected Daily Gas Burn</p>
+                  <p class="text-lg font-bold font-mono text-reality">-{{ formatCompact(rcData.projectedDailyGasBurn) }} IOTA</p>
+                </div>
+                <div class="bg-scanner-bg rounded p-4">
+                  <p class="text-xs text-[#71717a] mb-1">Net Daily Change</p>
+                  <p class="text-lg font-bold font-mono" :class="rcData.isDeflationary ? 'text-reality' : 'text-claimed'">
+                    {{ rcData.isDeflationary ? '' : '+' }}{{ formatCompact(rcData.netDailyInflation) }} IOTA
+                  </p>
+                </div>
+                <div class="bg-scanner-bg rounded p-4">
+                  <p class="text-xs text-[#71717a] mb-1">Deflation Coverage</p>
+                  <p class="text-lg font-bold font-mono" :class="rcData.deflationRatio >= 100 ? 'text-reality' : 'text-[#a1a1aa]'">
+                    {{ rcData.deflationRatio.toFixed(rcData.deflationRatio < 1 ? 4 : 1) }}%
+                  </p>
+                </div>
+              </div>
+
+              <!-- Progress bar -->
+              <div class="mb-4">
+                <div class="flex justify-between text-xs text-[#71717a] mb-1">
+                  <span>Gas burn vs inflation</span>
+                  <span>{{ Math.min(rcData.deflationRatio, 100).toFixed(2) }}% of break-even</span>
+                </div>
+                <div class="w-full h-3 bg-scanner-bg rounded-xs overflow-hidden">
+                  <div
+                    class="h-full rounded-xs transition-all duration-300"
+                    :class="rcData.deflationRatio >= 100 ? 'bg-reality' : 'bg-scanner-accent'"
+                    :style="{ width: `${Math.min(rcData.deflationRatio, 100)}%` }"
+                  />
+                </div>
+              </div>
+
+              <!-- Verdict -->
+              <div class="border-t border-scanner-border-subtle pt-4">
+                <p v-if="rcTxSlider === 0 && rcGasSlider === 0" class="text-sm text-[#a1a1aa]">
+                  At current usage: gas burn covers <span class="text-scanner-accent font-mono">{{ rcData.deflationRatio.toFixed(4) }}%</span> of daily inflation.
+                  Break-even requires <span class="text-scanner-accent font-mono">{{ formatCompact(rcData.breakEvenMultiplier) }}x</span> more transaction volume
+                  ({{ formatCompact(rcData.currentDailyTx * rcData.breakEvenMultiplier) }} tx/day vs current {{ formatCompact(rcData.currentDailyTx) }}).
+                </p>
+                <p v-else-if="rcData.isDeflationary" class="text-sm text-reality">
+                  Deflationary at this scenario. Net {{ formatCompact(Math.abs(rcData.netDailyInflation)) }} IOTA removed from circulation per day.
+                </p>
+                <p v-else class="text-sm text-[#a1a1aa]">
+                  Still inflationary. {{ formatCompact(rcData.netDailyInflation) }} IOTA net added per day.
+                  Need {{ formatCompact(rcData.dailyInflation / rcData.projectedGasPerTx) }} tx/day to reach break-even at this gas cost.
+                </p>
+
+                <div class="mt-3 text-xs text-[#52525b] space-y-1">
+                  <p>How it works: Validators mint {{ formatCompact(rcData.dailyInflation) }} new IOTA per epoch (validator_target_reward). Every transaction burns its gas computation fee permanently. Storage deposits are fully refundable and do not contribute to deflation.</p>
+                  <p>Sources: iota_getProtocolConfig, GraphQL epoch.totalGasFees, epoch.netInflow</p>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <!-- ==================================================== -->
