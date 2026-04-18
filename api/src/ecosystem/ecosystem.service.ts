@@ -6,7 +6,27 @@ import { createHash } from 'crypto';
 import { EcosystemSnapshot } from './schemas/ecosystem-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
 import { ALL_PROJECTS, ProjectDefinition } from './projects';
-import { Team, getTeam, getTeamByDeployer } from './teams';
+import { ALL_TEAMS, Team, getTeam } from './teams';
+
+/**
+ * Whether a project has any synchronous match criterion — i.e. can be matched
+ * directly from a package's address/deployer/modules without fingerprint
+ * probing or team-deployer routing. Projects with NO synchronous criteria
+ * are "routing-only" (e.g. `IOTA Foundation (Testing)`): they sit empty in
+ * the registry and only get populated when team-deployer routing attributes
+ * an aggregate-bucket package to them.
+ */
+function hasSyncMatch(def: ProjectDefinition): boolean {
+  const m = def.match;
+  return (
+    (m.packageAddresses?.length ?? 0) > 0 ||
+    (m.deployerAddresses?.length ?? 0) > 0 ||
+    (m.exact?.length ?? 0) > 0 ||
+    (m.all?.length ?? 0) > 0 ||
+    (m.any?.length ?? 0) > 0 ||
+    (m.minModules ?? 0) > 0
+  );
+}
 
 const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
 
@@ -300,15 +320,8 @@ export class EcosystemService implements OnModuleInit {
     const lowerAddr = address.toLowerCase();
     const lowerDeployer = deployer?.toLowerCase() ?? null;
     for (const def of ALL_PROJECTS) {
+      if (!hasSyncMatch(def)) continue;
       const { match } = def;
-      const hasSyncCriteria =
-        (match.packageAddresses?.length ?? 0) > 0 ||
-        (match.deployerAddresses?.length ?? 0) > 0 ||
-        (match.exact?.length ?? 0) > 0 ||
-        (match.all?.length ?? 0) > 0 ||
-        (match.any?.length ?? 0) > 0 ||
-        (match.minModules ?? 0) > 0;
-      if (!hasSyncCriteria) continue;
 
       if (match.packageAddresses?.length) {
         if (!match.packageAddresses.some((a) => a.toLowerCase() === lowerAddr)) continue;
@@ -424,15 +437,32 @@ export class EcosystemService implements OnModuleInit {
       let splitDeployer: string | undefined;
       if (def.splitByDeployer) {
         const deployer = pkg.previousTransactionBlock?.sender?.address?.toLowerCase() ?? 'unknown';
-        // Team routing: if this deployer is claimed by a team with exactly
-        // one project, attribute the package to that project instead of
-        // leaving it in the aggregate bucket.
-        const team = getTeamByDeployer(deployer);
-        const teamProjects = team ? ALL_PROJECTS.filter((p) => p.teamId === team.id) : [];
-        if (teamProjects.length === 1) {
+        // Team routing: route aggregate-bucket packages to a team's single
+        // project ONLY when that project has NO synchronous match rule —
+        // i.e. it's a routing-only project like IF Testing, designed to
+        // receive team-deployer-routed packages. A project with its own
+        // match rule (e.g. TWIN's `{all: [verifiable_storage]}`) must never
+        // absorb unrelated packages from a shared deployer; those should
+        // fall through to the aggregate bucket's split-by-deployer branch.
+        //
+        // Iterate every team claiming the deployer because one deployer can
+        // belong to multiple teams (e.g. `0x164625aa…` is on both TWIN and
+        // IF Testing). Pick the first team whose single project is
+        // routing-only.
+        const candidateTeams = ALL_TEAMS.filter((t) =>
+          t.deployers.some((d) => d.toLowerCase() === deployer),
+        );
+        let routed = false;
+        for (const team of candidateTeams) {
+          const teamProjects = ALL_PROJECTS.filter((p) => p.teamId === team.id);
+          if (teamProjects.length !== 1) continue;
+          if (hasSyncMatch(teamProjects[0])) continue;
           def = teamProjects[0];
           mapKey = def.name;
-        } else {
+          routed = true;
+          break;
+        }
+        if (!routed) {
           splitDeployer = deployer;
           mapKey = `${def.name}::${deployer}`;
         }

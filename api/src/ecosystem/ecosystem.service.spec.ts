@@ -114,10 +114,28 @@ jest.mock('./projects', () => {
       name: 'SoloTeam',
       layer: 'L1',
       category: 'NFT',
-      description: 'Sole project of team-solo — claims any Aggregate package deployed by team-solo.',
+      description: 'Sole project of team-solo — routing-only (empty match); receives Aggregate packages routed via team-deployer.',
       urls: [],
       teamId: 'team-solo',
-      match: { any: ['nft'] },
+      match: {},
+    },
+    {
+      name: 'StrictSolo',
+      layer: 'L1',
+      category: 'Test',
+      description: 'Sole project of team-strict — has its own synchronous match rule, so it must NOT absorb Aggregate packages from the shared deployer (regression guard for the TWIN/IF-Testing shared-deployer bug).',
+      urls: [],
+      teamId: 'team-strict',
+      match: { all: ['strict_module'] },
+    },
+    {
+      name: 'SharedRoutingSolo',
+      layer: 'L1',
+      category: 'Test',
+      description: 'Sole project of team-shared-routing — routing-only (empty match), shares the deployer 0xSTRICT with StrictSolo. Tests that routing iterates past a sync-match team and lands on the routing-only team (TWIN + IF-Testing in production).',
+      urls: [],
+      teamId: 'team-shared-routing',
+      match: {},
     },
     {
       name: 'TeamedA',
@@ -144,6 +162,8 @@ jest.mock('./projects', () => {
 jest.mock('./teams', () => {
   const teams = [
     { id: 'team-solo', name: 'Solo', deployers: ['0xSOLO'], logo: '/logos/solo.svg' },
+    { id: 'team-strict', name: 'Strict', deployers: ['0xSTRICT'] },
+    { id: 'team-shared-routing', name: 'Shared Routing', deployers: ['0xSTRICT'] },
     { id: 'team-multi', name: 'Multi', deployers: ['0xMULTI'] },
   ];
   return {
@@ -1026,6 +1046,41 @@ describe('EcosystemService', () => {
       const aggNames = snap.l1.map((p: any) => p.name).filter((n: string) => n.startsWith('Aggregate'));
       expect(aggNames).toHaveLength(1);
       expect(aggNames[0]).toMatch(/\(deployer-[0-9a-f]{6}\)$/);
+    });
+
+    it('does NOT route splitByDeployer packages to a team whose single project has a sync match rule', async () => {
+      // Regression guard for the TWIN / IF-Testing shared-deployer bug.
+      // 0xSTRICT is claimed by BOTH team-strict (single project StrictSolo
+      // has `{all: [strict_module]}`, a sync rule) and team-shared-routing
+      // (single project SharedRoutingSolo has empty match — routing-only).
+      // An nft package at 0xSTRICT must skip StrictSolo and land on
+      // SharedRoutingSolo: the routing logic iterates candidate teams and
+      // picks the first whose single project is routing-only.
+      (global as any).fetch = scriptFetch({
+        packages: [pkg({ address: '0xnft-strict', modules: ['nft'], deployer: '0xSTRICT' })],
+        objects: {},
+      });
+      const snap = await runCapture();
+      const names = snap.l1.map((p: any) => p.name);
+      expect(names).toContain('SharedRoutingSolo');
+      expect(names).not.toContain('StrictSolo');
+      expect(names.some((n: string) => n.startsWith('Aggregate'))).toBe(false);
+    });
+
+    it('leaves package in Aggregate bucket when no candidate team has a routing-only project', async () => {
+      // Counterpart to the previous test: if every team claiming the
+      // deployer has a sync-match project, no routing happens and the
+      // package stays in the Aggregate bucket split by deployer.
+      // 0xstrict-only is only claimed by a transient single-match team —
+      // simulated here by using a deployer not in the mock team list at
+      // all; the effect is the same.
+      (global as any).fetch = scriptFetch({
+        packages: [pkg({ address: '0xnft-orphan', modules: ['nft'], deployer: '0xorphan' })],
+        objects: {},
+      });
+      const snap = await runCapture();
+      const aggNames = snap.l1.map((p: any) => p.name).filter((n: string) => n.startsWith('Aggregate'));
+      expect(aggNames).toHaveLength(1);
     });
 
     it('falls back to "unknown" deployer string when previousTransactionBlock is missing', async () => {
