@@ -13,6 +13,7 @@ module.exports = {
     '!**/*.spec.ts',
     '!main.ts',
     '!backfill-senders.ts',
+    '!scan-unattributed-cli.ts',
     '!app.module.ts',
     '!**/*.module.ts',
     '!**/schemas/**',

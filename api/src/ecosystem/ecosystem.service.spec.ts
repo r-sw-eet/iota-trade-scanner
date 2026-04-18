@@ -581,6 +581,68 @@ describe('EcosystemService', () => {
     });
   });
 
+  // ---------- probeIdentityFields ----------
+
+  describe('probeIdentityFields', () => {
+    const probe = (addr: string) => (service as any).probeIdentityFields(addr);
+
+    it('extracts known identifier keys and sample type from a live object', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{
+                asMoveObject: {
+                  contents: {
+                    type: { repr: '0xaa::nft::NFT' },
+                    json: { tag: 'salus', issuer: '0xdead', name: 'Doc #1', noise: 42 },
+                  },
+                },
+              }],
+            },
+          },
+        }),
+      });
+      const { identifiers, objectType } = await probe('0xaa');
+      expect(objectType).toBe('0xaa::nft::NFT');
+      expect(identifiers).toEqual(expect.arrayContaining([
+        'tag: salus',
+        'name: Doc #1',
+      ]));
+      // non-strings dropped
+      expect(identifiers.find((s: string) => s.startsWith('noise:'))).toBeUndefined();
+    });
+
+    it('drops strings that just echo a full address', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{
+                asMoveObject: {
+                  contents: {
+                    type: { repr: '0xaa::m::T' },
+                    json: { owner: '0x' + 'a'.repeat(64), label: 'Human Label' },
+                  },
+                },
+              }],
+            },
+          },
+        }),
+      });
+      const { identifiers } = await probe('0xaa');
+      expect(identifiers).toContain('label: Human Label');
+      expect(identifiers.find((s: string) => s.startsWith('owner:'))).toBeUndefined();
+    });
+
+    it('returns empty on error without throwing', async () => {
+      fetchMock.mockResolvedValue({ json: async () => ({ errors: [{ message: 'boom' }] }) });
+      const res = await probe('0xaa');
+      expect(res.identifiers).toEqual([]);
+      expect(res.objectType).toBeNull();
+    });
+  });
+
   // ---------- matchByFingerprint ----------
 
   describe('matchByFingerprint', () => {
@@ -1448,6 +1510,50 @@ describe('EcosystemService', () => {
       expect(dam.events).toBe(11 + 13 + 17);
       // Latest package is 0xdpB, so its module set is what `modules` shows.
       expect(dam.modules).toEqual(['gate', 'other']);
+    });
+
+    it('collects unmatched packages into unattributed clusters, grouped by deployer, with probed identifiers', async () => {
+      // Two packages, same unknown deployer, module `genericNFT` that matches
+      // nothing in ALL_PROJECTS. Probe returns a usable `tag` and `name`.
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xunknown1', modules: ['genericNFT'], deployer: '0xunknownteam', storageRebate: '500000000' }),
+          pkg({ address: '0xunknown2', modules: ['genericNFT'], deployer: '0xunknownteam', storageRebate: '1500000000' }),
+        ],
+        objects: {
+          '0xunknown2': {
+            tag: 'mystery-project',
+            name: 'Mystery Thing',
+          },
+        },
+      });
+      const snap = await runCapture();
+      expect(snap.totalProjects).toBe(0);
+      expect(snap.unattributed).toHaveLength(1);
+      const cluster = snap.unattributed[0];
+      expect(cluster.deployer).toBe('0xunknownteam');
+      expect(cluster.packages).toBe(2);
+      // Latest package = highest storage rebate = 0xunknown2
+      expect(cluster.latestPackageAddress).toBe('0xunknown2');
+      expect(cluster.firstPackageAddress).toBe('0xunknown1');
+      expect(cluster.modules).toContain('genericNFT');
+      expect(cluster.sampleIdentifiers).toEqual(expect.arrayContaining([
+        'tag: mystery-project',
+        'name: Mystery Thing',
+      ]));
+      expect(snap.totalUnattributedPackages).toBe(2);
+    });
+
+    it('buckets unmatched packages with null deployers under the "unknown" key', async () => {
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xorph1', modules: ['orphan'], deployer: null }),
+        ],
+      });
+      const snap = await runCapture();
+      expect(snap.unattributed).toHaveLength(1);
+      expect(snap.unattributed[0].deployer).toBe('unknown');
+      expect(snap.totalUnattributedPackages).toBe(1);
     });
   });
 });

@@ -1,4 +1,4 @@
-.PHONY: dev dev-api dev-web build build-api build-web image local down clean hooks
+.PHONY: dev dev-api dev-web build build-api build-web image local down clean hooks seed seed-full
 
 # --- Setup ---
 
@@ -24,6 +24,19 @@ dev-web:
 
 down:
 	docker compose down -v
+
+# Seed local Mongo with the current production snapshot so localhost:3000 has
+# data immediately. The in-flight local capture will naturally supersede it
+# when it finishes writing a fresh snapshot with the full ProjectDefinitions
+# (including the new `unattributed` field).
+seed:
+	./scripts/seed-from-prod.sh
+
+# Like `seed`, but also runs the mainnet GraphQL scan that populates
+# `unattributed[]` — needed to preview the new Unattributed section locally
+# before prod has it. Takes ~5 min vs. a few seconds for `seed`.
+seed-full:
+	SCAN_UNATTRIBUTED=1 ./scripts/seed-from-prod.sh
 
 # --- Build ---
 

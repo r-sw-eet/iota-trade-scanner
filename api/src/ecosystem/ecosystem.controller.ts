@@ -11,7 +11,17 @@ export class EcosystemController {
   @Get()
   async getProjects() {
     const data = await this.ecosystemService.getLatest();
-    return data ?? { l1: [], l2: [], totalProjects: 0, totalEvents: 0, totalStorageIota: 0, networkTxTotal: 0, txRates: {} };
+    return data ?? {
+      l1: [],
+      l2: [],
+      unattributed: [],
+      totalProjects: 0,
+      totalEvents: 0,
+      totalStorageIota: 0,
+      totalUnattributedPackages: 0,
+      networkTxTotal: 0,
+      txRates: {},
+    };
   }
 
   @Get('teams')

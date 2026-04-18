@@ -27,13 +27,27 @@ export class ProjectDoc {
   @Prop({ type: String, default: null }) attribution: string | null;
 }
 
+@Schema()
+export class UnattributedClusterDoc {
+  @Prop() deployer: string;
+  @Prop() packages: number;
+  @Prop() firstPackageAddress: string;
+  @Prop() latestPackageAddress: string;
+  @Prop() storageIota: number;
+  @Prop({ type: [String] }) modules: string[];
+  @Prop({ type: [String] }) sampleIdentifiers: string[];
+  @Prop({ type: String, default: null }) sampledObjectType: string | null;
+}
+
 @Schema({ timestamps: true })
 export class EcosystemSnapshot extends Document {
   @Prop({ type: [ProjectDoc] }) l1: ProjectDoc[];
   @Prop({ type: [ProjectDoc] }) l2: ProjectDoc[];
+  @Prop({ type: [UnattributedClusterDoc], default: [] }) unattributed: UnattributedClusterDoc[];
   @Prop() totalProjects: number;
   @Prop() totalEvents: number;
   @Prop() totalStorageIota: number;
+  @Prop({ default: 0 }) totalUnattributedPackages: number;
   @Prop() networkTxTotal: number;
   @Prop({ type: Object }) txRates: Record<string, number>;
 }

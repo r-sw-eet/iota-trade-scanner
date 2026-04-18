@@ -56,14 +56,15 @@ Revisit after several ecosystem snapshots (once enough data has landed post-2026
 
 ## Update mechanism proposals
 
-New projects and teams are only added by hand-editing source files and redeploying — the 6h cron only re-scans against already-curated defs. Unmatched packages are silently dropped at `ecosystem.service.ts:383` (`if (!def) continue;`), so there's zero visibility into what's missing. Proposals, smallest-to-largest:
+New projects and teams are only added by hand-editing source files and redeploying — the 6h cron only re-scans against already-curated defs. Originally unmatched packages were silently dropped; the first three items below now ship as the **Unattributed** section on the dashboard (after L2), backed by `EcosystemSnapshot.unattributed[]`.
 
-- [ ] **Unmatched-package bucket in the snapshot** — at the `if (!def) continue` branch, push `{address, modules[], deployer, storageIota, firstSeenAt}` into an `unmatchedPackages` array on the ecosystem snapshot. ~15 lines, no new schema tables. Enables everything below.
-- [ ] **Group unmatched by deployer** — when serving the bucket, group by deployer and include per-group package count + shared module signature. A deployer with ≥2 packages sharing module names is almost always one uncurated project/team.
-- [ ] **`/triage` page on the website** — render the grouped bucket. Columns: deployer, package count, module fingerprint, storage, total events (reuse existing `countEvents`). One click reveals the packages. Becomes the working queue for writing new `ProjectDefinition`/`Team` files.
-- [ ] **Top-N warning log after each scan** — after `fetchFull`, log `[triage] N unmatched packages; top deployer X has Y packages across modules [a,b,c]`. Surfaces new onboarding activity in cron logs even without visiting `/triage`.
-- [ ] **Enhanced anomalous-deployer warnings** — today's warning (`ecosystem.service.ts:432-435`) only fires when a matched project has an unknown deployer. Consider also logging: (a) known-team deployer publishing a package that matches *no* def (likely a new project on an existing team); (b) module signatures matching a fingerprint-only def but failing the issuer/tag check (possible fork or rename).
-- [ ] **Curation diff tooling** — script that compares current snapshot's unmatched bucket against the last one and prints newly-appeared deployers. Turns the triage queue into a streaming signal rather than a full re-scan each time.
+- [x] **Unmatched-package bucket in the snapshot** — clustered by deployer at `ecosystem.service.ts` (see `UnattributedCluster`). Probes one Move object per cluster and extracts identifying string fields (`tag`, `name`, `issuer`, `url`, …) so Salus-style self-attestation in object contents is surfaced, not just module names.
+- [x] **Group unmatched by deployer** — one row per deployer, sum of packages + storage, union of module names.
+- [x] **Website surface** — rendered as the third section under Ecosystem → Projects, after L2. No per-package drill-down yet; deployer and latest package address link to the IOTA explorer.
+- [ ] **Top-N warning log after each scan** — today we log `Unattributed: N deployer cluster(s), M package(s)`. Extend to include the top-3 deployers by package count + their module signatures, so cron logs surface new onboarding activity.
+- [ ] **Enhanced anomalous-deployer warnings** — today's warning (`ecosystem.service.ts` `[${def.name}] N deployer(s) not in team …`) only fires when a matched project has an unknown deployer. Consider also logging: (a) known-team deployer publishing a package that matches *no* def (likely a new project on an existing team); (b) module signatures matching a fingerprint-only def but failing the issuer/tag check (possible fork or rename).
+- [ ] **Curation diff tooling** — compare this snapshot's `unattributed[]` against the previous and print newly-appeared deployers. Turns the triage feed into a streaming signal rather than a full re-scan each time.
+- [ ] **Event / unique-sender counts on unattributed clusters** — ranking is currently by package count → storage. Adding event and unique-sender totals would let a loud-but-single-package deployer rise above noisy long-tail ones; cost is one `countEvents` + `updateSendersForModule` pass per cluster, which is why it's deferred (cheap to add once the cron budget allows).
 
 ## Storage deposit lifetime analysis
 

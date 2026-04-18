@@ -13,6 +13,7 @@ const ecosystemLoading = ref(true)
 const l1Visible = ref(10)
 const l2Visible = ref(10)
 const teamsVisible = ref(10)
+const unattributedVisible = ref(20)
 const l1EventsChartVisible = ref(10)
 const l1StorageChartVisible = ref(10)
 const l2TvlChartVisible = ref(10)
@@ -40,10 +41,12 @@ type SortDir = 'asc' | 'desc'
 type L1Key = 'name' | 'team' | 'category' | 'events' | 'uniqueSenders' | 'storageIota' | 'tvl' | 'packages'
 type L2Key = 'name' | 'category' | 'tvl'
 type TeamsKey = 'name' | 'categories' | 'projectCount' | 'events' | 'storageIota' | 'tvl'
+type UnattributedKey = 'deployer' | 'packages' | 'storageIota'
 
 const l1Sort = ref<{ key: L1Key | null; dir: SortDir }>({ key: 'events', dir: 'desc' })
 const l2Sort = ref<{ key: L2Key | null; dir: SortDir }>({ key: 'tvl', dir: 'desc' })
 const teamsSort = ref<{ key: TeamsKey | null; dir: SortDir }>({ key: 'events', dir: 'desc' })
+const unattributedSort = ref<{ key: UnattributedKey | null; dir: SortDir }>({ key: 'packages', dir: 'desc' })
 
 function toggleL1Sort(key: L1Key) {
   l1Sort.value = l1Sort.value.key === key
@@ -58,6 +61,11 @@ function toggleL2Sort(key: L2Key) {
 function toggleTeamsSort(key: TeamsKey) {
   teamsSort.value = teamsSort.value.key === key
     ? { key, dir: teamsSort.value.dir === 'asc' ? 'desc' : 'asc' }
+    : { key, dir: 'desc' }
+}
+function toggleUnattributedSort(key: UnattributedKey) {
+  unattributedSort.value = unattributedSort.value.key === key
+    ? { key, dir: unattributedSort.value.dir === 'asc' ? 'desc' : 'asc' }
     : { key, dir: 'desc' }
 }
 
@@ -92,6 +100,12 @@ function sortActive(current: { key: string | null; dir: SortDir }, key: string):
 
 const l1Sorted = computed(() => sortRows(l1Filtered.value, l1Sort.value))
 const l2Sorted = computed(() => sortRows(ecosystem.value?.l2 ?? [], l2Sort.value))
+const unattributedSorted = computed(() => sortRows(ecosystem.value?.unattributed ?? [], unattributedSort.value))
+
+function shortAddr(addr: string): string {
+  if (!addr || addr.length < 14) return addr
+  return `${addr.slice(0, 8)}…${addr.slice(-6)}`
+}
 
 function toSlug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
@@ -735,6 +749,63 @@ const projectTvlChartOptions = {
                 <div v-if="l2Visible < l2Sorted.length" class="mt-4 text-center">
                   <button @click="l2Visible += 10" class="px-4 py-2 text-sm text-status-active border border-scanner-border rounded-sm hover:bg-scanner-card transition-colors">
                     Show more ({{ l2Sorted.length - l2Visible }} remaining)
+                  </button>
+                </div>
+              </div>
+
+              <!-- Unattributed — deployers whose packages don't match any known project -->
+              <div v-if="ecosystem.unattributed?.length" class="mb-8">
+                <h3 class="text-sm font-semibold text-status-active text-center mb-2">
+                  Unattributed ({{ ecosystem.unattributed.length }} deployer{{ ecosystem.unattributed.length === 1 ? '' : 's' }},
+                  {{ ecosystem.totalUnattributedPackages }} package{{ ecosystem.totalUnattributedPackages === 1 ? '' : 's' }})
+                </h3>
+                <p class="text-xs text-[#71717a] text-center max-w-2xl mx-auto mb-6">
+                  Packages published on mainnet that no current project definition claims. Clustered by deployer; sample identifiers are string fields extracted from one Move object per cluster — these are discovery leads, not attributions.
+                </p>
+
+                <div class="overflow-x-auto">
+                  <table class="w-full">
+                    <thead>
+                      <tr class="text-[#71717a] text-sm border-b border-scanner-border select-none">
+                        <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('deployer')">Deployer<span class="ml-1" :class="sortActive(unattributedSort, 'deployer') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'deployer') }}</span></th>
+                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('packages')">Packages<span class="ml-1" :class="sortActive(unattributedSort, 'packages') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'packages') }}</span></th>
+                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(unattributedSort, 'storageIota') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'storageIota') }}</span></th>
+                        <th class="text-left pb-2 pr-4 whitespace-nowrap">Modules</th>
+                        <th class="text-left pb-2 pr-4">Sample identifiers</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="c in unattributedSorted.slice(0, unattributedVisible)" :key="c.deployer + c.latestPackageAddress" class="border-t border-scanner-border-subtle align-top">
+                        <td class="py-3 pr-4">
+                          <a v-if="c.deployer !== 'unknown'" :href="`https://explorer.iota.org/address/${c.deployer}?network=mainnet`" target="_blank" rel="noopener" class="font-mono text-sm text-status-active hover:underline" :title="c.deployer">{{ shortAddr(c.deployer) }}</a>
+                          <span v-else class="font-mono text-sm text-[#71717a]">unknown</span>
+                          <div class="text-xs text-[#52525b] mt-1">
+                            latest:
+                            <a :href="`https://explorer.iota.org/object/${c.latestPackageAddress}?network=mainnet`" target="_blank" rel="noopener" class="font-mono hover:text-status-active" :title="c.latestPackageAddress">{{ shortAddr(c.latestPackageAddress) }}</a>
+                          </div>
+                        </td>
+                        <td class="py-3 pr-4 text-right font-mono text-base text-[#f4f4f5]">{{ c.packages }}</td>
+                        <td class="py-3 pr-4 text-right font-mono text-base text-[#f4f4f5]">{{ c.storageIota.toFixed(2) }}</td>
+                        <td class="py-3 pr-4">
+                          <div class="flex flex-wrap gap-1 max-w-xs">
+                            <span v-for="m in c.modules.slice(0, 6)" :key="m" class="px-1.5 py-0.5 text-xs font-mono bg-scanner-elevated text-[#a1a1aa] rounded-xs">{{ m }}</span>
+                            <span v-if="c.modules.length > 6" class="px-1.5 py-0.5 text-xs text-[#52525b]">+{{ c.modules.length - 6 }}</span>
+                          </div>
+                        </td>
+                        <td class="py-3 pr-4">
+                          <div v-if="c.sampleIdentifiers?.length" class="flex flex-wrap gap-1 max-w-md">
+                            <span v-for="(id, i) in c.sampleIdentifiers.slice(0, 6)" :key="i" class="px-1.5 py-0.5 text-xs font-mono bg-scanner-elevated text-[#e4e4e7] rounded-xs" :title="id">{{ id.length > 40 ? id.slice(0, 40) + '…' : id }}</span>
+                            <span v-if="c.sampleIdentifiers.length > 6" class="px-1.5 py-0.5 text-xs text-[#52525b]">+{{ c.sampleIdentifiers.length - 6 }}</span>
+                          </div>
+                          <span v-else class="text-xs text-[#52525b]">—</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div v-if="unattributedVisible < unattributedSorted.length" class="mt-4 text-center">
+                  <button @click="unattributedVisible += 20" class="px-4 py-2 text-sm text-status-active border border-scanner-border rounded-sm hover:bg-scanner-card transition-colors">
+                    Show more ({{ unattributedSorted.length - unattributedVisible }} remaining)
                   </button>
                 </div>
               </div>

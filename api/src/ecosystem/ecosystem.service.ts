@@ -30,6 +30,29 @@ function hasSyncMatch(def: ProjectDefinition): boolean {
 
 const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
 
+/**
+ * A bucket of on-chain packages whose deployer doesn't match any known team
+ * and whose modules/objects don't match any ProjectDefinition. Produced by
+ * `fetchFull` to surface unlabeled activity that a human should investigate
+ * and, where appropriate, promote into a proper `ProjectDefinition`.
+ *
+ * Clustering is by deployer (lowercase) because real-world teams typically
+ * ship multiple packages from one address (Salus has ~60). One row per
+ * deployer keeps the discovery feed scannable.
+ */
+export interface UnattributedCluster {
+  deployer: string;
+  packages: number;
+  firstPackageAddress: string;
+  latestPackageAddress: string;
+  storageIota: number;
+  modules: string[];
+  /** `key:value` pairs extracted from a sampled Move object (tag, name, url, …). */
+  sampleIdentifiers: string[];
+  /** Fully-qualified type of the object we probed, for provenance. */
+  sampledObjectType: string | null;
+}
+
 export interface Project {
   slug: string;
   name: string;
@@ -394,6 +417,62 @@ export class EcosystemService implements OnModuleInit {
     return null;
   }
 
+  /**
+   * Deep identity probe for an unattributed package. Queries any Move object
+   * whose type starts with `<pkg>` (GraphQL's `type` filter supports prefix
+   * matching — verified empirically against `pkg` alone and `pkg::mod`).
+   *
+   * Extracts short string-valued fields from the sampled object's JSON. The
+   * point is to surface self-attestation — e.g. Salus's `tag: "salus"` or an
+   * `issuer`/`url`/`collection_name` — that a package-level ProjectDefinition
+   * matcher would miss because module names are generic.
+   */
+  private async probeIdentityFields(
+    pkgAddress: string,
+  ): Promise<{ identifiers: string[]; objectType: string | null }> {
+    const identifierKeys = new Set([
+      'tag', 'name', 'issuer', 'project', 'protocol',
+      'collection_name', 'collection', 'title', 'symbol', 'ticker',
+      'brand', 'url', 'website', 'publisher', 'creator', 'author',
+    ]);
+    const idents = new Set<string>();
+    let sampledType: string | null = null;
+
+    try {
+      const data: any = await this.graphql(`{
+        objects(filter: { type: "${pkgAddress}" }, first: 3) {
+          nodes { asMoveObject { contents { type { repr } json } } }
+        }
+      }`);
+      const nodes = data.objects?.nodes ?? [];
+      for (const n of nodes) {
+        const json = n.asMoveObject?.contents?.json;
+        const typeRepr = n.asMoveObject?.contents?.type?.repr as string | undefined;
+        if (!json) continue;
+        if (!sampledType && typeRepr) sampledType = typeRepr;
+        for (const [k, v] of Object.entries(json)) {
+          if (typeof v !== 'string') continue;
+          const trimmed = v.trim();
+          if (!trimmed || trimmed.length > 80) continue;
+          const keyLower = k.toLowerCase();
+          const looksIdentifying =
+            identifierKeys.has(keyLower) ||
+            /^https?:\/\//.test(trimmed) ||
+            /^[A-Za-z][A-Za-z0-9 _\-.:/]{2,}$/.test(trimmed);
+          if (!looksIdentifying) continue;
+          // Skip fields that just echo the package address.
+          if (trimmed.toLowerCase().startsWith('0x') && trimmed.length > 40) continue;
+          idents.add(`${k}: ${trimmed}`);
+          if (idents.size >= 20) break;
+        }
+        if (idents.size >= 20) break;
+      }
+    } catch {
+      // Probe is best-effort; swallow and return whatever we have.
+    }
+    return { identifiers: Array.from(idents), objectType: sampledType };
+  }
+
   private async matchByFingerprint(mods: Set<string>, address: string): Promise<ProjectDefinition | null> {
     for (const def of ALL_PROJECTS) {
       const fp = def.match.fingerprint;
@@ -420,6 +499,9 @@ export class EcosystemService implements OnModuleInit {
     }
 
     const projectMap = new Map<string, { def: ProjectDefinition; packages: PackageInfo[]; splitDeployer?: string }>();
+    // Unmatched packages grouped by deployer. `unknown` collects packages
+    // whose deployer resolves to null (framework / legacy publish records).
+    const unattributedByDeployer = new Map<string, PackageInfo[]>();
     for (const pkg of allPackages) {
       if (pkg.address.startsWith('0x000000000000000000000000000000000000000000000000000000000000000')
         && !claimedAddresses.has(pkg.address.toLowerCase())) continue;
@@ -433,7 +515,13 @@ export class EcosystemService implements OnModuleInit {
         if (fp && fp.name !== def.name) def = fp;
       }
       if (!def) def = await this.matchByFingerprint(mods, pkg.address);
-      if (!def) continue;
+      if (!def) {
+        const key = pkgDeployer?.toLowerCase() ?? 'unknown';
+        const bucket = unattributedByDeployer.get(key);
+        if (bucket) bucket.push(pkg);
+        else unattributedByDeployer.set(key, [pkg]);
+        continue;
+      }
 
       let mapKey = def.name;
       let splitDeployer: string | undefined;
@@ -638,6 +726,54 @@ export class EcosystemService implements OnModuleInit {
 
     projects.sort((a, b) => b.events - a.events);
 
+    // Build unattributed clusters: one row per deployer, ranked so the loudest
+    // unknowns (most packages, then biggest on-chain footprint) rise to the
+    // top. Probe only the top N to keep the scan cheap — no point probing
+    // long-tail one-off deployers on every 6-hour cycle.
+    const UNATTRIBUTED_PROBE_CAP = 50;
+    const unattributedRanked = [...unattributedByDeployer.entries()]
+      .map(([deployer, packages]) => {
+        const sortedPkgs = [...packages].sort((a, b) => Number(a.storageRebate) - Number(b.storageRebate));
+        const storageIota = packages.reduce((s, p) => s + Number(p.storageRebate || 0), 0) / 1_000_000_000;
+        return { deployer, packages: sortedPkgs, storageIota };
+      })
+      .sort((a, b) => {
+        if (b.packages.length !== a.packages.length) return b.packages.length - a.packages.length;
+        return b.storageIota - a.storageIota;
+      });
+
+    const unattributed: UnattributedCluster[] = [];
+    for (let i = 0; i < unattributedRanked.length; i++) {
+      const { deployer, packages, storageIota } = unattributedRanked[i];
+      const firstPkg = packages[0];
+      const latestPkg = packages[packages.length - 1];
+      const modulesUnion = new Set<string>();
+      for (const pkg of packages) {
+        for (const m of pkg.modules?.nodes ?? []) modulesUnion.add(m.name);
+      }
+      let identifiers: string[] = [];
+      let objectType: string | null = null;
+      if (i < UNATTRIBUTED_PROBE_CAP) {
+        const probe = await this.probeIdentityFields(latestPkg.address);
+        identifiers = probe.identifiers;
+        objectType = probe.objectType;
+      }
+      unattributed.push({
+        deployer,
+        packages: packages.length,
+        firstPackageAddress: firstPkg.address,
+        latestPackageAddress: latestPkg.address,
+        storageIota: Math.round(storageIota * 10000) / 10000,
+        modules: Array.from(modulesUnion).slice(0, 20),
+        sampleIdentifiers: identifiers,
+        sampledObjectType: objectType,
+      });
+    }
+    const totalUnattributedPackages = unattributed.reduce((s, c) => s + c.packages, 0);
+    this.logger.log(
+      `Unattributed: ${unattributed.length} deployer cluster(s), ${totalUnattributedPackages} package(s)`,
+    );
+
     const checkpointData: any = await this.graphql(`{ checkpoint { networkTotalTransactions } }`);
     const networkTxTotal = Number(checkpointData.checkpoint.networkTotalTransactions);
     const daysLive = 332;
@@ -646,9 +782,11 @@ export class EcosystemService implements OnModuleInit {
     return {
       l1: projects.filter((p) => p.layer === 'L1'),
       l2: projects.filter((p) => p.layer === 'L2'),
+      unattributed,
       totalProjects: projects.length,
       totalEvents: projects.reduce((sum, p) => sum + p.events, 0),
       totalStorageIota: Math.round(projects.reduce((sum, p) => sum + p.storageIota, 0) * 10000) / 10000,
+      totalUnattributedPackages,
       networkTxTotal,
       txRates: {
         perYear: Math.round((networkTxTotal / daysLive) * 365),
