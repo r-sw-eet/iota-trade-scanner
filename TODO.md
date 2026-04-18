@@ -45,6 +45,16 @@ Open questions that could upgrade an attribution from circumstantial (🟡) or s
 - [ ] **Studio 0a0d — confirm Clawnera team id rename** (api/src/ecosystem/teams/misc/studios.ts) — operator identified as GitHub user `Moron1337`, brands surfaced as CLAWNERA / CLAW / SPEC, but the team id stays synthetic `studio-0a0d` pending confirmation that the operator wants to be surfaced under the Clawnera brand publicly on our site. Ask in IOTA Discord #speculations, or via the Moron1337 GitHub, whether to rename to `clawnera`.
 - [ ] **Studio 0xb8b1380e — team ownership + optional split** (api/src/ecosystem/teams/misc/studios.ts) — KrillTube + GiveRep + games + shared infrastructure are all identified at deployer `0xb8b1…06c6`, but overall team ownership is not publicly stated (single team vs. dev shop vs. IF-adjacent contractor). Close via asking in IOTA Discord whose deployer `0xb8b1…` is, or inspecting the KrillTube operator wallet `0xba1e07…020d` for branded activity tying it back. If ownership clarifies, consider splitting into `krilltube` and `giverep` sub-teams with `studio-b8b1` retained as the games/infrastructure fallback.
 
+## Fingerprint matchers — future widening
+
+The `fingerprint` schema (`api/src/ecosystem/projects/project.interface.ts`) supports `type`, `issuer`, `tag`, and a generic `fields` map with `exact`, `prefix`, `suffix`, and `present: true` matchers. Deliberately skipped until real data demands them:
+
+- [ ] **Regex field matchers** — e.g. `fields: { name: { regex: '^Lil..Ape #\\d+$' } }`. Needed only if a project minted with inconsistent naming that can't be expressed as prefix+suffix.
+- [ ] **Array / OR matchers** — e.g. `fields: { tag: ['salus', 'salus-dev'] }`. Needed only when one deployer uses two parallel tag vocabularies for the same brand.
+- [ ] **Numeric / typed matchers** — `fields.version: { gte: 2 }`. Needed only if numeric Move fields become load-bearing for attribution.
+
+Current justification (2026-04-18): eyeballed 16 clusters with sampled identifiers in the latest snapshot — every one was uniquely identifiable by `type` alone, or by `type + exact/prefix/suffix/present`. None required regex, OR, or numeric matchers. Revisit when a real unattributed cluster can't be pinned down with the current primitives.
+
 ## Ecosystem project-def audit
 
 Revisit after several ecosystem snapshots (once enough data has landed post-2026-04-18 refactor):

@@ -471,6 +471,124 @@ describe('EcosystemService', () => {
       });
       expect(await probe('0x1', { type: 'a::B' })).toBe(false);
     });
+
+    // fields matcher — exact / prefix / suffix / present
+
+    const mockSample = (json: Record<string, unknown>) =>
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: { objects: { nodes: [{ asMoveObject: { contents: { json } } }] } },
+        }),
+      });
+
+    it('fields: string value → exact match passes', async () => {
+      mockSample({ name: 'Isla Silver' });
+      expect(await probe('0x1', { type: 'a::B', fields: { name: 'Isla Silver' } })).toBe(true);
+    });
+
+    it('fields: string value → mismatch rejects', async () => {
+      mockSample({ name: 'Other' });
+      expect(await probe('0x1', { type: 'a::B', fields: { name: 'Isla Silver' } })).toBe(false);
+    });
+
+    it('fields: prefix matches serialized-name collections', async () => {
+      mockSample({ name: 'Healthy Gang #42 - Banana' });
+      expect(
+        await probe('0x1', { type: 'a::B', fields: { name: { prefix: 'Healthy Gang #' } } }),
+      ).toBe(true);
+    });
+
+    it('fields: prefix rejects when value does not start with prefix', async () => {
+      mockSample({ name: 'Not Healthy' });
+      expect(
+        await probe('0x1', { type: 'a::B', fields: { name: { prefix: 'Healthy Gang #' } } }),
+      ).toBe(false);
+    });
+
+    it('fields: suffix matches namespaced identifiers', async () => {
+      mockSample({ name_str: 'nnpc.iota' });
+      expect(
+        await probe('0x1', { type: 'a::B', fields: { name_str: { suffix: '.iota' } } }),
+      ).toBe(true);
+    });
+
+    it('fields: present rejects absent / empty / null values', async () => {
+      mockSample({ vin: '' });
+      expect(await probe('0x1', { type: 'a::B', fields: { vin: { present: true } } })).toBe(false);
+      mockSample({});
+      expect(await probe('0x1', { type: 'a::B', fields: { vin: { present: true } } })).toBe(false);
+      mockSample({ vin: null });
+      expect(await probe('0x1', { type: 'a::B', fields: { vin: { present: true } } })).toBe(false);
+    });
+
+    it('fields: present accepts any non-empty value', async () => {
+      mockSample({ vin: 'WF0JXXGAHJKD30348' });
+      expect(await probe('0x1', { type: 'a::B', fields: { vin: { present: true } } })).toBe(true);
+    });
+
+    it('fields: multiple keys AND together', async () => {
+      mockSample({ brand: 'FORD', model: 'FIESTA', vin: 'X' });
+      expect(
+        await probe('0x1', {
+          type: 'a::B',
+          fields: {
+            brand: 'FORD',
+            model: { present: true },
+            vin: { present: true },
+          },
+        }),
+      ).toBe(true);
+      // one key fails → whole match fails
+      mockSample({ brand: 'BMW', model: 'FIESTA', vin: 'X' });
+      expect(
+        await probe('0x1', {
+          type: 'a::B',
+          fields: {
+            brand: 'FORD',
+            model: { present: true },
+            vin: { present: true },
+          },
+        }),
+      ).toBe(false);
+    });
+
+    it('fields: prefix + suffix on the same key both apply', async () => {
+      mockSample({ handle: '@foo.iota' });
+      expect(
+        await probe('0x1', {
+          type: 'a::B',
+          fields: { handle: { prefix: '@', suffix: '.iota' } },
+        }),
+      ).toBe(true);
+      mockSample({ handle: '@foo.xyz' });
+      expect(
+        await probe('0x1', {
+          type: 'a::B',
+          fields: { handle: { prefix: '@', suffix: '.iota' } },
+        }),
+      ).toBe(false);
+    });
+
+    it('fields: combines with legacy issuer/tag shortcuts via AND', async () => {
+      mockSample({ issuer: '0xABC', tag: 'salus', name: 'Batch #1' });
+      expect(
+        await probe('0x1', {
+          type: 'a::B',
+          issuer: '0xabc',
+          tag: 'salus',
+          fields: { name: { prefix: 'Batch #' } },
+        }),
+      ).toBe(true);
+      mockSample({ issuer: '0xABC', tag: 'salus', name: 'Other' });
+      expect(
+        await probe('0x1', {
+          type: 'a::B',
+          issuer: '0xabc',
+          tag: 'salus',
+          fields: { name: { prefix: 'Batch #' } },
+        }),
+      ).toBe(false);
+    });
   });
 
   // ---------- probeSampleName ----------

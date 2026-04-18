@@ -382,6 +382,16 @@ export class EcosystemService implements OnModuleInit {
       if (!fields) return false;
       if (fp.issuer && String(fields.issuer ?? '').toLowerCase() !== fp.issuer.toLowerCase()) return false;
       if (fp.tag && fields.tag !== fp.tag) return false;
+      for (const [key, rule] of Object.entries(fp.fields ?? {})) {
+        const v = fields[key];
+        if (typeof rule === 'string') {
+          if (v !== rule) return false;
+          continue;
+        }
+        if (rule.present && (v === undefined || v === null || v === '')) return false;
+        if (rule.prefix !== undefined && (typeof v !== 'string' || !v.startsWith(rule.prefix))) return false;
+        if (rule.suffix !== undefined && (typeof v !== 'string' || !v.endsWith(rule.suffix))) return false;
+      }
       return true;
     } catch {
       return false;

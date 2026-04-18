@@ -83,7 +83,9 @@ async function matchByFingerprint(mods: Set<string>, address: string): Promise<P
       if (fp.issuer && String(fields.issuer ?? '').toLowerCase() !== fp.issuer.toLowerCase()) continue;
       if (fp.tag && fields.tag !== fp.tag) continue;
       return def;
-    } catch {}
+    } catch {
+      // best-effort probe; skip on GraphQL error
+    }
   }
   return null;
 }
@@ -124,7 +126,9 @@ async function probeIdentityFields(pkgAddress: string): Promise<{ identifiers: s
       }
       if (idents.size >= 20) break;
     }
-  } catch {}
+  } catch {
+    // best-effort probe
+  }
   return { identifiers: Array.from(idents), objectType: sampledType };
 }
 

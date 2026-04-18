@@ -51,14 +51,31 @@ export interface ProjectDefinition {
     packageAddresses?: string[];
     /** Deployer addresses (first-publisher of the package). Matches every package published by any listed deployer. Cheaper than enumerating `packageAddresses` when a team's whole footprint is on-scope. Lowercased on compare. */
     deployerAddresses?: string[];
-    /** Fingerprint a sample object from the package. All specified fields must match (AND). Enables discovery of new packages deployed by this project. */
+    /** Fingerprint a sample object from the package. All specified constraints must match (AND). Enables discovery of new packages deployed by this project. */
     fingerprint?: {
       /** Struct path within the package, e.g. 'nft::NFT'. Sampled type is `<pkg>::<type>`. */
       type: string;
-      /** Expected value of the object's `issuer` Move field (lowercased on compare). */
+      /** Expected value of the object's `issuer` Move field (lowercased on compare). Shortcut for `fields: { issuer: <value> }` with lowercase-insensitive comparison. */
       issuer?: string;
-      /** Expected value of the object's `tag` Move field. */
+      /** Expected value of the object's `tag` Move field. Shortcut for `fields: { tag: <value> }`. */
       tag?: string;
+      /**
+       * Per-field constraints on the sampled Move object. Key = Move field name.
+       * Value = a matcher:
+       *   - `string` → exact match on the string field value.
+       *   - `{ prefix }` → string field starts with prefix.
+       *   - `{ suffix }` → string field ends with suffix.
+       *   - `{ present: true }` → field exists and is non-empty.
+       * Multiple keys on the same object are combined with AND. Combine rule
+       * properties within one key (e.g. `{ prefix, suffix }`) to require both.
+       * Added for the Salus-shaped case where module/struct names are generic
+       * (`nft::NFT`) and identity lives in field values. Skip regex / OR /
+       * numeric matchers until a real cluster needs them (see TODO.md).
+       */
+      fields?: Record<
+        string,
+        string | { prefix?: string; suffix?: string; present?: true }
+      >;
     };
   };
 }
