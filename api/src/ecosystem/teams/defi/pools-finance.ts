@@ -10,6 +10,7 @@ export const poolsFinance: Team = {
     '0xeadab2493d7aff3ac3951e545e9c61bef93dee1915e18aff50414d72067f88e7',
   ],
   logo: '/logos/pools-finance.svg',
+  logoWordmark: '/logos/pools-finance-wordmark.svg',
   attribution: `
 Gold-standard attribution via Zokyo's public audit report (github.com/zokyo-sec/audit-reports/blob/main/Pools%20Finance/Pools_Finance_Zokyo_audit_report_May12_2025.pdf), which names the private \`Pools-Finance/pools-protocol\` repo at a specific commit and audits ten Move source files: \`amm_config, amm_entries, amm_math, amm_router, amm_stable_utils, amm_swap, amm_utils, stake, stake_config, stake_entries\`. On-chain, exactly two deployers ship packages with that 10-module signature — both addresses listed here. \`0x519e…800c\` is the primary deployer (9 upgrade versions); \`0xeada…88e7\` is the original v0 deployer (1 package), now dormant.
 
