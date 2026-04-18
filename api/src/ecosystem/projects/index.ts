@@ -20,7 +20,11 @@ import {
 export const ALL_PROJECTS: ProjectDefinition[] = [
   // DeFi
   poolsFinance,
-  virtue, virtueStabilityPool,
+  // Stability Pool first — its module-pair rule {all: [balance_number, stability_pool]}
+  // is more specific than `virtue`'s deployer catch-all, so it wins for the
+  // single Stability Pool package and the rest of Virtue's deployer's packages
+  // fall through to `virtue`.
+  virtueStabilityPool, virtue,
   swirl,
   cyberperp, iotaroyale,
 
