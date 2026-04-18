@@ -1315,5 +1315,75 @@ describe('EcosystemService', () => {
       expect(exact.latestPackageAddress).toBe('0xv2');
       expect(exact.storageIota).toBe(3);
     });
+
+    it('sums events across every package in a project\'s set — not just the latest', async () => {
+      // Regression guard for the TWIN bug: Move events are scoped to the
+      // emitting package's address; upgrades get fresh event streams.
+      // A project with N package versions should count events on all N.
+      // Here: 2 versions of the same Exact-matched package, first emits
+      // 100 events per module, second emits 7 per module. 2 modules each.
+      // Expected total: (100+7) × 2 = 214.
+      (service as any).countEvents = jest.fn(async (emit: string) => ({
+        count: emit.startsWith('0xv1') ? 100 : 7,
+        capped: false,
+      }));
+
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xv1', modules: ['foo', 'bar'] }),
+          pkg({ address: '0xv2', modules: ['foo', 'bar'] }),
+        ],
+      });
+      const snap = await runCapture();
+      const exact = snap.l1.find((p: any) => p.name === 'Exact');
+      expect(exact.events).toBe(214);
+      // `modules` should still reflect the latest package's module set
+      // (the current API surface), not a union across versions.
+      expect(exact.modules).toEqual(['foo', 'bar']);
+      // countEvents should have been called 4 times: 2 packages × 2 modules.
+      expect((service as any).countEvents).toHaveBeenCalledTimes(4);
+    });
+
+    it('propagates eventsCapped=true when any (package, module) hits the pagination cap', async () => {
+      (service as any).countEvents = jest.fn(async (emit: string) => ({
+        count: 1,
+        capped: emit.startsWith('0xv2'), // only the second package's queries are capped
+      }));
+
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xv1', modules: ['foo', 'bar'] }),
+          pkg({ address: '0xv2', modules: ['foo', 'bar'] }),
+        ],
+      });
+      const snap = await runCapture();
+      const exact = snap.l1.find((p: any) => p.name === 'Exact');
+      expect(exact.eventsCapped).toBe(true);
+    });
+
+    it('sums events across sibling packages when project uses deployerAddresses match', async () => {
+      // Deployer-matched projects (LayerZero, Tradeport, etc.) have packages
+      // that are NOT an upgrade chain — they're siblings with potentially
+      // different module sets. Event counting must still iterate all of
+      // them using each package's own module list.
+      (service as any).countEvents = jest.fn(async (emit: string) => {
+        if (emit === '0xdpA::gate') return { count: 11, capped: false };
+        if (emit === '0xdpB::gate') return { count: 13, capped: false };
+        if (emit === '0xdpB::other') return { count: 17, capped: false };
+        return { count: 0, capped: false };
+      });
+
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xdpA', modules: ['gate'], deployer: '0xCOMPOSE' }),
+          pkg({ address: '0xdpB', modules: ['gate', 'other'], deployer: '0xCOMPOSE' }),
+        ],
+      });
+      const snap = await runCapture();
+      const dam = snap.l1.find((p: any) => p.name === 'DeployerAndModule');
+      expect(dam.events).toBe(11 + 13 + 17);
+      // Latest package is 0xdpB, so its module set is what `modules` shows.
+      expect(dam.modules).toEqual(['gate', 'other']);
+    });
   });
 });

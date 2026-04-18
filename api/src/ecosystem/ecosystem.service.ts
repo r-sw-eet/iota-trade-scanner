@@ -474,19 +474,35 @@ export class EcosystemService implements OnModuleInit {
     const projects: Project[] = [];
     for (const [, { def, packages, splitDeployer }] of projectMap) {
       const latestPkg = packages[packages.length - 1];
-      const mods = (latestPkg.modules?.nodes || []).map((m) => m.name);
+      const latestMods = (latestPkg.modules?.nodes || []).map((m) => m.name);
       const totalStorage = packages.reduce((sum, p) => sum + Number(p.storageRebate || 0), 0) / 1_000_000_000;
 
+      // Sum events (and accumulate senders) across every package in the
+      // project's set — not just the latest. Move events are scoped by the
+      // emitting package's address: when a package is upgraded, the new
+      // address gets its own event stream, and events on the old address
+      // stay bound there forever. Querying only `latestPackageAddress`
+      // silently drops historical activity (e.g. TWIN's 2000+ `store_data`
+      // events on the prior `0xf951…cc13` package address). Same rationale
+      // for deployer-matched projects (LayerZero, Tradeport, ObjectID, etc.)
+      // where the project's `packages` set contains sibling packages, not
+      // only an upgrade chain.
       let events = 0;
       let eventsCapped = false;
       const projectSenders = new Set<string>();
-      for (const mod of mods) {
-        const result = await this.countEvents(`${latestPkg.address}::${mod}`);
-        events += result.count;
-        if (result.capped) eventsCapped = true;
-        const senders = await this.updateSendersForModule(latestPkg.address, mod);
-        senders.forEach((s) => projectSenders.add(s));
+      for (const pkg of packages) {
+        const pkgMods = (pkg.modules?.nodes || []).map((m) => m.name);
+        for (const mod of pkgMods) {
+          const result = await this.countEvents(`${pkg.address}::${mod}`);
+          events += result.count;
+          if (result.capped) eventsCapped = true;
+          const senders = await this.updateSendersForModule(pkg.address, mod);
+          senders.forEach((s) => projectSenders.add(s));
+        }
       }
+      // The `modules` snapshot field stays as the latest package's module
+      // set — that's the current API surface, not a union across versions.
+      const mods = latestMods;
 
       const team = getTeam(def.teamId) ?? null;
       const detectedDeployers = [
