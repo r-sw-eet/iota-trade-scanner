@@ -1,5 +1,39 @@
 import { Team } from '../team.interface';
 
+export const studio295e: Team = {
+  id: 'studio-295e',
+  name: 'Studio 0x295ee21b',
+  description: 'Anonymous solo-developer deployer behind the on-chain "TruvID" product — 7 packages, all single-module `nft_minter2` with struct `NFT`. On-chain self-identifies as TruvID (video-authenticity / notarization). Operator identity not confirmed; circumstantial trail points at an anonymous GitHub-hosted PWA at `truvid.vercel.app` but the public frontend has zero on-chain wiring, so the link between the two is not proven by the published artifacts alone.',
+  deployers: ['0x295ee21bc224c1d2ccd8dd9ec966688bdb7d1ca3a8f2a8550694a4debe13559a'],
+  attribution: `
+Synthetic team id pending confirmed operator identification. On-chain footprint is 7 packages at deployer \`0x295ee21bc224c1d2ccd8dd9ec966688bdb7d1ca3a8f2a8550694a4debe13559a\`, all single-module \`nft_minter2\` with struct \`NFT\` — successive upgrade versions of one product that self-identifies in minted NFTs as "TruvID" / "TruvID Genesis".
+
+**Investigation trail (2026-04-19):**
+
+**1. On-chain self-attestation.** Every minted NFT carries \`name: "TruvID"\` / \`"TruvID Genesis"\` / \`""\` and \`description: "standard document proof"\` / \`"First TruvID proof NFT with IPFS metadata."\` / \`""\`. 5+ NFTs minted to date, all owned by the deployer address itself (admin-held initial-mint pattern). First package stored name/image_url as raw byte arrays; later packages switched to plain strings — typical working-dev iteration across the 7 upgrade versions. Contract shape is extremely thin: 2 structs (\`NFT\` \`{store, key}\`, \`NFT_MINTER2\` OTW), 2 functions (\`init\` private, public \`mint(String, String, String, String, &mut TxContext)\`), no access control, no hash anchoring, no events.
+
+**2. TruvID-candidate domains checked.** The URL fragment \`/api/proof/files/<timestamp>-TruvID.png\` embedded in some minted NFTs is a relative path — no host in the on-chain data. We walked the plausible TruvID-* domain space:
+- \`truvid.com\` — unrelated video-ad-tech platform.
+- \`truvid.io\` / \`truvid.app\` / \`truvid.co\` — parked domains, identical sedo-style landing pages.
+- \`truvid.xyz\` / \`truvid.network\` / \`truvid.finance\` / \`truvid.dev\` / \`truvidapp.com\` / \`iotatruvid.com\` — DNS-unregistered.
+- \`truvid.vercel.app\` — **live hit.** Serves a single-file HTML PWA titled \`TrueVid - Preuve d'Authenticité\` (French-language video-authenticity-proof app). Feature labels in the UI: NTP-atomic-server timestamp, GPS geolocation, ECDSA P-256 signature, \`Conforme eIDAS\` compliance claim, \`CERTIFICAT D'AUTHENTICITÉ\` generation, WebM video encoding. Repo \`homepage\` field on GitHub matches (\`truvid.vercel.app\`), so this Vercel deployment is the canonical app surface for the GitHub-hosted TruvID codebase.
+
+**3. Vercel / GitHub findings.**
+- Source: [\`github.com/oio7764/Truvid\`](https://github.com/oio7764/Truvid), created 2026-02-16, single commit "Create index.html", no README, no license (= all-rights-reserved by default). Repo contains only \`index.html\` (20 KB) — no Move sources, no IOTA SDK, no wallet-connect, no mint flow. Full keyword scan over the HTML returns zero hits for \`iota\` / \`move\` / \`mainnet\` / \`graphql\` / \`@iota/\` / \`0x...\` / \`mint(\` / \`wallet\` / \`ipfs\` / \`pinata\`. JS block has no \`fetch\` / \`axios\` / \`XMLHttpRequest\` — only \`navigator.mediaDevices.getUserMedia\` (camera) and \`navigator.geolocation.getCurrentPosition\` (GPS). HTML is in fact **truncated mid-function** inside \`toggleRecord()\` with no closing \`</script>\` / \`</body>\` — the dev pushed an unfinished file. The ECDSA / NTP / eIDAS UI labels are text, not wired-up functionality.
+- Developer: GitHub user [\`oio7764\`](https://github.com/oio7764). Anonymous account (joined 2024-01-30, privacy-protected email, no name / bio / social links / company / blog / location). Two total public repos: this \`Truvid\` (IOTA) and \`fideo-web\` (FIDÉO, video-authenticity-proof anchored to Bitcoin via OpenTimestamps — different architecture since Bitcoin has no VM, so this is best read as a parallel experiment exploring a different anchoring model, not a migration away from IOTA).
+
+**4. Truv (US fintech, formerly branded TruvID) checked and ruled out.** Google AI-mode flagged Truv / truv.com as the most likely "formerly-TruvID" match. Probed: \`truv.com\` / \`api.truv.com\` / \`app.truv.com\` — \`/api/proof/files/\` paths all 404, no such subdomain for \`api.truv.com\`. Truv's own marketing has zero mentions of IOTA, blockchain, NFTs, Move, or Rebased (product is consumer-permissioned income / employment / asset verification via OAuth-style flows with payroll and bank providers). Their GitHub org \`truvhq\` has no IOTA code. A regulated fintech handling payroll data also would never ship a permissionless \`mint()\` function with no access control. Not the operator.
+
+**5. Other name-collision candidates ruled out.** \`webid-solutions.com\` (TrueID WebID, identity verification) and \`truvideo.com\` (TruVideo, automotive-service video communication) — both different products, both have \`/api/proof/files/\` path returning 404.
+
+**App logic vs. contract logic — conceptual match:** the Vercel app's stated use case (capture a video, sign it off-chain with ECDSA, generate a legal-format certificate, anchor it immutably somewhere) is consistent with the contract's shape (public \`mint\` taking 4 strings — name / description / image_url / metadata_url — and producing an immutable NFT receipt). The NFT filename convention embedded in some mints (\`/api/proof/files/<unix-ms>-TruvID.png\`) matches the expected Node/Express-style backend pattern you'd get from a Vercel-deployed TruvID app. Conceptual fit is strong.
+
+**App logic vs. contract logic — gap:** the **published** Vercel/GitHub frontend has no on-chain wiring at all. No wallet-connect, no \`fetch\` to IOTA GraphQL, no mint call, no IOTA SDK import. The 7 on-chain packages + 5+ minted NFTs were produced entirely out-of-band — via IOTA CLI or an unreleased backend not present in the public repo. We can't prove from the public artifacts alone that the \`oio7764\` GitHub account is the same entity that controls the \`0x295ee21b…\` deployer key. The alignment is circumstantial (same product name, same URL scheme in NFT fields, same conceptual use case) but not contract-level.
+
+**Net:** attribution is kept as synthetic \`studio-295e\` pending stronger confirmation. The public TruvID app at \`truvid.vercel.app\` and the GitHub repo at \`github.com/oio7764/Truvid\` are the best public-web surface for this on-chain footprint, but the mint flow itself isn't in either of them — so the on-chain TruvID could be the \`oio7764\` developer wiring up mints privately, or it could be a different party using the same product name. Additional evidence (e.g. a public commit that connects a wallet, a social post by \`oio7764\` confirming the deployer address, direct outreach) would be needed to promote this to a named-brand team.
+`.trim(),
+};
+
 export const studioCb69: Team = {
   id: 'studio-cb69',
   name: 'Studio 0xcb6956e9',

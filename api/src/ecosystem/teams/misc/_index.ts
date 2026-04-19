@@ -1,5 +1,5 @@
 export { iotaFoundation } from './iota-foundation';
-export { studioB8b1, studio0a0d, studioCb69 } from './studios';
+export { studioB8b1, studio0a0d, studioCb69, studio295e } from './studios';
 export { izipublish } from './izipublish';
 export { liquidlink } from './liquidlink';
 export { boltEarth } from './bolt-earth';

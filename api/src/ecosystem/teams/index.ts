@@ -1,13 +1,13 @@
 import { Team } from './team.interface';
 
 import { poolsFinance, virtue, swirl, cyberperp, iotaroyale } from './defi/_index';
-import { tlip, twinFoundation, salus, truvid } from './trade/_index';
+import { tlip, twinFoundation, salus } from './trade/_index';
 import { objectid } from './identity/_index';
 import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
 import { switchboard } from './oracles/_index';
 import { tradeport } from './nft/_index';
 import { iotaFlip } from './games/_index';
-import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
+import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
 
 /**
  * Team registry. Every project references exactly one team via `teamId`.
@@ -30,7 +30,7 @@ export const ALL_TEAMS: Team[] = [
   iotaroyale,
 
   // Trade
-  tlip, twinFoundation, salus, truvid,
+  tlip, twinFoundation, salus,
 
   // Identity
   objectid,
@@ -52,7 +52,7 @@ export const ALL_TEAMS: Team[] = [
   iotaFoundation,
 
   // Misc — anonymous studios + single-project teams
-  studioB8b1, studio0a0d, studioCb69,
+  studioB8b1, studio0a0d, studioCb69, studio295e,
   izipublish, liquidlink, boltEarth, tokenlabs,
 ];
 
