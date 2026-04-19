@@ -6,7 +6,7 @@ import { objectid, iotaNames } from './identity/_index';
 import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
 import { switchboard } from './oracles/_index';
 import { tradeport } from './nft/_index';
-import { iotaFlip } from './games/_index';
+import { iotaFlip, gamifly } from './games/_index';
 import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
 
 /**
@@ -45,7 +45,7 @@ export const ALL_TEAMS: Team[] = [
   tradeport,
 
   // Games
-  iotaFlip,
+  iotaFlip, gamifly,
 
   // IOTA Foundation (consolidated: chain primitives + Identity + Notarization +
   // Traceability + Asset Framework + Accreditation + Testing)
