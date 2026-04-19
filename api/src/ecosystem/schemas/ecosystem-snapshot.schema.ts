@@ -19,6 +19,7 @@ export class ProjectDoc {
   @Prop() tvl: number;
   @Prop({ type: Number, default: null }) tvlShared: number | null;
   @Prop({ type: String, default: null }) tvlSharedWith: string | null;
+  @Prop({ default: false }) isCollectible: boolean;
   @Prop() logo: string;
   @Prop({ type: String, default: null }) logoWordmark: string | null;
   @Prop({ type: Object }) team: Record<string, any> | null;

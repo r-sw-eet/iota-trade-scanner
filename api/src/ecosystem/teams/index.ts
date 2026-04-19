@@ -7,7 +7,7 @@ import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
 import { switchboard } from './oracles/_index';
 import { tradeport } from './nft/_index';
 import { iotaFlip } from './games/_index';
-import { iotaFoundation, studioB8b1, studio0a0d, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
+import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
 
 /**
  * Team registry. Every project references exactly one team via `teamId`.
@@ -52,7 +52,7 @@ export const ALL_TEAMS: Team[] = [
   iotaFoundation,
 
   // Misc — anonymous studios + single-project teams
-  studioB8b1, studio0a0d,
+  studioB8b1, studio0a0d, studioCb69,
   izipublish, liquidlink, boltEarth, tokenlabs,
 ];
 

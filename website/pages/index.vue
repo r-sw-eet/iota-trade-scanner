@@ -19,6 +19,7 @@ const l1StorageChartVisible = ref(10)
 const l2TvlChartVisible = ref(10)
 const shadeTeamless = ref(true)
 const hideIotaFoundation = ref(true)
+const hideCollectibles = ref(true)
 
 function isIotaFoundation(p: any): boolean {
   // Narrow "Hide IOTA Foundation" filter: hides only the team flagged as
@@ -31,9 +32,10 @@ function isIotaFoundation(p: any): boolean {
 
 const l1Filtered = computed(() => {
   if (!ecosystem.value) return []
-  return hideIotaFoundation.value
-    ? ecosystem.value.l1.filter((p: any) => !isIotaFoundation(p))
-    : ecosystem.value.l1
+  let rows = ecosystem.value.l1 as any[]
+  if (hideIotaFoundation.value) rows = rows.filter((p: any) => !isIotaFoundation(p))
+  if (hideCollectibles.value) rows = rows.filter((p: any) => !p.isCollectible)
+  return rows
 })
 
 // --- Sorting ---
@@ -605,7 +607,7 @@ const projectTvlChartOptions = {
               <!-- L1 Move Projects -->
               <div class="mb-12">
                 <div class="text-center mb-3">
-                  <h3 class="text-sm font-semibold text-scanner-accent">L1 — Move VM ({{ l1Filtered.length }}{{ hideIotaFoundation && l1Filtered.length !== ecosystem.l1.length ? ` of ${ecosystem.l1.length}` : '' }} projects)</h3>
+                  <h3 class="text-sm font-semibold text-scanner-accent">L1 — Move VM ({{ l1Filtered.length }}{{ l1Filtered.length !== ecosystem.l1.length ? ` of ${ecosystem.l1.length}` : '' }} projects)</h3>
                 </div>
                 <div class="flex items-center justify-center gap-4 mb-4 flex-wrap">
                   <label class="flex items-center gap-2 text-xs text-[#a1a1aa] cursor-pointer select-none" title="Dim projects that are not attributed to a known team">
@@ -615,6 +617,10 @@ const projectTvlChartOptions = {
                   <label class="flex items-center gap-2 text-xs text-[#a1a1aa] cursor-pointer select-none" title="Hide IOTA Foundation's own rows — the consolidated iota-foundation team (Identity, Notarization, Traceability, Asset Framework, Accreditation, chain primitives) and IF's internal test deployments. TLIP (IF × TMEA) and TWIN Foundation (IF-co-founded) stay visible — distinct entities.">
                     <input v-model="hideIotaFoundation" type="checkbox" class="accent-scanner-accent" />
                     Hide IOTA Foundation
+                  </label>
+                  <label class="flex items-center gap-2 text-xs text-[#a1a1aa] cursor-pointer select-none" title="Hide dumb PFP / collectible NFT projects (no utility, no RWA anchor — just pictures). RWA / utility NFTs (Salus DWRs, ObjectID authenticity tokens, TruvID document proofs, …) stay visible — only projects explicitly flagged `isCollectible` are dropped.">
+                    <input v-model="hideCollectibles" type="checkbox" class="accent-scanner-accent" />
+                    Hide collectibles
                   </label>
                 </div>
 

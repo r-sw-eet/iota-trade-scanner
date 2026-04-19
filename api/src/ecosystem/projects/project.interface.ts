@@ -25,6 +25,15 @@ export interface ProjectDefinition {
   /** Split matched packages into one sub-project per distinct deployer. Use for aggregate buckets where deployer discriminates distinct projects. */
   splitByDeployer?: boolean;
   /**
+   * Flag this project as a dumb PFP / collectible NFT (no real utility, no RWA
+   * anchor — just pictures). Opt-in so the dashboard's "Hide collectibles"
+   * toggle can filter them out of the "real usecases" view. Leave unset for
+   * anything with economic logic or real-world-asset backing (RWA NFTs like
+   * Salus's DWRs, ObjectID's GS1-anchored authenticity tokens, TruvID's
+   * document proofs — those stay visible regardless of the toggle).
+   */
+  isCollectible?: boolean;
+  /**
    * How to identify this project's packages. All specified criteria must pass
    * (AND semantics). A rule with no criteria is skipped by the synchronous
    * matcher and is only reachable via `fingerprint` or team-deployer routing.

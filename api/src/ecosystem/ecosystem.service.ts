@@ -74,6 +74,8 @@ export interface Project {
   tvlShared: number | null;
   /** Name of the primary project this row shares its DefiLlama TVL with — used for the "shared with <primary>" tooltip. `null` when `tvlShared` is null. */
   tvlSharedWith: string | null;
+  /** True for dumb PFP / collectible NFT projects (no utility, no RWA). Drives the "Hide collectibles" filter on the dashboard — RWA / utility NFTs stay `false`. */
+  isCollectible: boolean;
   /** Resolved square icon URL. Precedence: `ProjectDefinition.logo` → `Team.logo` → `null` (frontend falls back to initials). Used on list rows, team cards, and other small renders. */
   logo: string | null;
   /** Resolved landscape wordmark URL. Precedence: `ProjectDefinition.logoWordmark` → `Team.logoWordmark` → `null` (details page falls back to `logo`). */
@@ -734,6 +736,7 @@ export class EcosystemService implements OnModuleInit {
         tvl: null,
         tvlShared: null,
         tvlSharedWith: null,
+        isCollectible: def.isCollectible ?? false,
         logo: def.logo ?? team?.logo ?? null,
         logoWordmark: def.logoWordmark ?? team?.logoWordmark ?? null,
         team,
@@ -840,6 +843,7 @@ export class EcosystemService implements OnModuleInit {
           tvl: chainTvl,
           tvlShared: null,
           tvlSharedWith: null,
+          isCollectible: false,
           logo: null,
           logoWordmark: null,
           team: null,

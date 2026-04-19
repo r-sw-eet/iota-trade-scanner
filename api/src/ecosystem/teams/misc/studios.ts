@@ -1,5 +1,25 @@
 import { Team } from '../team.interface';
 
+export const studioCb69: Team = {
+  id: 'studio-cb69',
+  name: 'Studio 0xcb6956e9',
+  description: 'Anonymous multi-collection NFT deployer — ships a handful of small hand-minted PFP collections (Healthy Gang, Ghost Lights, Tanapaz, Toma Rajadão, Tranquilidade Drops) plus ~25 keyboard-mash test-deploy modules. No public brand presence; `droppzz_test_iota` appears in the module list, possibly pointing at a "Droppzz" operator handle but unconfirmed.',
+  deployers: ['0xcb6956e9f7f2515054241b74a1c0b545b4e813d0e5e15f9bb827870b3d63724c'],
+  attribution: `
+Synthetic team id pending a real operator identification. On-chain footprint is 33 packages from deployer \`0xcb6956e9f7f2515054241b74a1c0b545b4e813d0e5e15f9bb827870b3d63724c\`, with module names split roughly two ways:
+
+**Named / plausible-collection modules** (5 identified): \`iota_healthy_gang_\` (Healthy Gang PFPs — sampled \`name: "Healthy Gang #2 - Strawberry"\`, IPFS media), \`ghost_lights\`, \`tanapaz\`, \`toma_rajadao\` (Portuguese slang), \`tranquilidade_drops\` (Portuguese — "tranquility drops"). Portuguese-language signature suggests a Brazilian / Lusophone-community operator.
+
+**Keyboard-mash / test-deploy modules** (~20+): \`fdsfsd\`, \`asdadas\`, \`dasdasdsa\`, \`jlkjlkjljlk\`, \`jhhjhkhkhkjj\`, \`djkjsakdjsahkj\`, \`dslkmkkvlmsdlvk\`, \`kfjsdlkfjslkjflksd\`, \`klzjdljkjzlckjlzx\`, \`lkdasjljdasldjslak\`, \`fds_mflsdmlfdskmlk\`, \`lkdsmlfkmsdlfsdmkl\`, and more. Looks like a single developer hammering on the deploy flow between real mints.
+
+Operator-handle hint: one of the modules is \`droppzz_test_iota\` — "Droppzz" may be the operator's self-identification, though no "Droppzz" brand is findable via public web search as of 2026-04. Could be private, never-launched, or a handle used only in IOTA community channels. Left as a TODO follow-up.
+
+No public website, no social presence, no marketplace listing found for any of the 5 named collections. The one sampled NFT (Healthy Gang #2 - Strawberry) has a raw IPFS media URL and no branding metadata.
+
+Why its own team rather than rolling into \`NFT Collections\` aggregate: the canonical \`NFT Collections\` bucket matches packages whose module set is exactly \`{nft}\` — this deployer's packages use per-collection module names (\`iota_healthy_gang_\`, \`ghost_lights\`, etc.), so the aggregate doesn't catch them. A dedicated deployer-based aggregate under this synthetic team keeps the activity visible while narrower fingerprint defs (one per identified collection) can carve out labeled rows.
+`.trim(),
+};
+
 export const studioB8b1: Team = {
   id: 'studio-b8b1',
   name: 'Studio 0xb8b1380e',

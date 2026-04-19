@@ -173,6 +173,16 @@ jest.mock('./projects', () => {
       teamId: 'team-mixed',
       match: { all: ['mixed_alpha'] },
     },
+    {
+      name: 'Collectible',
+      layer: 'L1',
+      category: 'NFT',
+      description: 'Project flagged as a PFP / collectible — exercises the isCollectible propagation path.',
+      urls: [],
+      teamId: null,
+      isCollectible: true,
+      match: { all: ['pfp'] },
+    },
   ];
   return { ALL_PROJECTS: projects, ProjectDefinition: undefined };
 });
@@ -1622,6 +1632,29 @@ describe('EcosystemService', () => {
       expect(primary.name).toBe('AllRequired');
       expect(sibling.name).toBe('Exact');
       expect(sibling.tvlSharedWith).toBe('AllRequired');
+    });
+
+    it('propagates `isCollectible: true` from ProjectDefinition to the emitted row; defaults to false when the def omits the flag; always false on L2 DefiLlama-derived rows', async () => {
+      // The dashboard's "Hide collectibles" toggle reads this field — it must
+      // flow from the ProjectDefinition into the serialized Project row, and
+      // default to false for anything the def doesn't flag (including L2 rows
+      // generated from DefiLlama protocols, which have no ProjectDefinition).
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xa', modules: ['pfp'] }),   // → Collectible (isCollectible: true)
+          pkg({ address: '0xb', modules: ['foo', 'bar'] }), // → Exact (unset → false)
+        ],
+        llama: [
+          { name: 'EvmDex', tvl: 1_000_000, chainTvls: { 'IOTA EVM': 5_000 }, chains: ['IOTA EVM'], category: 'Dexs', slug: 'evmdex' },
+        ],
+      });
+      const snap = await runCapture();
+      const collectible = snap.l1.find((p: any) => p.name === 'Collectible');
+      const exact = snap.l1.find((p: any) => p.name === 'Exact');
+      const evmRow = snap.l2.find((p: any) => p.name === 'EvmDex');
+      expect(collectible.isCollectible).toBe(true);
+      expect(exact.isCollectible).toBe(false);
+      expect(evmRow.isCollectible).toBe(false);
     });
 
     it('does not add an L2 row for a DefiLlama protocol already claimed by an L1 project via substring match — guards against Swirl-V2-rename-style duplicates', async () => {

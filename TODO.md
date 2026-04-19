@@ -61,17 +61,23 @@ Open questions that could upgrade an attribution from circumstantial (🟡) or s
 
 With the `fields` fingerprint primitive now live, turn the 16 unattributed clusters that have `sampleIdentifiers` into real `ProjectDefinition` entries. Latest snapshot (2026-04-18) shows 8–10 real brands in the set; the rest is test/noise and should be skipped.
 
-- [ ] **Write defs for the real brands.** Per cluster — write one file in `api/src/ecosystem/projects/<category>/` (and matching `teams/` entry where ownership is known). Use the new `fields` matchers rather than hardcoded `packageAddresses` where the fingerprint is stable. Candidates from the live snapshot:
-    - Healthy Gang NFT series (deployer `0xcb69…724c`, 33 pkgs, `type=…::iota_healthy_gang_::Nft`, `fields.name prefix "Healthy Gang #"`)
-    - Isla Silver NFT collection (deployer `0xfe40…2cdb`, 9 pkgs, `type=…::isla_silver::IslaSilverNFT`, `fields.name="Isla Silver"`)
-    - IOTA Estoicos (deployer `0x457d…8a38`, 7 pkgs, `type=…::estoicos::EstoicosNFT`)
-    - ctrlv AI Agents (deployer `0xceb…999a`, 3 pkgs, `type=…::ctrlv_agent::AgentNFT`)
-    - Car NFTs (deployer `0x545…c8a9`, 3 pkgs, `type=…::car_nft::CarNFT`, `fields.brand/model/vin present:true`)
-    - TruvID (deployer `0x295e…559a`, 7 pkgs, `type=…::nft_minter2::NFT`, `fields.name prefix "TruvID"`)
-    - PANDABYTE Tickets (deployer `0x49c4…dbbf`, 3 pkgs, `type=…::voucher::PandabyteTicket`)
-    - Lil' Ape (deployer `0x03ce…419b`, 2 pkgs, `type=…::lilape_nft::LilApeNFT`, `fields.name prefix "Lil' Ape #"`)
-    - Carbon Credit Manager (deployer `0xb5fc…01a0`, 1 pkg, `type=…::credit_carbon_manager::CarbonCreditRecord`)
+- [ ] **Write defs for the real brands.** Per cluster — write one file in `api/src/ecosystem/projects/<category>/` (and matching `teams/` entry where ownership is known). Use the new `fields` matchers rather than hardcoded `packageAddresses` where the fingerprint is stable. Mark pure-PFP NFT collections with `isCollectible: true` so the "Hide collectibles" toggle filters them out of the real-usecases view; RWA / utility NFTs (doc proofs, carbon credits, car titles, membership tickets) stay `isCollectible: false`. Candidates from the live snapshot:
+    - [x] Healthy Gang NFT (deployer `0xcb69…724c`, `iota_healthy_gang_::Nft`, `fields.name prefix "Healthy Gang #"`) — landed as `healthyGang` project under the `studio-cb69` team + deployer-catch-all aggregate for the remaining packages on the same deployer, all marked `isCollectible: true`.
+    - Ghost Lights (same deployer as Healthy Gang, module `ghost_lights`) — carve out a narrow fingerprint def under `studio-cb69`; probe the sampled `Nft` shape for a stable `fields` match. `isCollectible: true`.
+    - Tanapaz (same deployer, module `tanapaz`) — same shape as Ghost Lights. `isCollectible: true`.
+    - Toma Rajadão (same deployer, module `toma_rajadao`) — Portuguese slang, same shape. `isCollectible: true`.
+    - Tranquilidade Drops (same deployer, module `tranquilidade_drops`) — "tranquility drops" in Portuguese, same shape. `isCollectible: true`.
+    - Isla Silver NFT collection (deployer `0xfe40…2cdb`, 9 pkgs, `type=…::isla_silver::IslaSilverNFT`, `fields.name="Isla Silver"`) — PFP, `isCollectible: true`.
+    - IOTA Estoicos (deployer `0x457d…8a38`, 7 pkgs, `type=…::estoicos::EstoicosNFT`) — PFP, `isCollectible: true`.
+    - ctrlv AI Agents (deployer `0xceb…999a`, 3 pkgs, `type=…::ctrlv_agent::AgentNFT`) — PFP tier (AI-agent themed), default `isCollectible: true` unless the agents have on-chain utility logic.
+    - Car NFTs (deployer `0x545…c8a9`, 3 pkgs, `type=…::car_nft::CarNFT`, `fields.brand/model/vin present:true`) — RWA (vehicle title). `isCollectible: false`.
+    - TruvID (deployer `0x295e…559a`, 7 pkgs, `type=…::nft_minter2::NFT`, `fields.name prefix "TruvID"`) — document-proof RWA. `isCollectible: false`.
+    - PANDABYTE Tickets (deployer `0x49c4…dbbf`, 3 pkgs, `type=…::voucher::PandabyteTicket`) — event/membership tickets. Default `isCollectible: false` (utility voucher), re-evaluate once the product surface is clearer.
+    - Lil' Ape (deployer `0x03ce…419b`, 2 pkgs, `type=…::lilape_nft::LilApeNFT`, `fields.name prefix "Lil' Ape #"`) — PFP, `isCollectible: true`.
+    - Carbon Credit Manager (deployer `0xb5fc…01a0`, 1 pkg, `type=…::credit_carbon_manager::CarbonCreditRecord`) — RWA (carbon credit). `isCollectible: false`.
   Skip as noise: `nft_minter::Nft` ("WalletStd2 / testrun123"), `iota_super::Nft` ("Token3"), `tung_tung_tung_tung_sahur_limited::Nft` ("Token2"), `nft_minter::SimpleNFT` ("My First IOTA NFT") — all look like first-mint experiments with no organizational footprint.
+- [ ] **Audit existing NFT projects for `isCollectible` classification.** New flag (2026-04-19) needs a pass over the existing NFT-category projects: `nftCollections` aggregate (pure-PFP catch-all → almost certainly `isCollectible: true`), `nftLaunchpad` (Tradeport launchpad product → `false`, it's infrastructure not a collection), `tradeport` (marketplace → `false`). Decide per-project and apply.
+- [ ] **Studio 0xcb6956e9 — identify "Droppzz" operator and (optionally) consolidate gibberish deploys.** One of the deployer's modules is `droppzz_test_iota` — possible operator handle but not findable via public web search (2026-04). Ask in IOTA Discord / community channels; if confirmed, rename `studio-cb69` team to `droppzz` (same pattern as Clawnera for `studio-0a0d`). Separately, the deployer has ~25 keyboard-mash test-deploy modules that currently all surface under the single studio aggregate row — once the five real collections are carved out, consider whether to additionally suppress the gibberish from the dashboard (marked as "aggregate / not a project", counted only in team totals).
 - [ ] **Suggest-fingerprint CLI** (`api/src/suggest-fingerprints.ts`) — reads the latest `EcosystemSnapshot.unattributed`, emits candidate `ProjectDefinition` TS stubs per cluster that has `sampleIdentifiers` (name, teamId=null placeholder, match={fingerprint:{type, fields:{…}}}). Human reviews, keeps, commits. Build this once the first by-hand pass proves the `fields` schema actually fits the real clusters.
 
 ## Fingerprint matchers — future widening

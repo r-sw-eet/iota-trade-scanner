@@ -5,7 +5,7 @@ import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccredi
 import { identityFull, identityWot, objectid, credentials, iotaNames } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroOft, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle } from './oracles/_index';
-import { nftLaunchpad, tradeport, nftCollections } from './nft/_index';
+import { nftLaunchpad, tradeport, nftCollections, healthyGang, studioCb69Aggregate } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip } from './games/_index';
 import {
   marketplaceEscrow, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
@@ -52,6 +52,11 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   // NFT (nftLaunchpad before tradeport so the launchpad sub-product wins
   // its `{launchpad, mint_box}` match over tradeport's deployer-catch-all)
   nftLaunchpad, tradeport, nftCollections,
+  // Studio 0xcb6956e9 — multi-collection PFP deployer. Aggregate sits here
+  // (deployer catch-all, splitByDeployer fires fingerprint override);
+  // `healthyGang` is fingerprint-only so order-vs-aggregate doesn't matter
+  // for sync but keeps it adjacent visually.
+  healthyGang, studioCb69Aggregate,
 
   // Games
   chess, ticTacToe, game2048, iotaFlip,
