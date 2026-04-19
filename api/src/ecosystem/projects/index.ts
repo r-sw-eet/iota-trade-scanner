@@ -5,7 +5,7 @@ import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccredi
 import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroOft, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle } from './oracles/_index';
-import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion } from './nft/_index';
+import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip } from './games/_index';
 import {
   marketplaceEscrow, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
@@ -65,6 +65,7 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   // pins the deployer + a module `any`-set so we can't accidentally catch
   // unrelated packages reusing these generic module names elsewhere.
   gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion,
+  iotaPunks,
 
   // Games
   chess, ticTacToe, game2048, iotaFlip,

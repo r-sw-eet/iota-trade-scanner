@@ -5,3 +5,4 @@ export { healthyGang } from './healthy-gang';
 export { ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops } from './studio-cb69-siblings';
 export { studioCb69Aggregate } from './studio-cb69';
 export { gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion } from './gamifly-collections';
+export { iotaPunks } from './iota-punks';
