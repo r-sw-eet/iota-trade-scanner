@@ -3,7 +3,7 @@ import { Team } from '../team.interface';
 export const layerzero: Team = {
   id: 'layerzero',
   name: 'LayerZero',
-  description: 'LayerZero V2 omnichain interoperability protocol on IOTA Rebased. Operates the IOTA L1 Move deployment (eid 30423) — EndpointV2, ULN302 message library, ZRO token, PTB-builder infrastructure, OApp framework, plus separate DVN worker and Executor worker deployments. 32 packages total across 3 deployers.',
+  description: 'LayerZero V2 omnichain interoperability protocol on IOTA Rebased. Operates the IOTA L1 Move deployment (eid 30423) — EndpointV2, ULN302 message library, ZRO token, PTB-builder infrastructure, OApp framework, separate DVN worker and Executor worker deployments, plus per-DVN-operator identity packages (Nethermind / LayerZero Labs / USDT0 / Luganodes / Horizen). 37 packages total across 4 deployers.',
   urls: [
     { label: 'Website', href: 'https://layerzero.network' },
     { label: 'IOTA L1 docs', href: 'https://docs.layerzero.network/v2/deployments/chains/iota-l1' },
@@ -17,6 +17,12 @@ export const layerzero: Team = {
     '0x622796305d71e976f19d0183f43fd225310421542d0eb62cf0e878478d535422',
     // Executor worker package publisher (LayerZero Labs Executor instance)
     '0x76f89ad2e913444040485b557c0dfee9e7a868dc9527ec7a6f363490c7e63651',
+    // LayerZero Labs admin / ops account — publishes per-DVN-operator
+    // identity packages at the 5 operator canonical addresses (Nethermind,
+    // LZ Labs, USDT0, Luganodes, Horizen). Each published package has a
+    // single `dvn_layerzero` module and its address matches the
+    // `cap_type.Package.pos0` field on the corresponding DVN instance.
+    '0x9004e1e4c6dcc42d1b73269db48d510192665677fcad2079a3c7d1e9e971d34e',
   ],
   logo: '/logos/layerzero.png',
   attribution: `
@@ -72,6 +78,18 @@ The executor address \`0x29b691f9496eea6df8f4d77ceacee5949e92e7e51b2e3c2e6cd70ee
 - **Executor worker package publisher** \`0x76f89ad2e913444040485b557c0dfee9e7a868dc9527ec7a6f363490c7e63651\` — 5 packages, single Executor instance created: \`0x87862030fcd8cb44e67ee8ea02506e28290b6e0669e75efb8c09d587a40438f6\`. The instance's \`worker.worker_cap.cap_type.Package.pos0\` = \`0x29b691f9496eea6df8f4d77ceacee5949e92e7e51b2e3c2e6cd70eef5237e99a\` — exactly the executor address published in the LayerZero metadata API (\`metadata.layerzero-api.com/v1/metadata/deployments\` → iotal1 → executor). This confirms the deployer as LayerZero Labs' Executor worker publisher.
 
 Both worker deployers are included here (not split out as separate teams) because a single LayerZero-Labs-published codebase underpins all DVN workers regardless of operator, and the Executor is LZ's own worker. Per-operator DVN counts can be recovered from the cap-pkg mapping above if we want finer-grained rows later.
+
+- **Per-DVN-operator identity packages** deployer \`0x9004e1e4c6dcc42d1b73269db48d510192665677fcad2079a3c7d1e9e971d34e\` (LayerZero Labs admin / ops account — same address that appears as the \`deposit_address\` and \`active_admins[0]\` in every DVN instance's shared config). Publishes 5 packages, each shipping a single \`dvn_layerzero\` module AT the DVN-operator canonical address — i.e. the package address IS the operator's on-chain ID, and the corresponding DVN instance's \`worker_cap.cap_type.Package.pos0\` field references it. 4 of the 5 match operators in LayerZero's public DVN directory (\`metadata.layerzero-api.com/v1/metadata/dvns\` under \`iotal1\`):
+
+  | Per-operator package                                                 | Operator (from DVN directory)                       |
+  |----------------------------------------------------------------------|-----------------------------------------------------|
+  | \`0x50e159c13f1222f7eea85c718f67b20146ef2485f844b23ffa15719adc97080a\` | Nethermind                                          |
+  | \`0x1f4fa24418593ee8087cb62203c7405e7cb7234edc42494aeface57c1f42eeac\` | USDT0                                               |
+  | \`0x02f42267433102ff09d5111fbedd375204bda05e6afe19e38e137fa97fc7dbfd\` | Luganodes                                           |
+  | \`0xcefb342d62280f06a3d5673abe82f49675b6cd5c86211b2adc0c93e56fa388f5\` | Horizen                                             |
+  | \`0xdb6a2d1932e2d03f037b7a56903aa20ca633bdec0fcb7db521f48dd4569e8ef1\` | (unknown — not listed in the DVN directory; may be a deprecated / retired DVN or a bootstrap/test identity) |
+
+  LayerZero Labs' own DVN cap pkg \`0xa560697328ccb5dc3f3f8e8a2c41e282827060da7a29971d933e9aa405c2ba7f\` is NOT published from this admin account — it's self-deployed separately, consistent with LZ Labs owning their own DVN identity rather than having an admin publish it on their behalf.
 
 Triangulation:
 - [x] LayerZero's own metadata API names \`iotal1-mainnet\` with eid 30423, chainLayer L1, chainType iotamove.

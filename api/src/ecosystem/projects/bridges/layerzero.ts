@@ -25,7 +25,7 @@ export const layerZeroWorkers: ProjectDefinition = {
   name: 'LayerZero Workers',
   layer: 'L1',
   category: 'Bridge',
-  description: 'LayerZero\'s on-chain worker deployments — 5 DVN instances (Nethermind, LayerZero Labs, USDT0, Luganodes, Horizen) sharing one LayerZero-Labs-published worker codebase at deployer `0x62279630…`, plus the Executor worker at deployer `0x76f89ad2…` (LayerZero Labs). 10 packages combined. Separated from the protocol-contracts row so verification / delivery activity is visible independently from user-messaging activity.',
+  description: 'LayerZero\'s on-chain worker + admin deployments — 5 DVN instances (Nethermind, LayerZero Labs, USDT0, Luganodes, Horizen) sharing one LayerZero-Labs-published worker codebase at deployer `0x62279630…`, the Executor worker at deployer `0x76f89ad2…` (LayerZero Labs), and 5 per-operator DVN identity packages published by LZ Labs\' admin account `0x9004e1e4…` at the DVN-operator canonical addresses. 15 packages combined across 3 deployers. Separated from the protocol-contracts row so verification / delivery / operator-identity activity is visible independently from user-messaging activity.',
   urls: [
     { label: 'DVN directory API', href: 'https://metadata.layerzero-api.com/v1/metadata/dvns' },
     { label: 'IOTA L1 docs', href: 'https://docs.layerzero.network/v2/deployments/chains/iota-l1' },
@@ -34,8 +34,9 @@ export const layerZeroWorkers: ProjectDefinition = {
   logo: '/logos/layerzero.png',
   match: {
     deployerAddresses: [
-      '0x622796305d71e976f19d0183f43fd225310421542d0eb62cf0e878478d535422', // DVN workers
-      '0x76f89ad2e913444040485b557c0dfee9e7a868dc9527ec7a6f363490c7e63651', // Executor worker
+      '0x622796305d71e976f19d0183f43fd225310421542d0eb62cf0e878478d535422', // DVN worker codebase
+      '0x76f89ad2e913444040485b557c0dfee9e7a868dc9527ec7a6f363490c7e63651', // Executor worker codebase
+      '0x9004e1e4c6dcc42d1b73269db48d510192665677fcad2079a3c7d1e9e971d34e', // LZ Labs admin — per-DVN-operator identity packages
     ],
   },
   attribution: `

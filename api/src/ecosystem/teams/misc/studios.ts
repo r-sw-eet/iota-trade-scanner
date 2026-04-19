@@ -1,5 +1,69 @@
 import { Team } from '../team.interface';
 
+export const studiob5fc: Team = {
+  id: 'studio-b5fc',
+  name: 'Studio 0xb5fca220',
+  description: 'Anonymous solo-developer Carbon Credits RWA pilot on IOTA Rebased. Single package shipping a complete 4-module carbon-credit system: `credit_token` (the CREDIT_TOKEN coin-type, 6,187 in circulation), `credit_carbon_manager` (per-record accounting of available vs consumed credits), `minter_pass_nft` (permissioned-minter cap NFT — only pass-holders can mint new credits), and `certificate_nft` (proof-of-consumption NFT issued when a credit is retired). Functional architecture, real on-chain activity, but demo-scale volume (2 minted CarbonCreditRecord objects, 2 MinterPassNFTs, 2 CertificateNFTs currently).',
+  deployers: ['0xb5fca2204cfdd7541137fa247e5878ec109645893461b563a87c0aa3b36a01a0'],
+  attribution: `
+Synthetic team id for an anonymous dev's Carbon Credits RWA pilot — single package, full production-shaped architecture, small on-chain footprint. Package \`0xb8f25b829422bb0df7a405fc752c230c4dac6985dd6ae1e661fe7a13e8f4383b\` ships 4 modules in a clean separation-of-concerns layout:
+
+**\`credit_token\`** — the issuable carbon-credit coin-type. Regular OTW pattern: \`CREDIT_TOKEN\` witness (\`drop\`) + \`CreditManager\` (\`key\`) holding the treasury-cap. Current supply: \`6187\` CREDIT_TOKEN units. Events \`CarbonCreditMinted\` / \`CarbonCreditConsumed\` trace every mint/retire.
+
+**\`credit_carbon_manager\`** — per-record accounting. \`CarbonCreditRecord\` carries \`available_credit\` and \`minted_credit\` fields per project/issuer; a \`CarbonCreditTable\` indexes all records. Sampled: one record with \`available_credit: "25"\`, \`minted_credit: "0"\` — the record has been allocated 25 credits but nothing minted yet. Event \`CreditPointUpdated\` tracks allocation changes.
+
+**\`minter_pass_nft\`** — permissioned-minter cap NFT. \`MinterPassNFT\` ("Carbon Credit Minter Pass", description: "allows the holder to mint carbon credits") gates access to the \`credit_token\` mint function. Shared \`AppConfig\` object stores the admin address (\`0xb5fca220…\` — the deployer itself). \`CreditPointUpdateCap\` (\`key\`) is the capability object holders wield to update \`CarbonCreditRecord\` allocations. Image URL is a Freepik stock NFT illustration — placeholder art, consistent with dev/pilot scale.
+
+**\`certificate_nft\`** — proof-of-consumption artifact. \`CertificateNFT\` ("Carbon Credit Consume Certificate") issued to a consumer when they retire credits. Image \`carbonoffsetcertification.com/wp-content/uploads/2023/01/CO_certification.jpg\` — also placeholder / generic certificate template, not operator-specific art.
+
+**Operator identification attempts:** no public-web brand surfaced. The placeholder images + generic field names suggest a dev's showcase rather than a production offering. No iota.org showcase entry, no GitHub repo findable at the name "carbon credit manager". Deployer address has no other packages. Left as synthetic \`studio-b5fc\` until someone claims it or it scales past pilot.
+
+**Net shape:** architecturally correct RWA-carbon-credit design (permissioned mint via cap-NFT + per-record accounting + tokenized credit + consumption certificate — textbook voluntary-carbon-market primitive), but demo-scale activity (single-digit MinterPasses, single-digit CarbonCreditRecords, ~6,000 credits in circulation).
+`.trim(),
+};
+
+export const studio457d: Team = {
+  id: 'studio-457d',
+  name: 'Studio 0x457dfa6b',
+  description: 'Anonymous deployer behind the "IOTA Estoicos" PFP collection. 7 packages all carrying the single-module `estoicos` signature (upgrade versions of the same \\"EstoicosNFT\\" type). Only 1 NFT minted so far — `IOTA Estoicos Genesis OG NFT #1` — so the collection is in pre-launch / teaser state. No public brand presence; consistent with a solo-dev pre-launch setup.',
+  deployers: ['0x457dfa6b2594e250535af12d886f77ae3a32db63785830949927e8247f8c8a38'],
+  attribution: `
+Synthetic team id for the "IOTA Estoicos" PFP pre-launch. 7 packages on this deployer, all with module set \`{estoicos}\` — 7 upgrade versions of the same codebase. Struct set is minimal: \`EstoicosNFT\` (\`key\` only — note, NOT \`store, key\`, so these tokens cannot be held in other wrapper objects) + \`NFTMinted\` event.
+
+Sampled NFT: \`name: "IOTA Estoicos"\`, \`description: "IOTA Estoicos Genesis OG NFT"\`, \`number: "1"\`, image at \`i.ibb.co/N6R3vPyL/estoicos.png\` (ImgBB — free image host, placeholder-tier hosting). Only 1 NFT minted across all 7 package versions. Reads as a dev iterating on the contract before the public drop.
+
+"Estoicos" is Portuguese / Spanish for "stoics" — philosophy-themed collection. No public site / Twitter / Discord found at brand level.
+
+Kept as synthetic team until a real brand surfaces or the collection actually launches at scale.
+`.trim(),
+};
+
+export const studiocebe: Team = {
+  id: 'studio-cebe',
+  name: 'Studio 0xcebec37a',
+  description: 'Anonymous deployer behind a "ctrlv AI Agents" on-chain agent-registry pilot. Single package shipping `ctrlv_agent` module with `AgentNFT` + full lifecycle events (Mint / Transfer / Update / Burn). Sampled agent declares `model: "Claude"`, `role: "Assistant"`, `service: "Customer Support"` — NFT-shaped AI-agent identity primitive. Demo-scale: 1 "Demo Agent" minted. No public brand presence.',
+  deployers: ['0xcebec37ad6c05b7fa54344c0bc4dd7e0c340eab11e691f57bdf9f9ed0e75999a'],
+  attribution: `
+Synthetic team id for a single-developer on-chain AI-agent-registry pilot. Single package at deployer \`0xcebec37ad6c05b7fa54344c0bc4dd7e0c340eab11e691f57bdf9f9ed0e75999a\` shipping module \`ctrlv_agent\` with struct set: \`AgentNFT\` (\`store, key\` — the agent identity object), \`AgentNFTMinted\` / \`AgentNFTTransferred\` / \`AgentNFTUpdated\` / \`AgentNFTBurned\` events — full CRUD lifecycle.
+
+Sampled AgentNFT:
+\`\`\`
+{ name: "Demo Agent",
+  model: "Claude",
+  service: "Customer Support",
+  role: "Assistant",
+  description: "An AI assistant specialized in customer support and general assistance",
+  url: { url: "https://cdn.builtin.com/…/builtin.com image" } }
+\`\`\`
+
+Structure is closer to a tokenized AI-agent profile than a PFP — \`model\` + \`service\` + \`role\` fields are specifically AI-agent-shaped metadata. The \`Updated\` event suggests the agent's config can be mutated over time (model / service / role updates). Looks like a developer prototyping "on-chain identity for AI agents" — a speculative primitive that would let AI agents carry reputation / history / ownership across services.
+
+"ctrlv" reads as "ctrl-v" (paste keyboard shortcut — likely the brand play), but no public site, X handle, or GitHub surfaces at that name linked to IOTA. Single "Demo Agent" minted — firmly demo-scale.
+
+No public brand presence; synthetic team until someone claims it.
+`.trim(),
+};
+
 export const studio49c4: Team = {
   id: 'studio-49c4',
   name: 'Studio 0x49c4e917',

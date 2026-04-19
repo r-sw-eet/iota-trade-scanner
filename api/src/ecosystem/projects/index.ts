@@ -1,16 +1,17 @@
 import { ProjectDefinition } from './project.interface';
 
-import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale } from './defi/_index';
+import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale, clawSwapGateway } from './defi/_index';
 import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus, truvid } from './trade/_index';
 import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroOft, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle } from './oracles/_index';
-import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4 } from './nft/_index';
+import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip } from './games/_index';
 import {
   marketplaceEscrow, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,
-  nativeStaking, iotaFramework, ifTesting, stardustMigratedTokens, krillTube,
+  nativeStaking, iotaFramework, ifTesting, stardustMigratedTokens, krillTube, giveRep,
+  carbonCredits,
 } from './misc/_index';
 
 /**
@@ -30,6 +31,7 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   // order is otherwise irrelevant.
   swirl, swirlV1,
   cyberperp, iotaroyale,
+  clawSwapGateway,
 
   // Trade / Enterprise
   // TLIP and TWIN keep priority above IF Asset Framework / Accreditation to
@@ -68,6 +70,7 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   iotaPunks,
   ogApe, lilApe,
   lumis,
+  iotaEstoicos, ctrlvAgents,
   phishingSpray49c4,
 
   // Games
@@ -80,6 +83,8 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   nativeStaking, iotaFramework,
   stardustMigratedTokens,
   krillTube,
+  giveRep,
+  carbonCredits,
   // `ifTesting` is routing-only (match: {}) and MUST come last among
   // `iota-foundation` projects — the team-deployer routing code picks the
   // first routing-only project it finds on the team, so putting it last

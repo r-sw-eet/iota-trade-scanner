@@ -14,3 +14,5 @@ export { iotaFramework } from './iota-framework';
 export { ifTesting } from './if-testing';
 export { stardustMigratedTokens } from './stardust-migrated-tokens';
 export { krillTube } from './krilltube';
+export { giveRep } from './giverep';
+export { carbonCredits } from './carbon-credits';

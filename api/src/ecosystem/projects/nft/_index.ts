@@ -9,3 +9,5 @@ export { iotaPunks } from './iota-punks';
 export { ogApe, lilApe } from './ape-dao-collections';
 export { lumis } from './lumis';
 export { phishingSpray49c4 } from './phishing-spray-49c4';
+export { iotaEstoicos } from './iota-estoicos';
+export { ctrlvAgents } from './ctrlv-agents';
