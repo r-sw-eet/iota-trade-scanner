@@ -10,7 +10,7 @@ import { chess, ticTacToe, game2048, iotaFlip } from './games/_index';
 import {
   marketplaceEscrow, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,
-  nativeStaking, iotaFramework, ifTesting, stardustMigratedTokens,
+  nativeStaking, iotaFramework, ifTesting, stardustMigratedTokens, krillTube,
 } from './misc/_index';
 
 /**
@@ -79,6 +79,7 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,
   nativeStaking, iotaFramework,
   stardustMigratedTokens,
+  krillTube,
   // `ifTesting` is routing-only (match: {}) and MUST come last among
   // `iota-foundation` projects — the team-deployer routing code picks the
   // first routing-only project it finds on the team, so putting it last
