@@ -5,3 +5,4 @@ export { iotaAssetFramework } from './iota-asset-framework';
 export { iotaAccreditationRegistry } from './iota-accreditation-registry';
 export { traceability } from './traceability';
 export { salus } from './salus';
+export { truvid } from './truvid';

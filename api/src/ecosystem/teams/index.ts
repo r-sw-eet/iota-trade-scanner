@@ -1,7 +1,7 @@
 import { Team } from './team.interface';
 
 import { poolsFinance, virtue, swirl, cyberperp, iotaroyale } from './defi/_index';
-import { tlip, twinFoundation, salus } from './trade/_index';
+import { tlip, twinFoundation, salus, truvid } from './trade/_index';
 import { objectid } from './identity/_index';
 import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
 import { switchboard } from './oracles/_index';
@@ -30,7 +30,7 @@ export const ALL_TEAMS: Team[] = [
   iotaroyale,
 
   // Trade
-  tlip, twinFoundation, salus,
+  tlip, twinFoundation, salus, truvid,
 
   // Identity
   objectid,
