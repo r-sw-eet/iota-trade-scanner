@@ -5,7 +5,7 @@ import { tlip, twinFoundation, salus } from './trade/_index';
 import { objectid, iotaNames } from './identity/_index';
 import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
 import { switchboard } from './oracles/_index';
-import { tradeport, iotaPunks } from './nft/_index';
+import { tradeport, iotaPunks, apeDao } from './nft/_index';
 import { iotaFlip, gamifly } from './games/_index';
 import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
 
@@ -42,7 +42,7 @@ export const ALL_TEAMS: Team[] = [
   switchboard,
 
   // NFT
-  tradeport, iotaPunks,
+  tradeport, iotaPunks, apeDao,
 
   // Games
   iotaFlip, gamifly,

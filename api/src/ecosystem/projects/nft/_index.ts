@@ -6,3 +6,4 @@ export { ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops } from './studio-
 export { studioCb69Aggregate } from './studio-cb69';
 export { gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion } from './gamifly-collections';
 export { iotaPunks } from './iota-punks';
+export { ogApe, lilApe } from './ape-dao-collections';
