@@ -1,6 +1,6 @@
 import { ProjectDefinition } from './project.interface';
 
-import { poolsFinance, virtue, virtueStabilityPool, swirl, cyberperp, iotaroyale } from './defi/_index';
+import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale } from './defi/_index';
 import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus } from './trade/_index';
 import { identityFull, identityWot, objectid, credentials } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroOft, wormhole } from './bridges/_index';
@@ -25,7 +25,10 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   // single Stability Pool package and the rest of Virtue's deployer's packages
   // fall through to `virtue`.
   virtueStabilityPool, virtue,
-  swirl,
+  // Swirl V2 before Swirl V1 so the current product carries the DefiLlama
+  // TVL under the existing first-wins dedup. Deployers are disjoint so match
+  // order is otherwise irrelevant.
+  swirl, swirlV1,
   cyberperp, iotaroyale,
 
   // Trade / Enterprise
