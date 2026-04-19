@@ -77,6 +77,10 @@ function formatSyncTime(ts: string | undefined): string {
 function sortValue(p: any, key: string): any {
   if (key === 'team') return (p.team?.name || '').toLowerCase()
   if (key === 'name' || key === 'category' || key === 'categories') return (p[key] || '').toLowerCase()
+  // For TVL, shared-slug siblings carry the same numeric value as their primary via
+  // `tvlShared`. Fall back to it so siblings sort alongside the primary rather than
+  // dropping to zero. The primary-above-sibling tie-break is applied in sortRows.
+  if (key === 'tvl') return p.tvl ?? p.tvlShared ?? 0
   return p[key] ?? 0
 }
 function sortRows(rows: any[], sort: { key: string | null; dir: SortDir }) {
@@ -87,6 +91,14 @@ function sortRows(rows: any[], sort: { key: string | null; dir: SortDir }) {
     const av = sortValue(a, key), bv = sortValue(b, key)
     if (av < bv) return -1 * sign
     if (av > bv) return 1 * sign
+    if (key === 'tvl') {
+      // At equal TVL amounts, a naked TVL (primary) always ranks above a parenthesized
+      // TVL (shared-slug sibling), regardless of sort direction. This keeps the
+      // canonical row pinned above its overlapping neighbours when sorting by TVL.
+      const aIsPrimary = a.tvl != null ? 1 : 0
+      const bIsPrimary = b.tvl != null ? 1 : 0
+      return bIsPrimary - aIsPrimary
+    }
     return 0
   })
 }
@@ -681,7 +693,13 @@ const projectTvlChartOptions = {
                         <td class="py-3 pr-4 text-right font-mono text-base" :class="p.events > 0 ? 'text-[#f4f4f5]' : 'text-[#52525b]'">{{ p.events.toLocaleString() }}{{ p.eventsCapped ? '+' : '' }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base" :class="p.uniqueSenders > 0 ? 'text-[#f4f4f5]' : 'text-[#52525b]'">{{ (p.uniqueSenders || 0).toLocaleString() }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#a1a1aa]">{{ p.storageIota.toFixed(4) }}</td>
-                        <td class="py-3 pr-4 text-right font-mono text-base text-[#a1a1aa]">{{ p.tvl ? `$${formatCompact(p.tvl)}` : '—' }}</td>
+                        <td class="py-3 pr-4 text-right font-mono text-base" :class="p.tvl != null ? 'text-[#a1a1aa]' : (p.tvlShared != null ? 'text-[#71717a]' : 'text-[#52525b]')">
+                          <template v-if="p.tvl != null">${{ formatCompact(p.tvl) }}</template>
+                          <template v-else-if="p.tvlShared != null">
+                            <span :title="`Shared with ${p.tvlSharedWith} — same DefiLlama protocol`">(${{ formatCompact(p.tvlShared) }})</span>
+                          </template>
+                          <template v-else>—</template>
+                        </td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#71717a]">{{ p.packages }}</td>
                       </tr>
                     </tbody>

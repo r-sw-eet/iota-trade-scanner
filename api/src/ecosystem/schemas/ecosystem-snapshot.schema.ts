@@ -17,6 +17,8 @@ export class ProjectDoc {
   @Prop() eventsCapped: boolean;
   @Prop({ type: [String] }) modules: string[];
   @Prop() tvl: number;
+  @Prop({ type: Number, default: null }) tvlShared: number | null;
+  @Prop({ type: String, default: null }) tvlSharedWith: string | null;
   @Prop() logo: string;
   @Prop({ type: String, default: null }) logoWordmark: string | null;
   @Prop({ type: Object }) team: Record<string, any> | null;

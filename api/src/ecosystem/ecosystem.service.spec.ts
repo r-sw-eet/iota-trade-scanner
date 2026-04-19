@@ -1291,6 +1291,8 @@ describe('EcosystemService', () => {
       objects?: Record<string, any>;
       txEffects?: Record<string, string[]>;
       networkTx?: string;
+      /** Per-package event counts — matched against the `emittingModule` prefix in the filter. Modules on the same package all share the count. Used to drive primary-selection in shared-slug TVL tests. */
+      eventsByPackage?: Record<string, number>;
     }) => {
       return jest.fn(async (url: string, opts: any) => {
         const body: string = opts?.body || '';
@@ -1306,7 +1308,12 @@ describe('EcosystemService', () => {
             return { json: async () => ({ data: { checkpoint: { networkTotalTransactions: script.networkTx ?? '1000000' } } }) };
           }
           if (body.includes('events(filter:') && body.includes('nodes { __typename }')) {
-            return { json: async () => ({ data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }) };
+            const unescaped = body.replace(/\\/g, '');
+            const m = /emittingModule: "([^:]+)::/.exec(unescaped);
+            const pkgAddr = m?.[1] ?? '';
+            const count = script.eventsByPackage?.[pkgAddr] ?? 0;
+            const nodes = Array.from({ length: count }, () => ({ __typename: 'MoveEvent' }));
+            return { json: async () => ({ data: { events: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }) };
           }
           if (body.includes('events(filter:') && body.includes('last: 1')) {
             return { json: async () => ({ data: { events: { pageInfo: { endCursor: null } } } }) };
@@ -1565,32 +1572,76 @@ describe('EcosystemService', () => {
       expect(exact.tvl).toBe(12345);
     });
 
-    it('assigns a DefiLlama protocol\'s TVL to at most one project — multi-project teams do not double-count', async () => {
-      // Regression guard: before this fix, substring matching happily
-      // assigned the same TVL to every project whose name substring-matched
-      // a DefiLlama protocol, so teams with multiple product rows (Virtue
-      // + Virtue Stability Pool; TokenLabs Staking / vIOTA / TLN / Payment)
-      // all carried the same tvl, triple-counting in ecosystem totals.
+    it('assigns a DefiLlama protocol\'s TVL to at most one primary; siblings carry `tvlShared` + `tvlSharedWith` — no double-counting in ecosystem totals', async () => {
+      // Shared-slug parens pattern: when >1 project substring-matches the
+      // same DefiLlama protocol, the highest-events project becomes primary
+      // (carries `tvl`); the rest become siblings (carry `tvlShared` with
+      // the same number and `tvlSharedWith: <primary>`). Dashboard sums
+      // `tvl` only — `tvlShared` is display-only so team / layer totals
+      // don't triple-count a shared figure across Virtue + Virtue Stability
+      // Pool, Swirl V1 + V2, or TokenLabs Staking / vIOTA / TLN / Payment.
       (global as any).fetch = scriptFetch({
         packages: [
-          // Both match 'Exact' def (mods=['foo','bar']) — but different
-          // package addresses give us two separate project instances only
-          // if we use splitByDeployer. To simulate two projects both name-
-          // matching the same protocol, use Exact + AllRequired with
-          // names that both substring-match 'TestProto'.
-          pkg({ address: '0xa', modules: ['foo', 'bar'] }), // → Exact
-          pkg({ address: '0xb', modules: ['a', 'b'] }),     // → AllRequired
+          pkg({ address: '0xa', modules: ['foo', 'bar'] }), // → Exact (2 events)
+          pkg({ address: '0xb', modules: ['a', 'b'] }),     // → AllRequired (5 events)
         ],
+        eventsByPackage: { '0xa': 2, '0xb': 5 },
         llama: [
-          // Single protocol that name-substring-matches BOTH project names
           { name: 'ExactTestProtoAllRequired', tvl: 999, chainTvls: { IOTA: 12345 }, chains: ['IOTA'] },
         ],
       });
       const snap = await runCapture();
-      const tvlHolders = snap.l1.filter((p: any) => p.tvl != null);
-      // Exactly one project should have claimed the TVL.
-      expect(tvlHolders).toHaveLength(1);
-      expect(tvlHolders[0].tvl).toBe(12345);
+      const primary = snap.l1.find((p: any) => p.tvl != null);
+      const sibling = snap.l1.find((p: any) => p.tvlShared != null);
+      // Highest-events project wins primary → AllRequired (5) over Exact (2).
+      expect(primary.name).toBe('AllRequired');
+      expect(primary.tvl).toBe(12345);
+      expect(primary.tvlShared).toBeNull();
+      expect(primary.tvlSharedWith).toBeNull();
+      // Sibling carries the same number as tvlShared + links to primary.
+      expect(sibling.name).toBe('Exact');
+      expect(sibling.tvl).toBeNull();
+      expect(sibling.tvlShared).toBe(12345);
+      expect(sibling.tvlSharedWith).toBe('AllRequired');
+    });
+
+    it('shared-slug tie-break: at equal event counts, primary goes to name-asc', async () => {
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xa', modules: ['foo', 'bar'] }), // → Exact
+          pkg({ address: '0xb', modules: ['a', 'b'] }),     // → AllRequired
+        ],
+        // Both zero events — tie. AllRequired < Exact by name → primary.
+        llama: [
+          { name: 'ExactTestProtoAllRequired', tvl: 999, chainTvls: { IOTA: 12345 }, chains: ['IOTA'] },
+        ],
+      });
+      const snap = await runCapture();
+      const primary = snap.l1.find((p: any) => p.tvl != null);
+      const sibling = snap.l1.find((p: any) => p.tvlShared != null);
+      expect(primary.name).toBe('AllRequired');
+      expect(sibling.name).toBe('Exact');
+      expect(sibling.tvlSharedWith).toBe('AllRequired');
+    });
+
+    it('does not add an L2 row for a DefiLlama protocol already claimed by an L1 project via substring match — guards against Swirl-V2-rename-style duplicates', async () => {
+      // When L1 project "Exact" claims DefiLlama's "Exact Protocol" via
+      // bidirectional substring match, the L2-add loop must not then push
+      // a fresh "Exact Protocol" L1/L2 row just because the proto.name
+      // doesn't exact-lowercase-match any row in `existingNames`. Regression
+      // triggered by renaming "Swirl" → "Swirl V2" + "Swirl V1": neither
+      // exactly matches DefiLlama's "Swirl", so without the claimed-slug
+      // guard the loop would add a duplicate L1 "Swirl" row.
+      (global as any).fetch = scriptFetch({
+        packages: [pkg({ address: '0xaa', modules: ['foo', 'bar'] })], // → Exact
+        llama: [
+          { name: 'Exact Protocol', slug: 'exact-protocol', tvl: 99_999, chainTvls: { IOTA: 12345 }, chains: ['IOTA'] },
+        ],
+      });
+      const snap = await runCapture();
+      const exactRows = snap.l1.filter((p: any) => p.name === 'Exact' || p.name === 'Exact Protocol');
+      // Only the original L1 "Exact" row — no duplicate "Exact Protocol" row added.
+      expect(exactRows.map((p: any) => p.name)).toEqual(['Exact']);
     });
 
     it('leaves L1 tvl null when DefiLlama has no IOTA-chain slice for the match', async () => {

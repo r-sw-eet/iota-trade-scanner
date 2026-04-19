@@ -70,6 +70,10 @@ export interface Project {
   eventsCapped: boolean;
   modules: string[];
   tvl: number | null;
+  /** Set when this project shares a DefiLlama slug with another higher-ranked project. Same numeric value as the primary's `tvl`; rendered in parens on the UI to signal the overlap. Mutually exclusive with `tvl` (exactly one is non-null when the row participates in a shared-slug group). */
+  tvlShared: number | null;
+  /** Name of the primary project this row shares its DefiLlama TVL with — used for the "shared with <primary>" tooltip. `null` when `tvlShared` is null. */
+  tvlSharedWith: string | null;
   /** Resolved square icon URL. Precedence: `ProjectDefinition.logo` → `Team.logo` → `null` (frontend falls back to initials). Used on list rows, team cards, and other small renders. */
   logo: string | null;
   /** Resolved landscape wordmark URL. Precedence: `ProjectDefinition.logoWordmark` → `Team.logoWordmark` → `null` (details page falls back to `logo`). */
@@ -728,6 +732,8 @@ export class EcosystemService implements OnModuleInit {
         storageIota: Math.round(totalStorage * 10000) / 10000,
         events, eventsCapped, modules: mods,
         tvl: null,
+        tvlShared: null,
+        tvlSharedWith: null,
         logo: def.logo ?? team?.logo ?? null,
         logoWordmark: def.logoWordmark ?? team?.logoWordmark ?? null,
         team,
@@ -749,35 +755,67 @@ export class EcosystemService implements OnModuleInit {
       );
 
       // Match TVL to existing L1 projects — IOTA-chain slice only, not
-      // cross-chain total. Assign each DefiLlama protocol's TVL to AT MOST
-      // ONE project row (the first substring-match) so multi-product teams
-      // like TokenLabs (Staking / vIOTA / TLN / Payment) or Virtue (Virtue
-      // / Virtue Stability Pool) don't each claim the same protocol's TVL
-      // and double-count it in ecosystem totals.
-      const claimedLlamaSlugs = new Set<string>();
+      // cross-chain total. When multiple project rows share one DefiLlama
+      // slug (e.g. Swirl V1 + V2, Virtue + Virtue Stability Pool, or any of
+      // the TokenLabs products), pick a single *primary* by activity (event
+      // count desc, name asc tiebreak); primary carries `tvl`, the others
+      // carry the same number as `tvlShared` + `tvlSharedWith: <primary>`.
+      // The dashboard sums only `tvl` into totals so the shared value is
+      // never double-counted; siblings render `(TVL)` in parentheses with
+      // a "shared with <primary>" tooltip.
+      type LlamaMatch = { project: (typeof projects)[number]; proto: any; tvl: number };
+      const matches: LlamaMatch[] = [];
       for (const project of projects) {
-        const match = iotaProtocols.find((p) => {
-          const slug = p.slug || p.name;
-          if (claimedLlamaSlugs.has(slug)) return false;
-          return (
-            p.name.toLowerCase().includes(project.name.toLowerCase()) ||
-            project.name.toLowerCase().includes(p.name.toLowerCase())
-          );
+        for (const proto of iotaProtocols) {
+          const nameMatch =
+            proto.name.toLowerCase().includes(project.name.toLowerCase()) ||
+            project.name.toLowerCase().includes(proto.name.toLowerCase());
+          if (!nameMatch) continue;
+          const tvl = proto.chainTvls?.['IOTA'];
+          if (tvl == null) continue;
+          matches.push({ project, proto, tvl });
+          break; // first matching proto wins per project (consistent with prior `.find()` behavior)
+        }
+      }
+
+      const claimedLlamaSlugs = new Set<string>();
+      const byProto = new Map<string, LlamaMatch[]>();
+      for (const m of matches) {
+        const slug = m.proto.slug || m.proto.name;
+        claimedLlamaSlugs.add(slug);
+        if (!byProto.has(slug)) byProto.set(slug, []);
+        byProto.get(slug)!.push(m);
+      }
+      for (const group of byProto.values()) {
+        group.sort((a, b) => {
+          if (b.project.events !== a.project.events) return b.project.events - a.project.events;
+          return a.project.name.localeCompare(b.project.name);
         });
-        if (match) {
-          project.tvl = match.chainTvls?.['IOTA'] ?? null;
-          claimedLlamaSlugs.add(match.slug || match.name);
+        const [primary, ...siblings] = group;
+        primary.project.tvl = primary.tvl;
+        for (const sib of siblings) {
+          sib.project.tvlShared = sib.tvl;
+          sib.project.tvlSharedWith = primary.project.name;
         }
       }
 
       // Add L2 EVM projects that aren't already in the L1 list.
       const existingNames = new Set(projects.map((p) => p.name.toLowerCase()));
       for (const proto of iotaProtocols) {
-        const isEvm = (proto.chains || []).includes('IOTA EVM');
-        const isL1Only = (proto.chains || []).includes('IOTA') && !isEvm;
-        if (isL1Only && existingNames.has(proto.name.toLowerCase())) continue;
+        const slug = proto.slug || proto.name;
+        // Skip protocols already claimed by an L1 project via substring
+        // name-match above — guards against duplicating e.g. DefiLlama's
+        // "Swirl" as a fresh L1 row when L1 already carries "Swirl V2" +
+        // "Swirl V1" (neither an exact-lowercase match for "swirl").
+        if (claimedLlamaSlugs.has(slug)) continue;
 
-        // Skip if already matched to an L1 project
+        const isEvm = (proto.chains || []).includes('IOTA EVM');
+
+        // Skip if already matched to an L1 project by exact-lowercase name.
+        // Complements the `claimedLlamaSlugs` check above: the claimed-slug
+        // guard catches substring name-matches (primary/sibling projects);
+        // this catches protos whose IOTA slice was null (so step-1 didn't
+        // claim them) but whose name still exactly matches an L1 row.
         if (existingNames.has(proto.name.toLowerCase())) continue;
         // Only count the IOTA EVM slice, not the protocol's cross-chain total
         const chainTvl = proto.chainTvls?.['IOTA EVM'] ?? 0;
@@ -800,6 +838,8 @@ export class EcosystemService implements OnModuleInit {
           eventsCapped: false,
           modules: [],
           tvl: chainTvl,
+          tvlShared: null,
+          tvlSharedWith: null,
           logo: null,
           logoWordmark: null,
           team: null,

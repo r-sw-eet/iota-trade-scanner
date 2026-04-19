@@ -89,7 +89,7 @@ const curlExamples = computed(() => {
     }
   }
 
-  if (p.layer === 'L2' || p.tvl) {
+  if (p.layer === 'L2' || p.tvl || p.tvlShared) {
     const llamaSlug = p.slug?.replace(/^evm-/, '') || p.name.toLowerCase().replace(/\s+/g, '-')
     examples.push({
       label: 'Get TVL from DefiLlama',
@@ -144,6 +144,7 @@ function copyToClipboard(text: string) {
         <MetricCard label="Events" :value="`${formatCompact(project.events)}${project.eventsCapped ? '+' : ''}`" :subtitle="project.eventsCapped ? 'Capped at pagination limit' : 'Total on-chain events'" />
         <MetricCard v-if="project.layer === 'L1'" label="Storage" :value="`${project.storageIota.toFixed(4)} IOTA`" subtitle="Package storage deposits" />
         <MetricCard v-if="project.tvl" label="TVL" :value="`$${formatCompact(project.tvl)}`" subtitle="From DefiLlama" />
+        <MetricCard v-else-if="project.tvlShared" label="TVL" :value="`($${formatCompact(project.tvlShared)})`" :subtitle="`Shared with ${project.tvlSharedWith} — same DefiLlama protocol`" />
         <MetricCard v-if="project.layer === 'L1'" label="Package Versions" :value="String(project.packages)" subtitle="Deployed on mainnet" />
         <a v-if="project.packageAddress" :href="explorerObject(project.packageAddress)" target="_blank" rel="noopener" class="block hover:ring-1 hover:ring-scanner-accent/40 rounded transition-shadow" :title="`Open ${project.packageAddress} in IOTA Explorer`">
           <MetricCard label="Package ↗" :value="`${project.packageAddress.slice(0, 10)}...`" :subtitle="project.packageAddress" />
