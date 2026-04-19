@@ -1,5 +1,39 @@
 import { Team } from '../team.interface';
 
+export const studio5451: Team = {
+  id: 'studio-5451',
+  name: 'Studio 0x545160c9',
+  description: 'Anonymous solo-developer deployer behind a vehicle-title RWA NFT pilot. 3 single-module `car_nft` packages shipping a sophisticated architecture: shared `Config` object with an admin address + 32-byte backend public key (for off-chain signed updates like mileage / TC / ownership transfer) + VIN registry table. Currently 1 minted NFT — a 2019 Ford Fiesta demo (VIN `WF0JXXGAHJKD30348` — the `WF0` WMI prefix = Ford Werke Germany). Probably a dev\'s demo / pilot of vehicle-title tokenization, but no public website, docs, or GitHub repo found.',
+  deployers: ['0x545160c945b6acbf1b8a295cd488294f17144b0324786d049953e168e783c8a9'],
+  attribution: `
+Synthetic team id pending confirmed operator identification. On-chain footprint is 3 packages at deployer \`0x545160c945b6acbf1b8a295cd488294f17144b0324786d049953e168e783c8a9\`, all single-module \`car_nft\` with a consistent 4-struct signature: \`CAR_NFT\` (OTW, \`drop\`), \`CarNFT\` (\`store, key\`, the actual NFT), \`Config\` (\`store, key\`, shared admin object), and \`NFTMinted\` event.
+
+**Architecture (from the shared Config object at \`0x53ef69b913824da3b0d3f9443e1437584a7e90ab1554bcfa42bb2854505334cc\`):**
+- \`owner\`: \`0x545160c945b6acbf1b8a295cd488294f17144b0324786d049953e168e783c8a9\` (same as deployer — deployer is the admin account).
+- \`backend_pubkey\`: 32-byte public key (likely Ed25519). Off-chain backend signs update payloads (e.g. mileage increments, TC-status changes, ownership transfers); contract verifies the signature against this key before mutating on-chain state. Sophisticated pattern — matches the shape of a production automotive-telemetry design.
+- \`vin_registry\`: table indexing VIN → NFT object (size \`1\` currently, only the one demo car).
+- \`status\`: \`"1"\` (active).
+
+**Sampled NFT (the one minted token at \`0x4fd91228194c5206771c17fe0a9c4904924f589835c7f611fc6f3755c5113eb4\`):**
+\`\`\`
+{ brand: "FORD", model: "FIESTA", vin: "WF0JXXGAHJKD30348",
+  fuel: "ICE", power: "86", year: "2019", mileage: "53000",
+  last_maintenance_date: "NA", last_TC_status: "Pending",
+  image_url: "ipfs://bafy…/fordFiesta.jpeg",
+  current_owner: "0xac2f1630d4606846525dab09b6f77a94e217b8a31c7757b013730b754f66146b" }
+\`\`\`
+
+**Origin / jurisdiction hints:**
+- \`last_TC_status\` — "TC" = Contrôle Technique (French) / Technische Kontrolle (German) / Tecnica Controllo (Italian) — standardized European periodic vehicle inspection terminology. Field name doesn't appear in US/UK automotive contexts, so European dev.
+- VIN WMI \`WF0\` = Ford Werke GmbH (Cologne, Germany) — actual car manufactured for the German / continental European market.
+- Field names in English, IPFS media on web3.storage — international developer, not a specific market vertical.
+
+**Public surface: none found** (2026-04-19 web search). No dedicated domain, no GitHub repo, no IOTA Foundation showcase entry, no visible product brand. Reads as a lone developer's RWA-vehicle-title demo / pilot — the architecture (backend pubkey + signed updates + VIN registry) is too sophisticated for a quick-and-dirty experiment, but at only 1 minted NFT the pilot hasn't moved past proof-of-concept.
+
+**Upgrade to a named-brand team later if:** operator identity surfaces via a GitHub commit, blog post, or IOTA community channel linking this deployer to a real vehicle-title product. Meanwhile \`studio-5451\` stays as the placeholder team id.
+`.trim(),
+};
+
 export const studio295e: Team = {
   id: 'studio-295e',
   name: 'Studio 0x295ee21b',
