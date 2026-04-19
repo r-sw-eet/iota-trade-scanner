@@ -3,3 +3,4 @@ export { identityWot } from './identity-wot';
 export { objectid } from './objectid';
 export { credentials } from './credentials';
 export { iotaNames } from './iota-names';
+export { iotaLink } from './iota-link';
