@@ -816,6 +816,15 @@ export class EcosystemService implements OnModuleInit {
       }
 
       // Add L2 EVM projects that aren't already in the L1 list.
+      // L2 name → team-id map: lets us attribute DefiLlama-synthesized L2 rows
+      // to the same `Team` that owns the project's L1 work (when there is
+      // any), so the Teams view aggregates L1 + L2 activity per team and the
+      // per-project page shows the team row consistently. Keep the keys in
+      // lowercase to match the name-normalization below.
+      const L2_TEAM_MAP: Record<string, string> = {
+        'magicsea amm': 'magicsea',
+        'magicsea lb': 'magicsea',
+      };
       const existingNames = new Set(projects.map((p) => p.name.toLowerCase()));
       for (const proto of iotaProtocols) {
         const slug = proto.slug || proto.name;
@@ -839,6 +848,7 @@ export class EcosystemService implements OnModuleInit {
         if (chainTvl < 100) continue;
 
         const llamaSlug = (proto.slug || proto.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        const l2Team = getTeam(L2_TEAM_MAP[proto.name.toLowerCase()]) ?? null;
         projects.push({
           slug: `evm-${llamaSlug}`,
           name: proto.name,
@@ -857,9 +867,9 @@ export class EcosystemService implements OnModuleInit {
           tvlShared: null,
           tvlSharedWith: null,
           isCollectible: false,
-          logo: null,
-          logoWordmark: null,
-          team: null,
+          logo: l2Team?.logo ?? null,
+          logoWordmark: l2Team?.logoWordmark ?? null,
+          team: l2Team,
           disclaimer: null,
           detectedDeployers: [],
           anomalousDeployers: [],

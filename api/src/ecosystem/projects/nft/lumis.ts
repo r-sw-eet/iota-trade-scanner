@@ -28,6 +28,6 @@ The minimalist 3-trait shape and one-image-per-NFT pattern (no shared image dire
 
 Match rule: deployer-pin + \`all: ['lumi_nft']\` (single-element) — same tight pattern used for the ApeDAO collections on their multi-module deployer. Here there's only one package on MagicSea's Rebased deployer so far, but the module-pin future-proofs against MagicSea adding other Move modules at this address later.
 
-\`isCollectible: true\` — PFP collection with governance utility; hidden by the "Hide collectibles" toggle, consistent with the ApeDAO / IOTAPUNKS treatment. Team \`magicsea\` carries the full brand context (evolution from TangeSea → ShimmerSea → MagicSea, native $LUM + $MAGIC tokens, Magic-LUM lock-boosted staking, ShimmerEVM origin).
+\`isCollectible: true\` — PFP collection with governance utility; hidden by the "Hide collectibles" toggle, consistent with the ApeDAO / IOTAPUNKS treatment. Team \`magicsea\` carries the full brand context (evolution from TangleSea → ShimmerSea → MagicSea, native $LUM + $MAGIC tokens, Magic-LUM lock-boosted staking, ShimmerEVM origin).
 `.trim(),
 };

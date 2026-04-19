@@ -1,5 +1,29 @@
 import { Team } from '../team.interface';
 
+export const studio49c4: Team = {
+  id: 'studio-49c4',
+  name: 'Studio 0x49c4e917',
+  description: 'Anonymous deployer running a phishing-spray NFT airdrop campaign on IOTA Rebased. 3 packages: `voucher::PandabyteTicket` (597 sprayed to 597 unique wallets), `ticket::KilnTicket` (Kiln-brand impersonation; the real Kiln validator service is at `kiln.fi`, not the phishing `kilnstake.net`), and an unused `my_token` OTW template. All NFTs carry `url` fields pointing at non-resolving impersonation domains (`pandabyte.org`, `kilnstake.net`) — classic mass-airdrop-to-phishing pattern: scammer sprays NFTs, recipient sees "claim your reward" metadata, visits site, wallet drains.',
+  deployers: ['0x49c4e917a0d6ca7da640b0267123e5416457e88651e06a79f99dc2fd7b88dbbf'],
+  attribution: `
+Synthetic team id for a phishing-spray operation, not a legitimate project. Evidence:
+
+**Two "reward event" NFT collections, both impersonating or inventing brands:**
+- \`voucher::PandabyteTicket\` (package \`0xe0c9aa20…\`) — all 597 sampled NFTs carry \`name: "PANDABYTE Reward Ticket"\`, \`description: "PANDABYTE Reward Event 2025 is Live at https://pandabyte.org"\`, same IPFS image.
+- \`ticket::KilnTicket\` (package \`0x7a5f3b3d…\`) — NFTs carry \`name: "Kiln Giveaway"\`, \`description: "3000 IOTA Kiln Reward Event 2025 is Live at https://kilnstake.net"\`, different IPFS image. Kiln is a real enterprise-staking provider running IOTA validators (\`docs.kiln.fi/v1/kiln-products/validators/protocols/iota-iota\`), so the NFT is trading on Kiln's brand equity for credibility — but \`kilnstake.net\` is NOT Kiln's site (the real one is \`kiln.fi\`).
+
+**Both target domains do not resolve** (verified 2026-04-19 via DNS lookup):
+- \`pandabyte.org\` → \`Could not resolve host\`
+- \`kilnstake.net\` → \`Could not resolve host\`
+
+**Spray distribution fingerprint:** the 597 \`PandabyteTicket\` objects are held at **597 distinct wallet addresses**, each owning exactly 1 — the canonical "airdrop to a wide random audience" pattern, not the "user-claimed mint" pattern a legit giveaway would produce. Typical phishing playbook: spray a thousand wallets → recipient sees the NFT in their inventory → follows the link → connects wallet to a wallet-draining "claim" page.
+
+**Third package \`my_token\`** ships an empty OTW template (\`MY_TOKEN\` with only \`drop\` ability) — probably scaffolding for a third prong of the campaign not yet rolled out, or leftover test deploy.
+
+Kept as a synthetic \`studio-49c4\` team rather than a named brand because the operator intentionally obscures itself behind non-functional domains. The Studio label preserves the attribution "this deployer exists, it's running scams" without legitimising the scam-brand names.
+`.trim(),
+};
+
 export const studio5451: Team = {
   id: 'studio-5451',
   name: 'Studio 0x545160c9',

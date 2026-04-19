@@ -8,3 +8,4 @@ export { gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion } from '.
 export { iotaPunks } from './iota-punks';
 export { ogApe, lilApe } from './ape-dao-collections';
 export { lumis } from './lumis';
+export { phishingSpray49c4 } from './phishing-spray-49c4';
