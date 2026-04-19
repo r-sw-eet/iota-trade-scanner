@@ -28,6 +28,19 @@ function hasSyncMatch(def: ProjectDefinition): boolean {
   );
 }
 
+/**
+ * A def is "routing-only" iff it has no match criteria AT ALL — no sync rules
+ * AND no fingerprint. Used by the splitByDeployer team-routing code to pick
+ * projects that exist solely to absorb team-deployer-routed aggregate-bucket
+ * packages (e.g. the `IF Testing` project). Must NOT include fingerprint-only
+ * defs (e.g. `Healthy Gang`, `IOTA Link`) — those are reachable via
+ * `matchByFingerprint` and have their own identity; routing aggregate packages
+ * to them would absorb unrelated traffic.
+ */
+function isRoutingOnly(def: ProjectDefinition): boolean {
+  return !hasSyncMatch(def) && !def.match.fingerprint;
+}
+
 const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
 
 /**
@@ -647,7 +660,7 @@ export class EcosystemService implements OnModuleInit {
         let routed = false;
         for (const team of candidateTeams) {
           const routingOnly = ALL_PROJECTS.find(
-            (p) => p.teamId === team.id && !hasSyncMatch(p),
+            (p) => p.teamId === team.id && isRoutingOnly(p),
           );
           if (!routingOnly) continue;
           def = routingOnly;

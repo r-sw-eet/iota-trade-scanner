@@ -10,6 +10,7 @@ export const iotaLink: ProjectDefinition = {
   ],
   teamId: 'iota-foundation',
   match: {
+    packageAddresses: ['0x1badcfafdae5db34db99d535d29956f47401b4cecbdd45c3a9d31452d7217c9a'],
     fingerprint: {
       type: 'iotalink::IotaLink',
       fields: {
@@ -37,7 +38,7 @@ On-chain evidence: fingerprint-only rule on Move objects of type \`<pkg>::iotali
 
 Deployer added to the \`iota-foundation\` team roster. Only the \`iotalink::IotaLink\` carve-out lives as its own row on the dashboard currently; the 11 siblings are TODO follow-ups for per-product attribution (OFT wrappers likely need per-token names — which coin types bridged — whereas the mockcoin / test / icon-spam packages may stay un-split as development utilities).
 
-Match rule: fingerprint on the \`network_address\` + \`common_image_url\` shape, not deployer catch-all — keeps "IOTA Link" tight to the specific NFT product rather than absorbing the other 11 package roles that share the deployer.
+Match rule: \`packageAddresses\` pinned to \`0x1badcfafdae5db34db99d535d29956f47401b4cecbdd45c3a9d31452d7217c9a\` (the one iotalink-module package on this deployer), plus the fingerprint as belt-and-suspenders if IF ever redeploys. The pin is important — without it the def would have only fingerprint match, making it look "routing-only" to the splitByDeployer team-routing code at \`ecosystem.service.ts\`, which would have absorbed IF Testing packages into this row (see the now-tightened \`isRoutingOnly\` check in the service).
 
 \`isCollectible: false\` — the NFT is functional (address-link identity artifact, not a PFP). Stays visible regardless of the "Hide collectibles" toggle.
 `.trim(),
