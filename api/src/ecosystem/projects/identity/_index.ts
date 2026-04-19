@@ -2,3 +2,4 @@ export { identityFull } from './identity-full';
 export { identityWot } from './identity-wot';
 export { objectid } from './objectid';
 export { credentials } from './credentials';
+export { iotaNames } from './iota-names';

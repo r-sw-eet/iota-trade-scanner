@@ -2,7 +2,7 @@ import { ProjectDefinition } from './project.interface';
 
 import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale } from './defi/_index';
 import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus } from './trade/_index';
-import { identityFull, identityWot, objectid, credentials } from './identity/_index';
+import { identityFull, identityWot, objectid, credentials, iotaNames } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroOft, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle } from './oracles/_index';
 import { nftLaunchpad, tradeport, nftCollections } from './nft/_index';
@@ -41,6 +41,7 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
 
   // Identity (identityFull before identityWot — more specific)
   identityFull, identityWot, objectid, credentials,
+  iotaNames,
 
   // Bridges
   echoProtocolBridge, layerZero, layerZeroOft, wormhole,

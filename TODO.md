@@ -65,7 +65,6 @@ With the `fields` fingerprint primitive now live, turn the 16 unattributed clust
     - Healthy Gang NFT series (deployer `0xcb69…724c`, 33 pkgs, `type=…::iota_healthy_gang_::Nft`, `fields.name prefix "Healthy Gang #"`)
     - Isla Silver NFT collection (deployer `0xfe40…2cdb`, 9 pkgs, `type=…::isla_silver::IslaSilverNFT`, `fields.name="Isla Silver"`)
     - IOTA Estoicos (deployer `0x457d…8a38`, 7 pkgs, `type=…::estoicos::EstoicosNFT`)
-    - IOTA Names (deployer `0xfc68…3af1`, 6 pkgs, `type=…::name_registration::NameRegistration`, `fields.name_str suffix ".iota"`)
     - ctrlv AI Agents (deployer `0xceb…999a`, 3 pkgs, `type=…::ctrlv_agent::AgentNFT`)
     - Car NFTs (deployer `0x545…c8a9`, 3 pkgs, `type=…::car_nft::CarNFT`, `fields.brand/model/vin present:true`)
     - TruvID (deployer `0x295e…559a`, 7 pkgs, `type=…::nft_minter2::NFT`, `fields.name prefix "TruvID"`)
