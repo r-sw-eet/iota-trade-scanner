@@ -3,6 +3,7 @@ import { getModelToken } from '@nestjs/mongoose';
 import { EcosystemService } from './ecosystem.service';
 import { OnchainSnapshot } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
+import { ProjectSender } from './schemas/project-sender.schema';
 import { ProjectDefinition } from './projects';
 
 jest.mock('./projects', () => {
@@ -225,6 +226,7 @@ describe('EcosystemService', () => {
   let service: EcosystemService;
   let ecoModel: any;
   let senderModel: any;
+  let senderDocModel: any;
   let fetchMock: FetchMock;
 
   beforeEach(async () => {
@@ -237,11 +239,17 @@ describe('EcosystemService', () => {
       findOne: jest.fn(),
       create: jest.fn(),
     };
+    senderDocModel = {
+      insertMany: jest.fn().mockResolvedValue([]),
+      countDocuments: jest.fn().mockResolvedValue(0),
+      aggregate: jest.fn().mockResolvedValue([]),
+    };
     const module = await Test.createTestingModule({
       providers: [
         EcosystemService,
         { provide: getModelToken(OnchainSnapshot.name), useValue: ecoModel },
         { provide: getModelToken(ProjectSenders.name), useValue: senderModel },
+        { provide: getModelToken(ProjectSender.name), useValue: senderDocModel },
       ],
     }).compile();
     service = module.get(EcosystemService);
@@ -1366,9 +1374,9 @@ describe('EcosystemService', () => {
 
   describe('updateSendersForModule (private)', () => {
     const update = (pkg: string, mod: string) =>
-      (service as any).updateSendersForModule(pkg, mod) as Promise<string[]>;
+      (service as any).updateSendersForModule(pkg, mod) as Promise<number>;
 
-    it('anchors the cursor and returns [] when no record exists', async () => {
+    it('anchors the cursor and returns 0 when no record exists', async () => {
       senderModel.findOne.mockResolvedValue(null);
       fetchMock.mockResolvedValue({
         json: async () => ({
@@ -1377,9 +1385,9 @@ describe('EcosystemService', () => {
       });
       senderModel.create.mockResolvedValue({});
       const r = await update('0xaa', 'mod');
-      expect(r).toEqual([]);
+      expect(r).toBe(0);
       expect(senderModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({ packageAddress: '0xaa', module: 'mod', cursor: 'latest-cur', senders: [] }),
+        expect.objectContaining({ packageAddress: '0xaa', module: 'mod', cursor: 'latest-cur' }),
       );
     });
 
@@ -1387,13 +1395,14 @@ describe('EcosystemService', () => {
       senderModel.findOne.mockResolvedValue(null);
       fetchMock.mockResolvedValue({ json: async () => ({ errors: [{ message: 'boom' }] }) });
       const r = await update('0xaa', 'mod');
-      expect(r).toEqual([]);
+      expect(r).toBe(0);
       expect(senderModel.create).not.toHaveBeenCalled();
     });
 
-    it('pages forward when a record already exists', async () => {
+    it('pages forward and returns the current sender count from the new collection', async () => {
       const record = {
-        senders: ['0xold'],
+        packageAddress: '0xaa',
+        module: 'mod',
         cursor: 'prev',
         eventsScanned: 10,
         save: jest.fn().mockResolvedValue({}),
@@ -1409,8 +1418,10 @@ describe('EcosystemService', () => {
           },
         }),
       });
+      senderDocModel.countDocuments.mockResolvedValue(42);
       const r = await update('0xaa', 'mod');
-      expect(r).toEqual(expect.arrayContaining(['0xold', '0xnew']));
+      expect(r).toBe(42);
+      expect(senderDocModel.countDocuments).toHaveBeenCalledWith({ packageAddress: '0xaa', module: 'mod' });
       expect(record.save).toHaveBeenCalled();
     });
   });
@@ -1421,9 +1432,10 @@ describe('EcosystemService', () => {
     const run = (record: any, emit: string, max = 100) =>
       (service as any).pageForwardSenders(record, emit, max) as Promise<number>;
 
-    it('accumulates lowercased senders, deduplicates, and persists on change', async () => {
+    it('lowercases and dedupes addresses, inserts into the per-sender collection, and advances cursor', async () => {
       const record = {
-        senders: ['0xold'],
+        packageAddress: '0xaa',
+        module: 'm',
         cursor: null,
         eventsScanned: 0,
         save: jest.fn().mockResolvedValue({}),
@@ -1447,7 +1459,7 @@ describe('EcosystemService', () => {
           json: async () => ({
             data: {
               events: {
-                nodes: [{ sender: { address: '0xAAA' } }], // dupe
+                nodes: [{ sender: { address: '0xAAA' } }], // dupe across pages
                 pageInfo: { hasNextPage: false, endCursor: 'p2' },
               },
             },
@@ -1455,15 +1467,130 @@ describe('EcosystemService', () => {
         });
       const scanned = await run(record, '0xaa::m');
       expect(scanned).toBe(4);
-      expect(record.senders.sort()).toEqual(['0xaaa', '0xbbb', '0xold']);
+      expect(senderDocModel.insertMany).toHaveBeenCalledTimes(1);
+      const docs = senderDocModel.insertMany.mock.calls[0][0] as Array<{
+        packageAddress: string; module: string; address: string;
+      }>;
+      const addresses = docs.map((d) => d.address).sort();
+      expect(addresses).toEqual(['0xaaa', '0xbbb']);
+      expect(docs.every((d) => d.packageAddress === '0xaa' && d.module === 'm')).toBe(true);
+      expect(senderDocModel.insertMany.mock.calls[0][1]).toEqual({ ordered: false });
       expect(record.cursor).toBe('p2');
       expect(record.eventsScanned).toBe(4);
       expect(record.save).toHaveBeenCalledTimes(1);
     });
 
+    it('silently ignores duplicate-key errors from insertMany (top-level code 11000)', async () => {
+      const record = {
+        packageAddress: '0xaa',
+        module: 'm',
+        cursor: null,
+        eventsScanned: 0,
+        save: jest.fn().mockResolvedValue({}),
+      };
+      fetchMock.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [{ sender: { address: '0xAAA' } }],
+              pageInfo: { hasNextPage: false, endCursor: 'p1' },
+            },
+          },
+        }),
+      });
+      const dupErr: any = new Error('E11000 duplicate key');
+      dupErr.code = 11000;
+      senderDocModel.insertMany.mockRejectedValueOnce(dupErr);
+      const scanned = await run(record, '0xaa::m');
+      expect(scanned).toBe(1);
+      expect(record.save).toHaveBeenCalledTimes(1);
+      expect(record.cursor).toBe('p1');
+    });
+
+    it('silently ignores duplicate-key writeErrors from bulk insertMany', async () => {
+      // Mongo's bulk-error shape: `writeErrors: [{ code: 11000, ... }, ...]`
+      // rather than a top-level `code`. Every entry must be a dup for the
+      // error to be swallowed.
+      const record = {
+        packageAddress: '0xaa',
+        module: 'm',
+        cursor: null,
+        eventsScanned: 0,
+        save: jest.fn().mockResolvedValue({}),
+      };
+      fetchMock.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [{ sender: { address: '0xAAA' } }, { sender: { address: '0xBBB' } }],
+              pageInfo: { hasNextPage: false, endCursor: 'p1' },
+            },
+          },
+        }),
+      });
+      const bulkErr: any = new Error('BulkWriteError');
+      bulkErr.writeErrors = [
+        { code: 11000, err: { code: 11000 } },
+        { err: { code: 11000 } },
+      ];
+      senderDocModel.insertMany.mockRejectedValueOnce(bulkErr);
+      const scanned = await run(record, '0xaa::m');
+      expect(scanned).toBe(2);
+      expect(record.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-throws bulk writeErrors when any entry is not a dup-key', async () => {
+      const record = {
+        packageAddress: '0xaa',
+        module: 'm',
+        cursor: null,
+        eventsScanned: 0,
+        save: jest.fn().mockResolvedValue({}),
+      };
+      fetchMock.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [{ sender: { address: '0xAAA' } }],
+              pageInfo: { hasNextPage: false, endCursor: 'p1' },
+            },
+          },
+        }),
+      });
+      const bulkErr: any = new Error('BulkWriteError mixed');
+      bulkErr.writeErrors = [{ code: 11000 }, { code: 66 }];
+      senderDocModel.insertMany.mockRejectedValueOnce(bulkErr);
+      await expect(run(record, '0xaa::m')).rejects.toThrow(/BulkWriteError mixed/);
+      expect(record.save).not.toHaveBeenCalled();
+    });
+
+    it('re-throws non-duplicate insertMany errors', async () => {
+      const record = {
+        packageAddress: '0xaa',
+        module: 'm',
+        cursor: null,
+        eventsScanned: 0,
+        save: jest.fn().mockResolvedValue({}),
+      };
+      fetchMock.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [{ sender: { address: '0xAAA' } }],
+              pageInfo: { hasNextPage: false, endCursor: 'p1' },
+            },
+          },
+        }),
+      });
+      senderDocModel.insertMany.mockRejectedValueOnce(new Error('network down'));
+      await expect(run(record, '0xaa::m')).rejects.toThrow(/network down/);
+      expect(record.save).not.toHaveBeenCalled();
+    });
+
     it('breaks on a thrown page', async () => {
       const record = {
-        senders: [],
+        packageAddress: '0xaa',
+        module: 'm',
         cursor: null,
         eventsScanned: 0,
         save: jest.fn().mockResolvedValue({}),
@@ -1472,11 +1599,13 @@ describe('EcosystemService', () => {
       const scanned = await run(record, '0xaa::m');
       expect(scanned).toBe(0);
       expect(record.save).not.toHaveBeenCalled();
+      expect(senderDocModel.insertMany).not.toHaveBeenCalled();
     });
 
-    it('does not save when nothing changed (no events found)', async () => {
+    it('does not save or insert when no events found', async () => {
       const record = {
-        senders: [],
+        packageAddress: '0xaa',
+        module: 'm',
         cursor: null,
         eventsScanned: 0,
         save: jest.fn().mockResolvedValue({}),
@@ -1489,11 +1618,13 @@ describe('EcosystemService', () => {
       const scanned = await run(record, '0xaa::m');
       expect(scanned).toBe(0);
       expect(record.save).not.toHaveBeenCalled();
+      expect(senderDocModel.insertMany).not.toHaveBeenCalled();
     });
 
     it('sends the after cursor once one is set', async () => {
       const record = {
-        senders: [],
+        packageAddress: '0xaa',
+        module: 'm',
         cursor: 'start-cur',
         eventsScanned: 0,
         save: jest.fn().mockResolvedValue({}),
@@ -1513,37 +1644,40 @@ describe('EcosystemService', () => {
   describe('backfillSendersForModule', () => {
     it('creates a cursor=null record when none exists and drains events', async () => {
       const created = {
-        senders: [],
+        packageAddress: '0xpkg',
+        module: 'mod',
         cursor: null,
         eventsScanned: 0,
         save: jest.fn().mockResolvedValue({}),
       };
       senderModel.findOne.mockResolvedValue(null);
       senderModel.create.mockResolvedValue(created);
-      fetchMock
-        .mockResolvedValueOnce({
-          json: async () => ({
-            data: {
-              events: {
-                nodes: [{ sender: { address: '0xA' } }],
-                pageInfo: { hasNextPage: false, endCursor: 'done' },
-              },
+      fetchMock.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [{ sender: { address: '0xA' } }],
+              pageInfo: { hasNextPage: false, endCursor: 'done' },
             },
-          }),
-        });
+          },
+        }),
+      });
+      senderDocModel.countDocuments.mockResolvedValue(1);
       const n = await service.backfillSendersForModule('0xpkg', 'mod');
       expect(senderModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({ cursor: null, senders: [] }),
+        expect.objectContaining({ cursor: null }),
+      );
+      expect(senderDocModel.insertMany).toHaveBeenCalledWith(
+        [{ packageAddress: '0xpkg', module: 'mod', address: '0xa' }],
+        { ordered: false },
       );
       expect(n).toBe(1);
     });
 
     it('drains in batches until a cycle sees zero progress', async () => {
-      // Batch 1 returns 2 nodes, hasNextPage=false → scanned=2, save. Outer
-      // loop iterates; prevCursor=null initially, after batch1 cursor='end'.
-      // Next iteration, prevCursor='end', record.cursor==='end' → loop exits.
       const record = {
-        senders: [],
+        packageAddress: '0xpkg',
+        module: 'mod',
         cursor: null,
         eventsScanned: 0,
         save: jest.fn().mockResolvedValue({}),
@@ -1559,17 +1693,22 @@ describe('EcosystemService', () => {
           },
         }),
       });
+      senderDocModel.countDocuments.mockResolvedValue(2);
       const n = await service.backfillSendersForModule('0xpkg', 'mod');
       expect(n).toBe(2);
-      expect(record.senders.sort()).toEqual(['0xa', '0xb']);
+      const inserted = (senderDocModel.insertMany.mock.calls[0][0] as Array<{ address: string }>)
+        .map((d) => d.address)
+        .sort();
+      expect(inserted).toEqual(['0xa', '0xb']);
     });
 
     it('resets cursor and eventsScanned on an existing record before draining', async () => {
       // Live cron anchored this record at end-of-history; without the reset,
       // pageForwardSenders would page forward from 'end-anchor' and find
-      // nothing. Existing senders must be preserved (union-merge).
+      // nothing. Prior ProjectSender docs stay put (deduped by unique index).
       const record = {
-        senders: ['0xold'],
+        packageAddress: '0xpkg',
+        module: 'mod',
         cursor: 'end-anchor',
         eventsScanned: 500,
         save: jest.fn().mockResolvedValue({}),
@@ -1585,21 +1724,25 @@ describe('EcosystemService', () => {
           },
         }),
       });
+      senderDocModel.countDocuments.mockResolvedValue(2);
 
       const n = await service.backfillSendersForModule('0xpkg', 'mod');
 
       // First fetch must not carry the `after:` clause — cursor was reset before drain.
       expect(fetchMock.mock.calls[0][1].body).not.toMatch(/after: \\?"end-anchor\\?"/);
-      // Old sender preserved, new one appended.
-      expect(record.senders.sort()).toEqual(['0xnew', '0xold']);
       // Reset save + drain save = 2.
       expect(record.save).toHaveBeenCalledTimes(2);
       expect(n).toBe(2);
+      expect(senderDocModel.insertMany).toHaveBeenCalledWith(
+        [{ packageAddress: '0xpkg', module: 'mod', address: '0xnew' }],
+        { ordered: false },
+      );
     });
 
     it('does not create a new record when one already exists', async () => {
       const record = {
-        senders: [],
+        packageAddress: '0xpkg',
+        module: 'mod',
         cursor: 'anchor',
         eventsScanned: 10,
         save: jest.fn().mockResolvedValue({}),
@@ -1779,6 +1922,31 @@ describe('EcosystemService', () => {
       // Only the 0xaa package classified as 'Exact' (mods=['foo','bar'])
       expect(snap.totalProjects).toBe(1);
       expect(snap.l1[0].name).toBe('Exact');
+    });
+
+    it('surfaces the classify aggregate-based uniqueSenders count on the classified project', async () => {
+      // Tests the `pairs.length > 0` → aggregate branch in classifyFromRaw:
+      // union of senders across the project's (pkg, module) pairs, returned
+      // as a scalar `count` from the `$group: { _id: '$address' } / $count`
+      // pipeline. Mocking the aggregate to resolve to `[{ count: 17 }]`
+      // verifies the scalar flows into `Project.uniqueSenders`.
+      (global as any).fetch = scriptFetch({
+        packages: [pkg({ address: '0xaa', modules: ['foo', 'bar'] })],
+      });
+      senderDocModel.aggregate.mockResolvedValue([{ count: 17 }]);
+      const snap = await runCapture();
+      const proj = snap.l1.find((p: any) => p.name === 'Exact');
+      expect(proj).toBeDefined();
+      expect(proj.uniqueSenders).toBe(17);
+      // Aggregate pipeline: first stage `$match: { $or: [pairs] }` with
+      // two pairs for 0xaa::foo + 0xaa::bar.
+      const pipeline = senderDocModel.aggregate.mock.calls[0][0];
+      expect(pipeline[0].$match.$or).toEqual([
+        { packageAddress: '0xaa', module: 'foo' },
+        { packageAddress: '0xaa', module: 'bar' },
+      ]);
+      expect(pipeline[1]).toEqual({ $group: { _id: '$address' } });
+      expect(pipeline[2]).toEqual({ $count: 'count' });
     });
 
     it('allows 0x0-prefixed packages when explicitly claimed via packageAddresses', async () => {

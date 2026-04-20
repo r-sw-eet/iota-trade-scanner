@@ -10,6 +10,7 @@ import {
   FingerprintSampleDoc,
 } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
+import { ProjectSender } from './schemas/project-sender.schema';
 import { ALL_PROJECTS, ProjectDefinition } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
 
@@ -166,6 +167,7 @@ export class EcosystemService implements OnModuleInit {
   constructor(
     @InjectModel(OnchainSnapshot.name) private ecoModel: Model<OnchainSnapshot>,
     @InjectModel(ProjectSenders.name) private senderModel: Model<ProjectSenders>,
+    @InjectModel(ProjectSender.name) private senderDocModel: Model<ProjectSender>,
   ) {}
 
   async onModuleInit() {
@@ -588,17 +590,19 @@ export class EcosystemService implements OnModuleInit {
 
   /**
    * Incrementally collect unique sender addresses for a (package, module).
+   * Sender docs live in the `ProjectSender` collection — this method keeps
+   * the per-(pkg, module) cursor/state record up to date and triggers a
+   * forward page. Returns the current total sender count for this module.
    *
    * On first encounter we set the cursor to the current end of events (no
    * historical backfill — that's a separate one-time job). Subsequent scans
    * fetch only events after the stored cursor.
    */
-  private async updateSendersForModule(packageAddress: string, module: string): Promise<string[]> {
+  private async updateSendersForModule(packageAddress: string, module: string): Promise<number> {
     const emittingModule = `${packageAddress}::${module}`;
     let record = await this.senderModel.findOne({ packageAddress, module });
 
     if (!record) {
-      // Anchor cursor at current end so future scans only see new events.
       try {
         const latest: any = await this.graphql(`{
           events(filter: { emittingModule: "${emittingModule}" }, last: 1) {
@@ -615,11 +619,11 @@ export class EcosystemService implements OnModuleInit {
       } catch {
         // ignore
       }
-      return [];
+      return 0;
     }
 
     await this.pageForwardSenders(record, emittingModule, 100);
-    return record.senders;
+    return this.senderDocModel.countDocuments({ packageAddress, module });
   }
 
   /**
@@ -628,8 +632,9 @@ export class EcosystemService implements OnModuleInit {
    * Existing records are reset (cursor=null, eventsScanned=0) before draining
    * because the live cron anchors the cursor at end-of-history on first sight
    * — without the reset, this method would just page forward from that anchor
-   * and find no history. Existing `senders` are preserved (union-merged).
-   * Returns the total unique sender count.
+   * and find no history. Sender docs already in `ProjectSender` stay put;
+   * re-inserts are deduped by the unique compound index.
+   * Returns the total unique sender count for the module after the drain.
    */
   async backfillSendersForModule(packageAddress: string, module: string): Promise<number> {
     const emittingModule = `${packageAddress}::${module}`;
@@ -659,7 +664,7 @@ export class EcosystemService implements OnModuleInit {
       safety += 1;
     }
 
-    return record.senders.length;
+    return this.senderDocModel.countDocuments({ packageAddress, module });
   }
 
   async backfillAllSenders(
@@ -691,13 +696,15 @@ export class EcosystemService implements OnModuleInit {
   }
 
   /**
-   * Pages forward from `record.cursor`, accumulating senders. Mutates and saves
-   * `record`. Returns the number of events scanned in this call.
+   * Pages forward from `record.cursor`, upserting each unique sender into the
+   * `ProjectSender` collection (one doc per `(packageAddress, module, address)`;
+   * uniqueness enforced via compound index, duplicates are silently dropped).
+   * Mutates + saves the cursor and eventsScanned counter on `record`.
+   * Returns the number of events scanned in this call.
    */
   private async pageForwardSenders(record: ProjectSenders, emittingModule: string, maxPages: number): Promise<number> {
     let cursor = record.cursor;
-    const senders = new Set(record.senders);
-    const before = senders.size;
+    const newSenders = new Set<string>();
     let scanned = 0;
 
     for (let i = 0; i < maxPages; i++) {
@@ -712,7 +719,7 @@ export class EcosystemService implements OnModuleInit {
         const nodes = data.events?.nodes ?? [];
         for (const e of nodes) {
           const addr = e.sender?.address?.toLowerCase();
-          if (addr) senders.add(addr);
+          if (addr) newSenders.add(addr);
         }
         scanned += nodes.length;
         cursor = data.events?.pageInfo?.endCursor ?? cursor;
@@ -722,8 +729,26 @@ export class EcosystemService implements OnModuleInit {
       }
     }
 
-    if (scanned > 0 || senders.size !== before) {
-      record.senders = Array.from(senders);
+    if (newSenders.size > 0) {
+      const docs = Array.from(newSenders).map((address) => ({
+        packageAddress: record.packageAddress,
+        module: record.module,
+        address,
+      }));
+      try {
+        await this.senderDocModel.insertMany(docs, { ordered: false });
+      } catch (e: any) {
+        // Duplicate-key errors (code 11000) on the compound unique index are
+        // expected — they simply mean we've seen the sender before. Re-throw
+        // anything else so unexpected write failures are not hidden.
+        const allDupKey =
+          e?.code === 11000 ||
+          (Array.isArray(e?.writeErrors) && e.writeErrors.every((we: any) => (we?.code ?? we?.err?.code) === 11000));
+        if (!allDupKey) throw e;
+      }
+    }
+
+    if (scanned > 0) {
       record.cursor = cursor;
       record.eventsScanned += scanned;
       await record.save();
@@ -1034,12 +1059,12 @@ export class EcosystemService implements OnModuleInit {
       const moduleMetrics: ModuleMetrics[] = [];
       for (const mod of modules) {
         const { count: events, capped: eventsCapped } = await this.countEvents(`${pkg.address}::${mod}`);
-        const senders = await this.updateSendersForModule(pkg.address, mod);
+        const uniqueSenders = await this.updateSendersForModule(pkg.address, mod);
         moduleMetrics.push({
           module: mod,
           events,
           eventsCapped,
-          uniqueSenders: senders.length,
+          uniqueSenders,
         });
       }
 
@@ -1205,22 +1230,32 @@ export class EcosystemService implements OnModuleInit {
       // projects (LayerZero, Tradeport, ObjectID, etc.) where the project's
       // package set contains sibling packages, not only an upgrade chain.
       //
-      // Senders: live-read from `ProjectSenders` + UNION across the project's
+      // Senders: live-read from `ProjectSender` (per-sender docs, one per
+      // `(packageAddress, module, address)`) + UNION across the project's
       // (package, module) pairs. The snapshot stores per-module counts for
       // the growth endpoint's delta math, but for the classified view we
-      // still need the actual sender addresses to dedupe cross-module usage
-      // (same address calling mod_a and mod_b counts once). Reading live
-      // preserves the exact display semantics from the pre-refactor code.
+      // still need to dedupe a wallet active on mod_a and mod_b so it
+      // counts once. We do the union server-side via `$group: { _id: address }`
+      // + `$count` — returning only a number avoids pulling large address
+      // lists across the wire (otterfly_1 alone can be ~210k addresses).
       let events = 0;
       let eventsCapped = false;
-      const projectSenders = new Set<string>();
+      const pairs: Array<{ packageAddress: string; module: string }> = [];
       for (const pkg of facts) {
         for (const mm of pkg.moduleMetrics) {
           events += mm.events;
           if (mm.eventsCapped) eventsCapped = true;
-          const rec = await this.senderModel.findOne({ packageAddress: pkg.address, module: mm.module });
-          rec?.senders?.forEach((s) => projectSenders.add(s));
+          pairs.push({ packageAddress: pkg.address, module: mm.module });
         }
+      }
+      let uniqueSendersCount = 0;
+      if (pairs.length > 0) {
+        const agg = await this.senderDocModel.aggregate([
+          { $match: { $or: pairs } },
+          { $group: { _id: '$address' } },
+          { $count: 'count' },
+        ]);
+        uniqueSendersCount = agg[0]?.count ?? 0;
       }
       // The `modules` snapshot field stays as the latest package's module
       // set — that's the current API surface, not a union across versions.
@@ -1268,7 +1303,7 @@ export class EcosystemService implements OnModuleInit {
         disclaimer: def.disclaimer ?? null,
         detectedDeployers,
         anomalousDeployers,
-        uniqueSenders: projectSenders.size,
+        uniqueSenders: uniqueSendersCount,
         attribution: def.attribution ?? null,
         addedAt: def.addedAt ?? null,
       });
