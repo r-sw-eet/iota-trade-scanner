@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, NotFoundException } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, NotFoundException } from '@nestjs/common';
 import { EcosystemService } from './ecosystem.service';
 import { ALL_TEAMS } from './teams';
 
@@ -7,6 +7,25 @@ const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
 @Controller('ecosystem')
 export class EcosystemController {
   constructor(private ecosystemService: EcosystemService) {}
+
+  /**
+   * Trigger a fresh ecosystem scan out-of-band (without waiting for the 6h
+   * cron or restarting the container). The capture runs in the background;
+   * the previous snapshot keeps serving via `GET /` until the new one
+   * finishes, so the dashboard never goes blank during a refresh. A
+   * redundant trigger while a capture is already in-flight is safely
+   * no-op'd by the service's `capturing` guard.
+   */
+  @Post('rescan')
+  async rescan() {
+    if (this.ecosystemService.isCapturing()) {
+      return { started: false, status: 'already in flight' };
+    }
+    // Fire and forget — the capture is slow (30–40 min) so we don't block
+    // the HTTP response on it. Errors are logged inside `capture()`.
+    this.ecosystemService.capture().catch(() => {});
+    return { started: true, status: 'capture started' };
+  }
 
   @Get()
   async getProjects() {

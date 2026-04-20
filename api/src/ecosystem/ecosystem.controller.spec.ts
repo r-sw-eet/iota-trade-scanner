@@ -12,11 +12,15 @@ jest.mock('./teams', () => ({
 
 describe('EcosystemController', () => {
   let controller: EcosystemController;
-  let service: { getLatest: jest.Mock };
+  let service: { getLatest: jest.Mock; capture: jest.Mock; isCapturing: jest.Mock };
   let fetchMock: jest.Mock;
 
   beforeEach(async () => {
-    service = { getLatest: jest.fn() };
+    service = {
+      getLatest: jest.fn(),
+      capture: jest.fn().mockResolvedValue(undefined),
+      isCapturing: jest.fn().mockReturnValue(false),
+    };
     const module = await Test.createTestingModule({
       controllers: [EcosystemController],
       providers: [{ provide: EcosystemService, useValue: service }],
@@ -65,6 +69,28 @@ describe('EcosystemController', () => {
       service.getLatest.mockResolvedValue(null);
       const result = await controller.getProjects();
       expect(result).toMatchObject({ l1: [], l2: [], totalProjects: 0, totalEvents: 0 });
+    });
+  });
+
+  describe('POST /ecosystem/rescan', () => {
+    it('kicks off a capture when none is running and returns started=true', async () => {
+      service.isCapturing.mockReturnValue(false);
+      const result = await controller.rescan();
+      expect(result).toEqual({ started: true, status: 'capture started' });
+      expect(service.capture).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns started=false when a capture is already in flight', async () => {
+      service.isCapturing.mockReturnValue(true);
+      const result = await controller.rescan();
+      expect(result).toEqual({ started: false, status: 'already in flight' });
+      expect(service.capture).not.toHaveBeenCalled();
+    });
+
+    it('swallows capture() rejections so the fire-and-forget call never crashes the response', async () => {
+      service.isCapturing.mockReturnValue(false);
+      service.capture.mockRejectedValue(new Error('boom'));
+      await expect(controller.rescan()).resolves.toEqual({ started: true, status: 'capture started' });
     });
   });
 

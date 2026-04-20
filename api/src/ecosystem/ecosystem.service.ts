@@ -118,6 +118,19 @@ interface PackageInfo {
 export class EcosystemService implements OnModuleInit {
   private readonly logger = new Logger(EcosystemService.name);
 
+  /**
+   * Guards against concurrent `capture()` calls. Captures take 30–40 min
+   * against mainnet; a second call landing while one is in flight would
+   * double the load on the GraphQL endpoint and potentially double-write
+   * the snapshot. Paired with `capture()`'s try/finally below.
+   */
+  private capturing = false;
+
+  /** Returns true while a capture is actively running. */
+  isCapturing(): boolean {
+    return this.capturing;
+  }
+
   constructor(
     @InjectModel(EcosystemSnapshot.name) private ecoModel: Model<EcosystemSnapshot>,
     @InjectModel(ProjectSenders.name) private senderModel: Model<ProjectSenders>,
@@ -139,6 +152,15 @@ export class EcosystemService implements OnModuleInit {
   // Refresh every 6 hours
   @Cron('0 */6 * * *')
   async capture() {
+    // In-flight guard: only one capture at a time. `getLatest()` keeps
+    // serving the previous snapshot throughout, so the dashboard never
+    // goes blank during a refresh — the new snapshot appends on success
+    // and `findOne().sort({createdAt:-1})` atomically picks it up.
+    if (this.capturing) {
+      this.logger.log('Capture already in flight, skipping duplicate trigger');
+      return;
+    }
+    this.capturing = true;
     this.logger.log('Capturing ecosystem snapshot...');
     try {
       const data = await this.fetchFull();
@@ -146,6 +168,8 @@ export class EcosystemService implements OnModuleInit {
       this.logger.log(`Ecosystem snapshot saved: ${data.totalProjects} projects, ${data.totalEvents} events`);
     } catch (e) {
       this.logger.error('Ecosystem capture failed', e);
+    } finally {
+      this.capturing = false;
     }
   }
 

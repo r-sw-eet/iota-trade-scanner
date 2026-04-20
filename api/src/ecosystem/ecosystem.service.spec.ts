@@ -404,6 +404,39 @@ describe('EcosystemService', () => {
       await expect(service.capture()).resolves.toBeUndefined();
       expect(ecoModel.create).not.toHaveBeenCalled();
     });
+
+    it('flips isCapturing() during the scan and clears it on completion', async () => {
+      let seenWhileRunning: boolean | null = null;
+      jest.spyOn(service as any, 'fetchFull').mockImplementation(async () => {
+        seenWhileRunning = service.isCapturing();
+        return { totalProjects: 0, totalEvents: 0 };
+      });
+      expect(service.isCapturing()).toBe(false);
+      await service.capture();
+      expect(seenWhileRunning).toBe(true);
+      expect(service.isCapturing()).toBe(false);
+    });
+
+    it('clears isCapturing() even when fetchFull throws', async () => {
+      jest.spyOn(service as any, 'fetchFull').mockRejectedValue(new Error('boom'));
+      await service.capture();
+      expect(service.isCapturing()).toBe(false);
+    });
+
+    it('no-ops a concurrent capture while one is already in flight', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const fetchFull = jest.spyOn(service as any, 'fetchFull').mockImplementation(async () => {
+        await gate;
+        return { totalProjects: 0, totalEvents: 0 };
+      });
+      const first = service.capture();
+      // Second call lands while the first is awaiting `gate` — must short-circuit.
+      await service.capture();
+      expect(fetchFull).toHaveBeenCalledTimes(1);
+      release();
+      await first;
+    });
   });
 
   // ---------- probeFingerprint ----------
