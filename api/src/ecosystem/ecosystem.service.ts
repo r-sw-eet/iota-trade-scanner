@@ -625,6 +625,10 @@ export class EcosystemService implements OnModuleInit {
   /**
    * Drain all historical events for a (package, module) starting from cursor=null.
    * Designed to be invoked from a one-shot CLI; resumes if interrupted.
+   * Existing records are reset (cursor=null, eventsScanned=0) before draining
+   * because the live cron anchors the cursor at end-of-history on first sight
+   * — without the reset, this method would just page forward from that anchor
+   * and find no history. Existing `senders` are preserved (union-merged).
    * Returns the total unique sender count.
    */
   async backfillSendersForModule(packageAddress: string, module: string): Promise<number> {
@@ -632,7 +636,6 @@ export class EcosystemService implements OnModuleInit {
     let record = await this.senderModel.findOne({ packageAddress, module });
 
     if (!record) {
-      // Backfill mode: cursor=null = page from the very first event.
       record = await this.senderModel.create({
         packageAddress,
         module,
@@ -640,6 +643,10 @@ export class EcosystemService implements OnModuleInit {
         senders: [],
         eventsScanned: 0,
       });
+    } else {
+      record.cursor = null;
+      record.eventsScanned = 0;
+      await record.save();
     }
 
     // Drain in 100-page batches (5000 events each) until no more pages.

@@ -1563,6 +1563,56 @@ describe('EcosystemService', () => {
       expect(n).toBe(2);
       expect(record.senders.sort()).toEqual(['0xa', '0xb']);
     });
+
+    it('resets cursor and eventsScanned on an existing record before draining', async () => {
+      // Live cron anchored this record at end-of-history; without the reset,
+      // pageForwardSenders would page forward from 'end-anchor' and find
+      // nothing. Existing senders must be preserved (union-merge).
+      const record = {
+        senders: ['0xold'],
+        cursor: 'end-anchor',
+        eventsScanned: 500,
+        save: jest.fn().mockResolvedValue({}),
+      };
+      senderModel.findOne.mockResolvedValue(record);
+      fetchMock.mockResolvedValueOnce({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [{ sender: { address: '0xNEW' } }],
+              pageInfo: { hasNextPage: false, endCursor: 'drained' },
+            },
+          },
+        }),
+      });
+
+      const n = await service.backfillSendersForModule('0xpkg', 'mod');
+
+      // First fetch must not carry the `after:` clause — cursor was reset before drain.
+      expect(fetchMock.mock.calls[0][1].body).not.toMatch(/after: \\?"end-anchor\\?"/);
+      // Old sender preserved, new one appended.
+      expect(record.senders.sort()).toEqual(['0xnew', '0xold']);
+      // Reset save + drain save = 2.
+      expect(record.save).toHaveBeenCalledTimes(2);
+      expect(n).toBe(2);
+    });
+
+    it('does not create a new record when one already exists', async () => {
+      const record = {
+        senders: [],
+        cursor: 'anchor',
+        eventsScanned: 10,
+        save: jest.fn().mockResolvedValue({}),
+      };
+      senderModel.findOne.mockResolvedValue(record);
+      fetchMock.mockResolvedValueOnce({
+        json: async () => ({
+          data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+        }),
+      });
+      await service.backfillSendersForModule('0xpkg', 'mod');
+      expect(senderModel.create).not.toHaveBeenCalled();
+    });
   });
 
   // ---------- backfillAllSenders ----------
