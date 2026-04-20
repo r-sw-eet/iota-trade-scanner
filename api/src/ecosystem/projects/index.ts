@@ -3,7 +3,7 @@ import { ProjectDefinition } from './project.interface';
 import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale, clawSwapGateway } from './defi/_index';
 import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus, truvid } from './trade/_index';
 import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft } from './identity/_index';
-import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroOft, wormhole } from './bridges/_index';
+import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle } from './oracles/_index';
 import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip } from './games/_index';
@@ -46,7 +46,12 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   iotaNames, iotaLink, carNft,
 
   // Bridges
-  echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroOft, wormhole,
+  echoProtocolBridge,
+  // LayerZero rows: protocol, Workers (DVNs + Executor), Price Feed (Executor
+  // pricing oracle, deployer-pinned), OFT (aggregate bucket for third-party
+  // tokens, splitByDeployer → routes to known teams where possible).
+  layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft,
+  wormhole,
 
   // Oracles
   pythOracle, switchboardOracle,

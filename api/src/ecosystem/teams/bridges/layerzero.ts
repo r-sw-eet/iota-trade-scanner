@@ -3,7 +3,7 @@ import { Team } from '../team.interface';
 export const layerzero: Team = {
   id: 'layerzero',
   name: 'LayerZero',
-  description: 'LayerZero V2 omnichain interoperability protocol on IOTA Rebased. Operates the IOTA L1 Move deployment (eid 30423) — EndpointV2, ULN302 message library, ZRO token, PTB-builder infrastructure, OApp framework, separate DVN worker and Executor worker deployments, plus per-DVN-operator identity packages (Nethermind / LayerZero Labs / USDT0 / Luganodes / Horizen). 37 packages total across 4 deployers.',
+  description: 'LayerZero V2 omnichain interoperability protocol on IOTA Rebased. Operates the IOTA L1 Move deployment (eid 30423) — EndpointV2, ULN302 message library, ZRO token, PTB-builder infrastructure, OApp framework, separate DVN worker and Executor worker deployments, per-DVN-operator identity packages (Nethermind / LayerZero Labs / USDT0 / Luganodes / Horizen), and a standalone Executor price-feed oracle. 38 packages total across 5 deployers.',
   urls: [
     { label: 'Website', href: 'https://layerzero.network' },
     { label: 'IOTA L1 docs', href: 'https://docs.layerzero.network/v2/deployments/chains/iota-l1' },
@@ -23,6 +23,10 @@ export const layerzero: Team = {
     // single `dvn_layerzero` module and its address matches the
     // `cap_type.Package.pos0` field on the corresponding DVN instance.
     '0x9004e1e4c6dcc42d1b73269db48d510192665677fcad2079a3c7d1e9e971d34e',
+    // Executor pricing-oracle publisher. Single package (`price_feed` +
+    // `price_feed_witness`) feeding the off-chain Executor's cross-chain
+    // fee quotes — see `layerZeroPriceFeed` project for on-chain evidence.
+    '0x6bf30187819863e878e9be862161941b07658012130f5519e34d728c03f143be',
   ],
   logo: '/logos/layerzero.png',
   attribution: `

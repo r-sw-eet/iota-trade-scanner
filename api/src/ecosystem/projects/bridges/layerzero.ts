@@ -62,6 +62,40 @@ Why not split per-DVN-operator into 5 rows: the DVN worker codebase is one Layer
 `.trim(),
 };
 
+export const layerZeroPriceFeed: ProjectDefinition = {
+  name: 'LayerZero Executor Price Feed',
+  layer: 'L1',
+  category: 'Oracle',
+  description: 'On-chain price feed that LayerZero\'s off-chain Executor reads to quote cross-chain delivery fees on IOTA L1. Holds per-endpoint pricing models (native-token USD, denominator ratios) plus L2-specific calldata cost extensions (Arbitrum `gas_per_l2_tx` / `gas_per_l1_call_data_byte` / compression percent). Push-oracle admin model: `OwnerCap` + permissioned `PriceUpdaterCap` records, with updater gating delegated to LayerZero\'s own `package_whitelist_validator`.',
+  urls: [
+    { label: 'Website', href: 'https://layerzero.network' },
+    { label: 'Deployments API', href: 'https://metadata.layerzero-api.com/v1/metadata/deployments' },
+  ],
+  teamId: 'layerzero',
+  addedAt: '2026-04-20',
+  match: {
+    deployerAddresses: ['0x6bf30187819863e878e9be862161941b07658012130f5519e34d728c03f143be'],
+    all: ['price_feed', 'price_feed_witness'],
+  },
+  attribution: `
+On-chain evidence (conclusive):
+
+1. **Single package** at \`0xae65a3712fb096ef53cf3889783de57c8da32ceb68cba8cd7b06820e6cf78b7d\`, deployer \`0x6bf30187819863e878e9be862161941b07658012130f5519e34d728c03f143be\`. Exactly two modules: \`price_feed\` and \`price_feed_witness\`. The match rule pins both deployer and modules — no room for false positives since module names this specific on this exact deployer can only be this contract.
+
+2. **Object-field forensics (probe run 2026-04-20).** The package's \`PriceFeed\` Move object holds fields exclusively load-bearing for LayerZero V2 Executor pricing:
+   - \`eid_to_model_type\` — \`eid\` is LayerZero's "Endpoint ID" primitive, the cross-chain addressing scheme unique to LayerZero V2. No other protocol uses this term on-chain.
+   - \`arbitrum_price_ext\` containing \`gas_per_l2_tx\`, \`gas_per_l1_call_data_byte\`, \`arbitrum_compression_percent\` — LayerZero Executor's specific model for quoting Arbitrum L1-calldata costs when Arbitrum is the destination chain.
+   - \`native_price_usd\`, \`price_ratio_denominator\` — native-token-to-USD pegging used by Executor fee calculations.
+   - \`price_updater_registry\` with \`updater_to_updater_cap\` + \`updater_cap_status\` dynamic fields — multi-updater admin surface consistent with LZ's distributed operator model.
+
+3. **Auth composes with the LayerZero protocol deployer.** TX-effect probe surfaces \`0x4237925ef818b257654a34d1fdd6347fcab007a2cb2b2d5e63235e45e79b74e0::package_whitelist_validator::Validator\` called from this package. That validator is deployed by \`0x8a81a6096a81fe2b722541bc19eb30e6c025732638375c362f07ea48979fd30a\` — the LayerZero Labs main protocol deployer (22 packages, gold-standard attested via the LayerZero metadata API under \`iotal1-mainnet\`). A price-updater registry gating on the LayerZero protocol's own whitelist validator only makes sense if the price feed *is* a LayerZero component.
+
+**Attribution gap (public docs):** LayerZero's metadata API (\`metadata.layerzero-api.com/v1/metadata/deployments → iotal1-mainnet\`) publishes \`endpointV2\`, \`sendUln302\`, \`receiveUln302\`, and \`executor\` addresses, plus the 5 DVNs — but **does not** publish the price-feed address. That's because the feed is an Executor-internal dependency (the Executor reads it off-chain), not an end-user-facing contract. Upgrade path to gold: an entry in LayerZero's monorepo under \`packages/layerzero-v2/iota\` (or similar) naming this deployer/package, or a LayerZero Labs operator statement. On-chain evidence alone is already conclusive; the doc-level miss is a publish-intent gap, not an identification one.
+
+**Fifth LayerZero deployer.** Complements the 4 already attested on the \`layerzero\` team: protocol (\`0x8a81a6…\`), DVN workers (\`0x622796…\`), Executor workers (\`0x76f89a…\`), LZ Labs admin (\`0x9004e1…\`). This one (\`0x6bf30187…\`) is the Executor pricing component — isolated from the worker instances because price updates and cross-chain delivery are distinct concerns.
+`.trim(),
+};
+
 export const layerZeroOft: ProjectDefinition = {
   name: 'LayerZero OFT',
   layer: 'L1',
