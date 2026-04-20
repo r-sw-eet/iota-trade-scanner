@@ -41,6 +41,18 @@ const eventsDeltaByKey = computed<Map<string, number>>(() => {
   for (const item of ranking.value.items) m.set(item.key, item.eventsDelta)
   return m
 })
+
+/**
+ * True when the user picked a window (24h/7d/30d) but we don't yet have a
+ * snapshot older than that window — so the backend's "null baseline → deltas
+ * equal absolute values" path kicks in and the numbers under the `(<window> Δ)`
+ * column header are actually lifetime totals, not deltas. Transient: resolves
+ * on its own once enough history accumulates (14h+ for 24h, 7d for 7d, etc.).
+ * Shown as an inline banner so users don't mistake lifetime totals for deltas.
+ */
+const windowHasNoBaseline = computed(() => {
+  return activityWindow.value !== 'all' && ranking.value !== null && (ranking.value as any).baseline === null
+})
 const uniqueSendersDeltaByKey = computed<Map<string, number>>(() => {
   if (!ranking.value) return new Map()
   const m = new Map<string, number>()
@@ -691,6 +703,9 @@ const projectTvlChartOptions = {
                     Hide collectibles
                   </label>
                 </div>
+                <p v-if="windowHasNoBaseline" class="text-center text-xs text-amber-400/80 mb-4 max-w-2xl mx-auto">
+                  Not enough history for the {{ activityWindow }} window yet — Events and Wallets columns still show lifetime totals. Real deltas appear once snapshots older than the window exist (first snapshot: 2026-04-20 08:01 UTC).
+                </p>
 
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                   <MetricCard label="Identified projects" :value="String(l1Stats.projects)" />
