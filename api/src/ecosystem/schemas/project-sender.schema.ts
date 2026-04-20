@@ -9,7 +9,7 @@ import { Document } from 'mongoose';
  * 2026-04-20 on `otterfly_1` at 210 088 senders ≈ 15 MB). Per-sender docs
  * are unbounded in aggregate; uniqueness is enforced via the compound index.
  */
-@Schema({ timestamps: true })
+@Schema({ timestamps: true, collection: 'project_sender_entries' })
 export class ProjectSender extends Document {
   @Prop({ required: true })
   packageAddress: string;
