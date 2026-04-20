@@ -28,6 +28,60 @@ export class EcosystemController {
   }
 
   /**
+   * Activity leaderboard for the dashboard's time-range selector. Returns
+   * attributed projects + unattributed clusters ranked by event growth over
+   * the chosen window — same row shape across scopes so the frontend can
+   * render a single sorted list with project rows and "Unknown (0x…)" rows
+   * interleaved (or filter to one side via `?scope=`).
+   *
+   * Query params:
+   *   - `window` — shorthand, one of `24h` | `7d` | `30d` | `all` (default `all`)
+   *   - `scope`  — one of `all` | `attributed` | `unattributed` (default `all`)
+   *
+   * `window=all` resolves baseline to `1970-01-01` — since no snapshot
+   * predates it, deltas collapse to absolute current values and the ranking
+   * becomes an all-time leaderboard (useful as the dashboard's default).
+   */
+  @Get('growth-ranking')
+  async growthRanking(
+    @Query('window') windowRaw?: string,
+    @Query('scope') scopeRaw?: string,
+  ) {
+    const window = windowRaw ?? 'all';
+    const scope = scopeRaw ?? 'all';
+    if (!['all', 'attributed', 'unattributed'].includes(scope)) {
+      throw new BadRequestException('`scope` must be one of: all, attributed, unattributed.');
+    }
+
+    // Shorthand → (from, to) resolution. `to` is always "now"; `from` is
+    // `now - <window>`, except `all` anchors at the Unix epoch (predates
+    // any snapshot → baseline null → deltas equal absolute current values).
+    const now = new Date();
+    const windowMs: Record<string, number | null> = {
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+      '30d': 30 * 24 * 60 * 60 * 1000,
+      all: null,
+    };
+    if (!(window in windowMs)) {
+      throw new BadRequestException('`window` must be one of: 24h, 7d, 30d, all.');
+    }
+    const offset = windowMs[window];
+    const from = offset === null ? new Date(0) : new Date(now.getTime() - offset);
+    const to = now;
+
+    const result = await this.ecosystemService.growthRanking(
+      from,
+      to,
+      scope as 'all' | 'attributed' | 'unattributed',
+    );
+    if (!result) {
+      throw new NotFoundException('No snapshots cover the requested window.');
+    }
+    return result;
+  }
+
+  /**
    * Per-package growth between two points in time. Pure subtraction over the
    * raw `OnchainSnapshot` collection — no classification, no live RPC — so
    * queries across arbitrary windows are fast (~100 ms for a week of

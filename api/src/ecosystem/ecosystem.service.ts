@@ -65,6 +65,12 @@ export interface UnattributedCluster {
   latestPackageAddress: string;
   storageIota: number;
   modules: string[];
+  /** Summed cumulative events across every (package, module) in this cluster. Mirror of `Project.events` so the triage-leaderboard can rank attributed + unattributed rows side-by-side. */
+  events: number;
+  /** True if any package×module in this cluster had its event count capped by `countEvents` — the `events` field is a floor. */
+  eventsCapped: boolean;
+  /** Summed `uniqueSenders` per-module across the cluster. Over-counts senders that used multiple modules; acceptable as a floor for ranking. */
+  uniqueSenders: number;
   /** `key:value` pairs extracted from a sampled Move object (tag, name, url, …). */
   sampleIdentifiers: string[];
   /** Fully-qualified type of the object we probed, for provenance. */
@@ -139,23 +145,23 @@ export class EcosystemService implements OnModuleInit {
   }
 
   /**
-   * In-process cache for the classified view of a snapshot. Classification
-   * against the current registry is deterministic for a given snapshot + the
-   * live chain state probed for fingerprint matching, so the first request
-   * after a capture pays the classify cost (~1–2 s + any fingerprint probes)
-   * and every subsequent request within the cache window is free.
+   * In-process LRU for classified snapshot views. Classification is
+   * deterministic for a given `(snapshot, registry)` so the first request
+   * pays the classify cost (~1–2 s + any fingerprint probes) and subsequent
+   * reads within the TTL are free.
    *
-   * Keyed by snapshot `_id` — if a new snapshot lands, the old key is stale
-   * and `getLatest()` recomputes. A short TTL (5 min) also bounds staleness
-   * against live-chain-state drift that would change fingerprint matching.
+   * Keyed by snapshot `_id`. Cap is small (4) because the hot access pattern
+   * is latest + at most one baseline for growth-range queries. Short TTL
+   * (5 min) also bounds staleness against live-chain-state drift that would
+   * change fingerprint matching.
    */
-  private classifyCache: {
-    key: string;
-    expiresAt: number;
-    value: Awaited<ReturnType<EcosystemService['classifyFromRaw']>>;
-  } | null = null;
+  private classifyCache = new Map<
+    string,
+    { expiresAt: number; value: Awaited<ReturnType<EcosystemService['classifyFromRaw']>> }
+  >();
 
   private static readonly CLASSIFY_CACHE_TTL_MS = 5 * 60 * 1000;
+  private static readonly CLASSIFY_CACHE_MAX = 4;
 
   constructor(
     @InjectModel(OnchainSnapshot.name) private ecoModel: Model<OnchainSnapshot>,
@@ -196,6 +202,129 @@ export class EcosystemService implements OnModuleInit {
       .sort({ createdAt: 1 })
       .lean()
       .exec();
+  }
+
+  /**
+   * Activity-leaderboard across classified projects + unattributed deployer
+   * clusters between two snapshots. Baseline = latest snapshot with
+   * `createdAt <= from` (null when the window predates any capture — deltas
+   * then equal the latest row's absolute values). Latest = latest snapshot
+   * with `createdAt <= to`.
+   *
+   * Output rows are uniform across scopes — attributed projects keyed by
+   * `slug`, unattributed clusters keyed by `deployer` — with the same three
+   * delta fields (`events`, `packages`, `uniqueSenders`). Sorted by
+   * `eventsDelta` desc so the loudest movers bubble up.
+   *
+   * Powers the triage dashboard: user sees which known projects grew fastest
+   * this week (attributed leaderboard) and which unknown deployer clusters
+   * did too (unattributed leaderboard) — same UI, one filter.
+   */
+  async growthRanking(
+    from: Date,
+    to: Date,
+    scope: 'all' | 'attributed' | 'unattributed' = 'all',
+  ): Promise<{
+    window: { from: Date; to: Date };
+    baseline: { snapshotId: string; createdAt: Date } | null;
+    latest: { snapshotId: string; createdAt: Date };
+    items: Array<{
+      scope: 'attributed' | 'unattributed';
+      key: string;
+      name: string;
+      events: number;
+      eventsDelta: number;
+      eventsCapped: boolean;
+      packages: number;
+      packagesDelta: number;
+      uniqueSenders: number;
+      uniqueSendersDelta: number;
+      team: Team | null;
+      logo: string | null;
+      category: string | null;
+      sampleIdentifiers: string[] | null;
+    }>;
+  } | null> {
+    const baselineSnap = await this.ecoModel
+      .findOne({ createdAt: { $lte: from } })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+    const latestSnap = await this.ecoModel
+      .findOne({ createdAt: { $lte: to } })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+    if (!latestSnap) return null;
+
+    const baseline = baselineSnap ? await this.classifyCached(baselineSnap) : null;
+    const latest = await this.classifyCached(latestSnap);
+
+    // Baseline lookups: one map per scope. When baseline is null (window
+    // predates first capture) all deltas collapse to the current value.
+    const baselineProjects = new Map<string, (typeof latest.l1)[number]>();
+    const baselineUnattrib = new Map<string, (typeof latest.unattributed)[number]>();
+    if (baseline) {
+      for (const p of baseline.l1) baselineProjects.set(p.slug, p);
+      for (const u of baseline.unattributed) baselineUnattrib.set(u.deployer, u);
+    }
+
+    const items: Array<any> = [];
+
+    if (scope === 'all' || scope === 'attributed') {
+      for (const p of latest.l1) {
+        const prev = baselineProjects.get(p.slug);
+        items.push({
+          scope: 'attributed',
+          key: p.slug,
+          name: p.name,
+          events: p.events,
+          eventsDelta: p.events - (prev?.events ?? 0),
+          eventsCapped: p.eventsCapped,
+          packages: p.packages,
+          packagesDelta: p.packages - (prev?.packages ?? 0),
+          uniqueSenders: p.uniqueSenders,
+          uniqueSendersDelta: p.uniqueSenders - (prev?.uniqueSenders ?? 0),
+          team: p.team,
+          logo: p.logo,
+          category: p.category,
+          sampleIdentifiers: null,
+        });
+      }
+    }
+
+    if (scope === 'all' || scope === 'unattributed') {
+      for (const u of latest.unattributed) {
+        const prev = baselineUnattrib.get(u.deployer);
+        items.push({
+          scope: 'unattributed',
+          key: u.deployer,
+          name: `Unknown (${u.deployer.slice(0, 10)}…)`,
+          events: u.events,
+          eventsDelta: u.events - (prev?.events ?? 0),
+          eventsCapped: u.eventsCapped,
+          packages: u.packages,
+          packagesDelta: u.packages - (prev?.packages ?? 0),
+          uniqueSenders: u.uniqueSenders,
+          uniqueSendersDelta: u.uniqueSenders - (prev?.uniqueSenders ?? 0),
+          team: null,
+          logo: null,
+          category: null,
+          sampleIdentifiers: u.sampleIdentifiers,
+        });
+      }
+    }
+
+    items.sort((a, b) => b.eventsDelta - a.eventsDelta);
+
+    return {
+      window: { from, to },
+      baseline: baselineSnap
+        ? { snapshotId: String(baselineSnap._id), createdAt: baselineSnap.createdAt! }
+        : null,
+      latest: { snapshotId: String(latestSnap._id), createdAt: latestSnap.createdAt! },
+      items,
+    };
   }
 
   /**
@@ -337,21 +466,28 @@ export class EcosystemService implements OnModuleInit {
   private async classifyCached(snap: any) {
     const key = String(snap._id);
     const now = Date.now();
-    if (this.classifyCache && this.classifyCache.key === key && this.classifyCache.expiresAt > now) {
-      return this.classifyCache.value;
+    const hit = this.classifyCache.get(key);
+    if (hit && hit.expiresAt > now) {
+      // Refresh LRU order — delete + re-insert keeps most-recently-used last
+      // so eviction (below) drops the least-recently-used entry first.
+      this.classifyCache.delete(key);
+      this.classifyCache.set(key, hit);
+      return hit.value;
     }
     const value = await this.classifyFromRaw(snap);
-    this.classifyCache = {
-      key,
-      expiresAt: now + EcosystemService.CLASSIFY_CACHE_TTL_MS,
-      value,
-    };
+    this.classifyCache.set(key, { expiresAt: now + EcosystemService.CLASSIFY_CACHE_TTL_MS, value });
+    while (this.classifyCache.size > EcosystemService.CLASSIFY_CACHE_MAX) {
+      // Map preserves insertion order — first key is least-recently-used.
+      const firstKey = this.classifyCache.keys().next().value;
+      if (firstKey === undefined) break;
+      this.classifyCache.delete(firstKey);
+    }
     return value;
   }
 
   /** Clear the classified-view cache. Called after a successful capture so the next read picks up the new snapshot. */
   invalidateClassifyCache() {
-    this.classifyCache = null;
+    this.classifyCache.clear();
   }
 
   // Refresh every 2 hours (was 6h prior to the 2026-04-20 raw-snapshot refactor).
@@ -1280,6 +1416,20 @@ export class EcosystemService implements OnModuleInit {
       const modulesUnion = new Set<string>();
       for (const pkg of facts) for (const m of pkg.modules) modulesUnion.add(m);
 
+      // Sum activity across the cluster's packages. `events` and `uniqueSenders`
+      // mirror the `Project` shape so the growth-ranking endpoint can present
+      // attributed + unattributed rows side-by-side with consistent columns.
+      let events = 0;
+      let eventsCapped = false;
+      let uniqueSenders = 0;
+      for (const pkg of facts) {
+        for (const mm of pkg.moduleMetrics) {
+          events += mm.events;
+          if (mm.eventsCapped) eventsCapped = true;
+          uniqueSenders += mm.uniqueSenders;
+        }
+      }
+
       let identifiers: string[] = [];
       let objectType: string | null = null;
       for (const pkg of [...facts].reverse()) {
@@ -1299,6 +1449,9 @@ export class EcosystemService implements OnModuleInit {
         latestPackageAddress: latestPkg.address,
         storageIota: Math.round(storageIota * 10000) / 10000,
         modules: Array.from(modulesUnion).slice(0, 20),
+        events,
+        eventsCapped,
+        uniqueSenders,
         sampleIdentifiers: identifiers,
         sampledObjectType: objectType,
       });

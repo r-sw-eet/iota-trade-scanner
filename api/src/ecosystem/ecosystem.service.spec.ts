@@ -360,6 +360,23 @@ describe('EcosystemService', () => {
       expect(classifySpy).toHaveBeenCalledTimes(1);
     });
 
+    it('evicts the oldest cache entry when more than CLASSIFY_CACHE_MAX snapshots are classified', async () => {
+      // Inspect the cache directly: MAX is 4, so asking for 5 distinct
+      // snapshot ids should evict the first one (LRU = insertion order).
+      const classifySpy = jest
+        .spyOn(service as any, 'classifyFromRaw')
+        .mockImplementation(async (snap: any) => ({ tag: `classified-${snap._id}` }));
+      for (let i = 1; i <= 5; i++) {
+        ecoModel.findOne.mockReturnValueOnce(chain({ _id: `snap-${i}` }));
+        await service.getLatest();
+      }
+      const cache = (service as any).classifyCache as Map<string, unknown>;
+      expect(cache.size).toBe(4);
+      expect(cache.has('snap-1')).toBe(false); // oldest evicted
+      expect(cache.has('snap-5')).toBe(true);  // newest retained
+      expect(classifySpy).toHaveBeenCalledTimes(5);
+    });
+
     it('invalidateClassifyCache() forces the next getLatest() to re-classify', async () => {
       const raw = { _id: 'abc', packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
       ecoModel.findOne.mockReturnValue(chain(raw));
@@ -380,6 +397,116 @@ describe('EcosystemService', () => {
       const raw = { packages: [], networkTxTotal: 0, txRates: {} };
       ecoModel.findOne.mockReturnValue(chain(raw));
       await expect(service.getLatestRaw()).resolves.toBe(raw);
+    });
+  });
+
+  describe('growthRanking', () => {
+    // Build a chainable mock for ecoModel.findOne that returns different
+    // values per invocation — baseline + latest in that order.
+    const oneshot = (value: any) => ({
+      sort: () => ({ lean: () => ({ exec: async () => value }) }),
+    });
+
+    const baselineSnap = { _id: 'b', createdAt: new Date('2026-04-13T00:00:00Z') };
+    const latestSnap = { _id: 'l', createdAt: new Date('2026-04-20T00:00:00Z') };
+
+    const baselineClassified = {
+      l1: [
+        { slug: 'proj-a', name: 'A', events: 100, eventsCapped: false, packages: 1, uniqueSenders: 10, team: null, logo: null, category: 'DeFi' },
+      ],
+      unattributed: [
+        { deployer: '0xaaa', events: 50, eventsCapped: false, packages: 2, uniqueSenders: 5, sampleIdentifiers: [], sampledObjectType: null },
+      ],
+    };
+    const latestClassified = {
+      l1: [
+        { slug: 'proj-a', name: 'A', events: 300, eventsCapped: false, packages: 1, uniqueSenders: 25, team: null, logo: null, category: 'DeFi' },
+        { slug: 'proj-b', name: 'B (new)', events: 80, eventsCapped: true, packages: 2, uniqueSenders: 4, team: null, logo: '/l.png', category: 'Oracle' },
+      ],
+      unattributed: [
+        { deployer: '0xaaa', events: 200, eventsCapped: false, packages: 2, uniqueSenders: 18, sampleIdentifiers: ['name: X'], sampledObjectType: 't::T' },
+        { deployer: '0xbbb', events: 40, eventsCapped: false, packages: 1, uniqueSenders: 2, sampleIdentifiers: [], sampledObjectType: null },
+      ],
+    };
+
+    beforeEach(() => {
+      ecoModel.findOne
+        .mockReturnValueOnce(oneshot(baselineSnap))
+        .mockReturnValueOnce(oneshot(latestSnap));
+      jest.spyOn(service as any, 'classifyCached').mockImplementation(async (snap: any) => {
+        if (snap._id === 'b') return baselineClassified;
+        if (snap._id === 'l') return latestClassified;
+        throw new Error(`unexpected classifyCached arg: ${JSON.stringify(snap)}`);
+      });
+    });
+
+    it('returns null when no latest snapshot exists', async () => {
+      ecoModel.findOne.mockReset();
+      ecoModel.findOne
+        .mockReturnValueOnce(oneshot(baselineSnap))
+        .mockReturnValueOnce(oneshot(null));
+      const out = await service.growthRanking(new Date('2026-04-13'), new Date('2026-04-20'), 'all');
+      expect(out).toBeNull();
+    });
+
+    it('treats missing baseline as zeros (window predates first capture)', async () => {
+      ecoModel.findOne.mockReset();
+      ecoModel.findOne
+        .mockReturnValueOnce(oneshot(null))
+        .mockReturnValueOnce(oneshot(latestSnap));
+      const out = await service.growthRanking(new Date('2026-01-01'), new Date('2026-04-20'), 'attributed');
+      expect(out).not.toBeNull();
+      expect(out!.baseline).toBeNull();
+      const a = out!.items.find((i) => i.key === 'proj-a')!;
+      // No baseline → delta equals full current value.
+      expect(a.eventsDelta).toBe(300);
+      expect(a.events).toBe(300);
+    });
+
+    it('computes per-project and per-cluster deltas, sorts by eventsDelta desc', async () => {
+      const out = await service.growthRanking(new Date('2026-04-13'), new Date('2026-04-20'), 'all');
+      expect(out).not.toBeNull();
+      expect(out!.baseline).toEqual({ snapshotId: 'b', createdAt: baselineSnap.createdAt });
+      expect(out!.latest).toEqual({ snapshotId: 'l', createdAt: latestSnap.createdAt });
+
+      // Expected delta ranking:
+      //   proj-a (attrib): 300 - 100 = +200
+      //   0xaaa (unattr):  200 -  50 = +150
+      //   proj-b (attrib, new): 80 - 0 = +80
+      //   0xbbb (unattr, new): 40 - 0 = +40
+      const keys = out!.items.map((i) => i.key);
+      expect(keys).toEqual(['proj-a', '0xaaa', 'proj-b', '0xbbb']);
+
+      const byKey = Object.fromEntries(out!.items.map((i) => [i.key, i]));
+      expect(byKey['proj-a'].scope).toBe('attributed');
+      expect(byKey['proj-a'].eventsDelta).toBe(200);
+      expect(byKey['proj-a'].uniqueSendersDelta).toBe(15);
+      expect(byKey['proj-a'].packagesDelta).toBe(0);
+
+      expect(byKey['0xaaa'].scope).toBe('unattributed');
+      expect(byKey['0xaaa'].name).toContain('0xaaa');
+      expect(byKey['0xaaa'].eventsDelta).toBe(150);
+      expect(byKey['0xaaa'].sampleIdentifiers).toEqual(['name: X']);
+
+      expect(byKey['proj-b'].scope).toBe('attributed');
+      expect(byKey['proj-b'].eventsDelta).toBe(80);
+      expect(byKey['proj-b'].eventsCapped).toBe(true);
+      expect(byKey['proj-b'].logo).toBe('/l.png');
+
+      expect(byKey['0xbbb'].eventsDelta).toBe(40);
+      expect(byKey['0xbbb'].packagesDelta).toBe(1);
+    });
+
+    it('filters to attributed scope only', async () => {
+      const out = await service.growthRanking(new Date('2026-04-13'), new Date('2026-04-20'), 'attributed');
+      expect(out!.items.every((i) => i.scope === 'attributed')).toBe(true);
+      expect(out!.items.map((i) => i.key)).toEqual(['proj-a', 'proj-b']);
+    });
+
+    it('filters to unattributed scope only', async () => {
+      const out = await service.growthRanking(new Date('2026-04-13'), new Date('2026-04-20'), 'unattributed');
+      expect(out!.items.every((i) => i.scope === 'unattributed')).toBe(true);
+      expect(out!.items.map((i) => i.key)).toEqual(['0xaaa', '0xbbb']);
     });
   });
 
@@ -590,10 +717,10 @@ describe('EcosystemService', () => {
     });
 
     it('clears the classify cache after a successful capture', async () => {
-      (service as any).classifyCache = { key: 'stale', expiresAt: Date.now() + 60_000, value: {} };
+      (service as any).classifyCache.set('stale', { expiresAt: Date.now() + 60_000, value: {} });
       jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
       await service.capture();
-      expect((service as any).classifyCache).toBeNull();
+      expect((service as any).classifyCache.size).toBe(0);
     });
   });
 

@@ -72,6 +72,58 @@ describe('EcosystemController', () => {
     });
   });
 
+  describe('GET /ecosystem/growth-ranking', () => {
+    let growthRanking: jest.Mock;
+
+    beforeEach(() => {
+      growthRanking = jest.fn();
+      (service as any).growthRanking = growthRanking;
+    });
+
+    it('defaults window=all and scope=all when params omitted', async () => {
+      growthRanking.mockResolvedValue({ items: [] });
+      await controller.growthRanking(undefined, undefined);
+      const [from, to, scope] = growthRanking.mock.calls[0];
+      expect(scope).toBe('all');
+      // window=all maps to epoch-0 baseline → full current values as deltas
+      expect(from.getTime()).toBe(0);
+      // `to` should be close to now (within 5 s for test stability)
+      expect(Math.abs(Date.now() - to.getTime())).toBeLessThan(5000);
+    });
+
+    it('resolves 24h / 7d / 30d window shorthands to absolute dates', async () => {
+      growthRanking.mockResolvedValue({ items: [] });
+      for (const [label, ms] of [['24h', 86_400_000], ['7d', 7 * 86_400_000], ['30d', 30 * 86_400_000]] as const) {
+        growthRanking.mockClear();
+        await controller.growthRanking(label, 'all');
+        const [from, to] = growthRanking.mock.calls[0];
+        const span = to.getTime() - from.getTime();
+        // Allow a few ms of slop for the test clock
+        expect(Math.abs(span - ms)).toBeLessThan(50);
+      }
+    });
+
+    it('400s on invalid window shorthand', async () => {
+      await expect(controller.growthRanking('1y', 'all')).rejects.toThrow(/window/);
+    });
+
+    it('400s on invalid scope', async () => {
+      await expect(controller.growthRanking('7d', 'bogus')).rejects.toThrow(/scope/);
+    });
+
+    it('404s when the service returns null (no snapshots)', async () => {
+      growthRanking.mockResolvedValue(null);
+      await expect(controller.growthRanking('7d', 'all')).rejects.toThrow(/No snapshots/);
+    });
+
+    it('forwards scope to the service and returns its result', async () => {
+      const result = { window: {}, baseline: null, latest: {}, items: [{ key: 'x' }] };
+      growthRanking.mockResolvedValue(result);
+      await expect(controller.growthRanking('7d', 'unattributed')).resolves.toBe(result);
+      expect(growthRanking.mock.calls[0][2]).toBe('unattributed');
+    });
+  });
+
   describe('GET /ecosystem/growth', () => {
     let computeGrowth: jest.Mock;
 
