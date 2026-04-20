@@ -17,3 +17,6 @@ deploy/
 # Claude Code (kept local)
 CLAUDE.md
 .claude/
+
+# Local scratchpad (brainstorming, not committed)
+TODO2.md
