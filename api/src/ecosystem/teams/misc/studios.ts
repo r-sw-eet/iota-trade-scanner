@@ -216,13 +216,12 @@ Evidence leans (1): \`tic_tac_iota::AdminCap\` is owned directly by the deployer
 
 export const studio0a0d: Team = {
   id: 'studio-0a0d',
-  name: 'Studio 0x0a0d4c9a (Clawnera / Spec Weekly)',
-  description: "Umbrella team for the CLAW meme-coin + swap gateway and the SPEC launchpad — sibling products to the CLAWNERA marketplace, all operated by GitHub user Moron1337. The CLAWNERA marketplace itself has its own dedicated `clawnera` team; this team holds the rest of the Moron1337 portfolio (CLAW token + swap gateway, SPEC launchpad) since they share the same deployer keys but ship under distinct product brands.",
+  name: 'Studio 0x0a0d4c9a (Spec Weekly)',
+  description: "Umbrella team for the CLAW meme-coin + swap gateway and the SPEC launchpad, operated by GitHub user Moron1337. Holds the rest of the Moron1337 portfolio (CLAW token + swap gateway, SPEC launchpad) under distinct product brands. The sibling CLAWNERA marketplace has its own dedicated team and shares the same deployer keys — see attribution.",
   urls: [
     { label: 'CLAW sale', href: 'https://buy.claw-coin.com' },
     { label: 'SPEC sale', href: 'https://buy.spec-coin.cc' },
     { label: 'GitHub (Moron1337)', href: 'https://github.com/Moron1337' },
-    { label: 'Clawnera (sibling team)', href: 'https://clawnera.com' },
   ],
   deployers: [
     '0x0a0d4c9a9f935dac9f9bee55ca0632c187077a04d0dffcc479402f2de9a82140',

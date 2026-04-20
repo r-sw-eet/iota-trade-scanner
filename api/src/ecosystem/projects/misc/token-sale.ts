@@ -4,7 +4,7 @@ export const tokenSale: ProjectDefinition = {
   name: 'Token Sale',
   layer: 'L1',
   category: 'Token Sale',
-  description: 'SPEC Launchpad — token-sale infrastructure on IOTA Rebased. v1 spec_sale_multicoin and v2 spec_sale_v2 iterations. Launchpad brand for Studio 0x0a0d4c9a (Moron1337 / Clawnera / Spec Weekly); SPEC is the first token sold through it.',
+  description: 'SPEC Launchpad — token-sale infrastructure on IOTA Rebased. v1 spec_sale_multicoin and v2 spec_sale_v2 iterations. Launchpad brand for Studio 0x0a0d4c9a (Moron1337 / Spec Weekly); SPEC is the first token sold through it.',
   urls: [
     { label: 'SPEC sale', href: 'https://buy.spec-coin.cc' },
     { label: 'GitHub (Moron1337)', href: 'https://github.com/Moron1337' },
