@@ -1,7 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { getModelToken } from '@nestjs/mongoose';
 import { EcosystemService } from './ecosystem.service';
-import { EcosystemSnapshot } from './schemas/ecosystem-snapshot.schema';
+import { OnchainSnapshot } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
 import { ProjectDefinition } from './projects';
 
@@ -240,7 +240,7 @@ describe('EcosystemService', () => {
     const module = await Test.createTestingModule({
       providers: [
         EcosystemService,
-        { provide: getModelToken(EcosystemSnapshot.name), useValue: ecoModel },
+        { provide: getModelToken(OnchainSnapshot.name), useValue: ecoModel },
         { provide: getModelToken(ProjectSenders.name), useValue: senderModel },
       ],
     }).compile();
@@ -340,11 +340,161 @@ describe('EcosystemService', () => {
   // ---------- getLatest ----------
 
   describe('getLatest', () => {
-    it('returns the most recently created snapshot', async () => {
-      const doc = { totalProjects: 3 };
-      ecoModel.findOne.mockReturnValue(chain(doc));
-      await expect(service.getLatest()).resolves.toEqual(doc);
-      expect(ecoModel.findOne).toHaveBeenCalledWith();
+    it('returns null when no snapshot has been captured yet', async () => {
+      ecoModel.findOne.mockReturnValue(chain(null));
+      await expect(service.getLatest()).resolves.toBeNull();
+    });
+
+    it('loads the raw snapshot and runs classifyFromRaw through the in-process cache', async () => {
+      const raw = { _id: 'abc', packages: [], totalStorageRebateNanos: 0, networkTxTotal: 42, txRates: { perDay: 1 } };
+      ecoModel.findOne.mockReturnValue(chain(raw));
+      const classifySpy = jest
+        .spyOn(service as any, 'classifyFromRaw')
+        .mockResolvedValue({ l1: [], l2: [], totalProjects: 0, totalEvents: 0 });
+
+      const first = await service.getLatest();
+      const second = await service.getLatest();
+
+      expect(first).toEqual({ l1: [], l2: [], totalProjects: 0, totalEvents: 0 });
+      expect(first).toBe(second); // same cached reference on repeat calls
+      expect(classifySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('invalidateClassifyCache() forces the next getLatest() to re-classify', async () => {
+      const raw = { _id: 'abc', packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
+      ecoModel.findOne.mockReturnValue(chain(raw));
+      const classifySpy = jest
+        .spyOn(service as any, 'classifyFromRaw')
+        .mockResolvedValue({ totalProjects: 0 });
+
+      await service.getLatest();
+      service.invalidateClassifyCache();
+      await service.getLatest();
+
+      expect(classifySpy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('getLatestRaw', () => {
+    it('returns the raw snapshot without classification', async () => {
+      const raw = { packages: [], networkTxTotal: 0, txRates: {} };
+      ecoModel.findOne.mockReturnValue(chain(raw));
+      await expect(service.getLatestRaw()).resolves.toBe(raw);
+    });
+  });
+
+  describe('computeGrowth', () => {
+    // Build a chainable mock that returns `result` at the end of
+    // findOne().sort().lean().exec(). Supports being called twice
+    // (once for baseline, once for latest) by returning a fresh chain each time.
+    const oneshot = (value: any) => ({
+      sort: () => ({ lean: () => ({ exec: async () => value }) }),
+    });
+
+    const baseline = {
+      _id: 'b',
+      createdAt: new Date('2026-04-13T00:00:00Z'),
+      networkTxTotal: 100,
+      packages: [
+        {
+          address: '0xaa',
+          storageRebateNanos: 1000,
+          moduleMetrics: [
+            { module: 'm1', events: 10, eventsCapped: false, uniqueSenders: 3 },
+            { module: 'm2', events: 5, eventsCapped: false, uniqueSenders: 2 },
+          ],
+        },
+      ],
+    };
+    const latest = {
+      _id: 'l',
+      createdAt: new Date('2026-04-20T00:00:00Z'),
+      networkTxTotal: 150,
+      packages: [
+        {
+          address: '0xaa',
+          storageRebateNanos: 1000, // static per package
+          moduleMetrics: [
+            { module: 'm1', events: 30, eventsCapped: false, uniqueSenders: 7 },
+            { module: 'm2', events: 5, eventsCapped: false, uniqueSenders: 2 }, // no change
+          ],
+        },
+        {
+          address: '0xbb', // newly published package
+          storageRebateNanos: 500,
+          moduleMetrics: [{ module: 'new_mod', events: 8, eventsCapped: false, uniqueSenders: 4 }],
+        },
+      ],
+    };
+
+    it('returns null when the baseline window has no snapshot', async () => {
+      ecoModel.findOne.mockReturnValueOnce(oneshot(null)).mockReturnValueOnce(oneshot(latest));
+      const out = await service.computeGrowth(new Date('2026-04-01'), new Date('2026-04-20'));
+      expect(out).toBeNull();
+    });
+
+    it('returns null when the latest window has no snapshot', async () => {
+      ecoModel.findOne.mockReturnValueOnce(oneshot(baseline)).mockReturnValueOnce(oneshot(null));
+      const out = await service.computeGrowth(new Date('2026-04-13'), new Date('2026-04-20'));
+      expect(out).toBeNull();
+    });
+
+    it('returns zero deltas when both endpoints resolve to the same snapshot', async () => {
+      ecoModel.findOne.mockReturnValueOnce(oneshot(baseline)).mockReturnValueOnce(oneshot(baseline));
+      const out = await service.computeGrowth(new Date('2026-04-13'), new Date('2026-04-13T12:00:00Z'));
+      expect(out).toMatchObject({
+        network: { totalEventsDelta: 0, totalStorageRebateDelta: 0, networkTxTotalDelta: 0, newPackages: 0 },
+        packages: [],
+      });
+    });
+
+    it('computes per-package and per-module deltas correctly', async () => {
+      ecoModel.findOne.mockReturnValueOnce(oneshot(baseline)).mockReturnValueOnce(oneshot(latest));
+      const out = await service.computeGrowth(
+        new Date('2026-04-13T00:00:00Z'),
+        new Date('2026-04-20T00:00:00Z'),
+      );
+      expect(out).not.toBeNull();
+      // Events: 0xaa::m1 grew by 20, m2 stayed; 0xbb new +8 → total +28.
+      expect(out!.network.totalEventsDelta).toBe(28);
+      expect(out!.network.newPackages).toBe(1);
+      expect(out!.network.networkTxTotalDelta).toBe(50);
+      // storageRebate delta: 0xaa static (0), 0xbb new (+500) → +500.
+      expect(out!.network.totalStorageRebateDelta).toBe(500);
+
+      const byAddr = Object.fromEntries(out!.packages.map((p) => [p.address, p]));
+      expect(byAddr['0xaa'].isNew).toBe(false);
+      expect(byAddr['0xaa'].eventsDelta).toBe(20);
+      expect(byAddr['0xaa'].uniqueSendersDelta).toBe(4);
+      // Module m2 had no change — should be pruned from the per-module list
+      // but m1 stays.
+      expect(byAddr['0xaa'].modules).toEqual([
+        { module: 'm1', eventsDelta: 20, uniqueSendersDelta: 4 },
+      ]);
+
+      expect(byAddr['0xbb'].isNew).toBe(true);
+      expect(byAddr['0xbb'].eventsDelta).toBe(8);
+      expect(byAddr['0xbb'].storageRebateDelta).toBe(500);
+      expect(byAddr['0xbb'].modules).toEqual([
+        { module: 'new_mod', eventsDelta: 8, uniqueSendersDelta: 4 },
+      ]);
+    });
+  });
+
+  describe('findSnapshotsBetween', () => {
+    it('queries by createdAt window ordered ascending', async () => {
+      const snaps = [{ _id: '1' }, { _id: '2' }];
+      const exec = jest.fn().mockResolvedValue(snaps);
+      const lean = jest.fn().mockReturnValue({ exec });
+      const sort = jest.fn().mockReturnValue({ lean });
+      const find = jest.fn().mockReturnValue({ sort });
+      ecoModel.find = find;
+
+      const from = new Date('2026-04-01');
+      const to = new Date('2026-04-20');
+      await expect(service.findSnapshotsBetween(from, to)).resolves.toBe(snaps);
+      expect(find).toHaveBeenCalledWith({ createdAt: { $gte: from, $lte: to } });
+      expect(sort).toHaveBeenCalledWith({ createdAt: 1 });
     });
   });
 
@@ -392,24 +542,25 @@ describe('EcosystemService', () => {
   // ---------- capture ----------
 
   describe('capture', () => {
-    it('saves the fetched snapshot', async () => {
-      const data = { totalProjects: 1, totalEvents: 5 };
-      jest.spyOn(service as any, 'fetchFull').mockResolvedValue(data);
+    const rawStub = { packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
+
+    it('saves the raw snapshot returned by captureRaw', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
       await service.capture();
-      expect(ecoModel.create).toHaveBeenCalledWith(data);
+      expect(ecoModel.create).toHaveBeenCalledWith(rawStub);
     });
 
-    it('swallows fetchFull errors (logs only)', async () => {
-      jest.spyOn(service as any, 'fetchFull').mockRejectedValue(new Error('network'));
+    it('swallows captureRaw errors (logs only)', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockRejectedValue(new Error('network'));
       await expect(service.capture()).resolves.toBeUndefined();
       expect(ecoModel.create).not.toHaveBeenCalled();
     });
 
     it('flips isCapturing() during the scan and clears it on completion', async () => {
       let seenWhileRunning: boolean | null = null;
-      jest.spyOn(service as any, 'fetchFull').mockImplementation(async () => {
+      jest.spyOn(service as any, 'captureRaw').mockImplementation(async () => {
         seenWhileRunning = service.isCapturing();
-        return { totalProjects: 0, totalEvents: 0 };
+        return rawStub;
       });
       expect(service.isCapturing()).toBe(false);
       await service.capture();
@@ -417,8 +568,8 @@ describe('EcosystemService', () => {
       expect(service.isCapturing()).toBe(false);
     });
 
-    it('clears isCapturing() even when fetchFull throws', async () => {
-      jest.spyOn(service as any, 'fetchFull').mockRejectedValue(new Error('boom'));
+    it('clears isCapturing() even when captureRaw throws', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockRejectedValue(new Error('boom'));
       await service.capture();
       expect(service.isCapturing()).toBe(false);
     });
@@ -426,16 +577,23 @@ describe('EcosystemService', () => {
     it('no-ops a concurrent capture while one is already in flight', async () => {
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
-      const fetchFull = jest.spyOn(service as any, 'fetchFull').mockImplementation(async () => {
+      const captureRaw = jest.spyOn(service as any, 'captureRaw').mockImplementation(async () => {
         await gate;
-        return { totalProjects: 0, totalEvents: 0 };
+        return rawStub;
       });
       const first = service.capture();
       // Second call lands while the first is awaiting `gate` — must short-circuit.
       await service.capture();
-      expect(fetchFull).toHaveBeenCalledTimes(1);
+      expect(captureRaw).toHaveBeenCalledTimes(1);
       release();
       await first;
+    });
+
+    it('clears the classify cache after a successful capture', async () => {
+      (service as any).classifyCache = { key: 'stale', expiresAt: Date.now() + 60_000, value: {} };
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      await service.capture();
+      expect((service as any).classifyCache).toBeNull();
     });
   });
 
@@ -1288,13 +1446,16 @@ describe('EcosystemService', () => {
       await expect(service.backfillAllSenders()).rejects.toThrow(/No ecosystem snapshot/);
     });
 
-    it('iterates every (project, module) with a package and reports progress', async () => {
+    it('iterates every (package, module) with a module and reports progress', async () => {
+      // New raw-snapshot shape: the backfill now iterates `packages[]` from
+      // the `OnchainSnapshot`, not the classified `l1[]`. Packages without
+      // modules are filtered out; the progress callback reports `project`
+      // as the package address (the addressable unit for `ProjectSenders`).
       ecoModel.findOne.mockReturnValue(chain({
-        l1: [
-          { name: 'P1', latestPackageAddress: '0xaa', modules: ['m1', 'm2'] },
-          { name: 'P2', latestPackageAddress: null, modules: ['z'] }, // filtered out
-          { name: 'P3', latestPackageAddress: '0xcc', modules: [] },  // filtered out
-          { name: 'P4', latestPackageAddress: '0xdd', modules: ['d1'] },
+        packages: [
+          { address: '0xaa', modules: ['m1', 'm2'] },
+          { address: '0xcc', modules: [] },  // filtered out (no modules)
+          { address: '0xdd', modules: ['d1'] },
         ],
       }));
       const spy = jest.spyOn(service, 'backfillSendersForModule')
@@ -1307,12 +1468,12 @@ describe('EcosystemService', () => {
       expect(spy).toHaveBeenCalledTimes(3);
       expect(result).toEqual({ totalProjects: 2, totalModules: 3, totalSenders: 15 });
       expect(progress).toHaveBeenCalledTimes(3);
-      expect(progress).toHaveBeenNthCalledWith(1, { project: 'P1', module: 'm1', senders: 5 });
+      expect(progress).toHaveBeenNthCalledWith(1, { project: '0xaa', module: 'm1', senders: 5 });
     });
 
     it('works without the progress callback', async () => {
       ecoModel.findOne.mockReturnValue(chain({
-        l1: [{ name: 'P1', latestPackageAddress: '0xaa', modules: ['m1'] }],
+        packages: [{ address: '0xaa', modules: ['m1'] }],
       }));
       jest.spyOn(service, 'backfillSendersForModule').mockResolvedValue(1);
       const result = await service.backfillAllSenders();
@@ -1320,9 +1481,9 @@ describe('EcosystemService', () => {
     });
   });
 
-  // ---------- fetchFull (end-to-end via capture) ----------
+  // ---------- capture → classify end-to-end ----------
 
-  describe('fetchFull (via capture)', () => {
+  describe('capture + classify end-to-end', () => {
     /**
      * Build a scripted fetch that dispatches on URL + body content. Each call
      * returns a Promise<Response-like>. Unknown requests throw to surface
@@ -1412,7 +1573,22 @@ describe('EcosystemService', () => {
       senderModel.create.mockResolvedValue({});
       await service.capture();
       expect(ecoModel.create).toHaveBeenCalledTimes(1);
-      return ecoModel.create.mock.calls[0][0];
+      // Wire the raw snapshot that `capture()` just wrote through `getLatest()`
+      // so assertions can inspect the CLASSIFIED view — `getLatest()` loads
+      // the raw snapshot then runs `classifyFromRaw`, which produces the
+      // frontend-facing shape (`l1`, `l2`, `unattributed`, `totalProjects`).
+      // Gives us end-to-end coverage of capture → classify in a single test.
+      const raw = ecoModel.create.mock.calls[0][0];
+      const stored = { _id: 'test-id', ...raw };
+      ecoModel.findOne.mockReturnValue({
+        sort: () => ({ lean: () => ({ exec: async () => stored }) }),
+      });
+      const classified = await service.getLatest();
+      if (!classified) throw new Error('runCapture: getLatest() returned null');
+      // Cast through `any` so existing assertions can use `.find(...)` and
+      // index access without TS18048 noise; the shape is asserted by the
+      // tests themselves.
+      return classified as any;
     };
 
     it('skips framework-ish 0x0-prefixed packages that are not explicitly claimed', async () => {

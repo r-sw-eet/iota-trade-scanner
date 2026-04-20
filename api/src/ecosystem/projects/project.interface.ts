@@ -4,6 +4,14 @@ export interface ProjectDefinition {
   category: string;
   /** 50-500 characters describing what the project does */
   description: string;
+  /**
+   * ISO-8601 date (`YYYY-MM-DD`) this project was first added to the registry.
+   * Optional: older defs predate this field. Exposed on the API's `Project`
+   * read shape so the frontend can badge "new this week / month". One-shot
+   * backfill from `git log --diff-filter=A --format=%ai -- <file>` is
+   * tracked in `TODO.md § Registry addedAt backfill`.
+   */
+  addedAt?: string;
   /** One or more URLs (website, docs, app, etc.) */
   urls: { label: string; href: string }[];
   /** Absolute public path to the project ICON (square — e.g. `/logos/virtue.svg`). Overrides `Team.logo` for this project only — leave unset to inherit from the team. */

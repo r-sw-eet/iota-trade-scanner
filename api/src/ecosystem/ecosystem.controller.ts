@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Query, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Post, Param, Query, NotFoundException } from '@nestjs/common';
 import { EcosystemService } from './ecosystem.service';
 import { ALL_TEAMS } from './teams';
 
@@ -9,7 +9,7 @@ export class EcosystemController {
   constructor(private ecosystemService: EcosystemService) {}
 
   /**
-   * Trigger a fresh ecosystem scan out-of-band (without waiting for the 6h
+   * Trigger a fresh ecosystem scan out-of-band (without waiting for the 2h
    * cron or restarting the container). The capture runs in the background;
    * the previous snapshot keeps serving via `GET /` until the new one
    * finishes, so the dashboard never goes blank during a refresh. A
@@ -21,10 +21,53 @@ export class EcosystemController {
     if (this.ecosystemService.isCapturing()) {
       return { started: false, status: 'already in flight' };
     }
-    // Fire and forget — the capture is slow (30–40 min) so we don't block
+    // Fire and forget — the capture is slow (45–60 min) so we don't block
     // the HTTP response on it. Errors are logged inside `capture()`.
     this.ecosystemService.capture().catch(() => {});
     return { started: true, status: 'capture started' };
+  }
+
+  /**
+   * Per-package growth between two points in time. Pure subtraction over the
+   * raw `OnchainSnapshot` collection — no classification, no live RPC — so
+   * queries across arbitrary windows are fast (~100 ms for a week of
+   * 2h snapshots).
+   *
+   * Query params (both required, both ISO-8601):
+   *   - `from` — start of the window
+   *   - `to`   — end of the window
+   *
+   * Resolution semantics: baseline = latest snapshot with `createdAt <= from`;
+   * latest = latest snapshot with `createdAt <= to`. If either endpoint has
+   * no matching snapshot, responds 404 (rather than synthesizing numbers
+   * against a nonexistent baseline).
+   *
+   * Response shape — see `EcosystemService.computeGrowth` for the full
+   * contract. Top-level `network` holds the aggregate counters; `packages`
+   * is a per-package breakdown sorted by `eventsDelta` desc. Packages with
+   * all-zero deltas are omitted unless `isNew: true`.
+   */
+  @Get('growth')
+  async growth(
+    @Query('from') fromRaw?: string,
+    @Query('to') toRaw?: string,
+  ) {
+    if (!fromRaw || !toRaw) {
+      throw new BadRequestException('Both `from` and `to` query params are required (ISO-8601 dates).');
+    }
+    const from = new Date(fromRaw);
+    const to = new Date(toRaw);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      throw new BadRequestException('`from` and `to` must be ISO-8601 parsable dates.');
+    }
+    if (from > to) {
+      throw new BadRequestException('`from` must be <= `to`.');
+    }
+    const result = await this.ecosystemService.computeGrowth(from, to);
+    if (!result) {
+      throw new NotFoundException('No snapshots cover the requested window.');
+    }
+    return result;
   }
 
   @Get()

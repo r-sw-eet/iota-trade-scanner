@@ -87,6 +87,13 @@ The `fingerprint` schema (`api/src/ecosystem/projects/project.interface.ts`) sup
 
 Current justification (2026-04-18): eyeballed 16 clusters with sampled identifiers in the latest snapshot — every one was uniquely identifiable by `type` alone, or by `type + exact/prefix/suffix/present`. None required regex, OR, or numeric matchers. Revisit when a real unattributed cluster can't be pinned down with the current primitives.
 
+## Registry addedAt backfill
+
+The `ProjectDefinition.addedAt` field (introduced 2026-04-20 alongside the raw-snapshot refactor) is optional — defs that predate it surface as `addedAt: null` on the API's `Project` read shape. That's fine as a default, but the frontend's "added this week" / "new this month" badges need real dates to be useful.
+
+- [ ] **One-shot `addedAt` backfill for the ~85 existing project defs.** For each file under `api/src/ecosystem/projects/*/` (skip `index.ts`, `_index.ts`, `project.interface.ts`), derive the first-landed date from `git log --diff-filter=A --format=%ai --follow -- <file>` and inject `addedAt: '<YYYY-MM-DD>'` into the `ProjectDefinition` object literal. Use a TS-AST-aware writer (`ts-morph`) rather than sed — several defs are composed via helpers or exported from multi-def files (`nft/studio-cb69-siblings.ts`, `defi/swirl-v1.ts` + `swirl-v2.ts`) and a regex-based insertion would corrupt them. Verify by greping `addedAt:` and confirming the count matches the def count in `ALL_PROJECTS`.
+- [ ] **Going forward** — the attribution workflow should remind the author to set `addedAt` when a new def lands. Consider a lint rule (`eslint-plugin-local`) that flags a `ProjectDefinition` export without `addedAt` as a warning so the backfill doesn't rot at the leading edge.
+
 ## Ecosystem project-def audit
 
 Revisit after several ecosystem snapshots (once enough data has landed post-2026-04-18 refactor):

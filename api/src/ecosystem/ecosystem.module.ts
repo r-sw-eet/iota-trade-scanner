@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
-import { EcosystemSnapshot, EcosystemSnapshotSchema } from './schemas/ecosystem-snapshot.schema';
+import { OnchainSnapshot, OnchainSnapshotSchema } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders, ProjectSendersSchema } from './schemas/project-senders.schema';
 import { EcosystemService } from './ecosystem.service';
 import { EcosystemController } from './ecosystem.controller';
@@ -8,7 +8,7 @@ import { EcosystemController } from './ecosystem.controller';
 @Module({
   imports: [
     MongooseModule.forFeature([
-      { name: EcosystemSnapshot.name, schema: EcosystemSnapshotSchema },
+      { name: OnchainSnapshot.name, schema: OnchainSnapshotSchema },
       { name: ProjectSenders.name, schema: ProjectSendersSchema },
     ]),
   ],

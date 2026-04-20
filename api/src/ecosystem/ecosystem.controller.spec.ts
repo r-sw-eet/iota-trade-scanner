@@ -72,6 +72,56 @@ describe('EcosystemController', () => {
     });
   });
 
+  describe('GET /ecosystem/growth', () => {
+    let computeGrowth: jest.Mock;
+
+    beforeEach(() => {
+      computeGrowth = jest.fn();
+      (service as any).computeGrowth = computeGrowth;
+    });
+
+    it('400s when `from` or `to` is missing', async () => {
+      await expect(controller.growth(undefined, '2026-04-20T00:00:00Z')).rejects.toThrow(/required/);
+      await expect(controller.growth('2026-04-20T00:00:00Z', undefined)).rejects.toThrow(/required/);
+    });
+
+    it('400s when a date is not ISO-parsable', async () => {
+      await expect(controller.growth('garbage', '2026-04-20T00:00:00Z')).rejects.toThrow(/ISO-8601/);
+    });
+
+    it('400s when `from` is after `to`', async () => {
+      await expect(
+        controller.growth('2026-04-20T00:00:00Z', '2026-04-13T00:00:00Z'),
+      ).rejects.toThrow(/`from` must be <= `to`/);
+    });
+
+    it('404s when no snapshots cover the window', async () => {
+      computeGrowth.mockResolvedValue(null);
+      await expect(
+        controller.growth('2026-04-13T00:00:00Z', '2026-04-20T00:00:00Z'),
+      ).rejects.toThrow(/No snapshots/);
+    });
+
+    it('returns the computed growth when snapshots cover the window', async () => {
+      const result = {
+        from: new Date('2026-04-13T00:00:00Z'),
+        to: new Date('2026-04-20T00:00:00Z'),
+        baseline: { snapshotId: 'b', createdAt: new Date('2026-04-13T00:00:00Z') },
+        latest: { snapshotId: 'l', createdAt: new Date('2026-04-20T00:00:00Z') },
+        network: { totalEventsDelta: 10, totalStorageRebateDelta: 0, networkTxTotalDelta: 5, newPackages: 1 },
+        packages: [],
+      };
+      computeGrowth.mockResolvedValue(result);
+      await expect(
+        controller.growth('2026-04-13T00:00:00Z', '2026-04-20T00:00:00Z'),
+      ).resolves.toBe(result);
+      expect(computeGrowth).toHaveBeenCalledWith(
+        new Date('2026-04-13T00:00:00Z'),
+        new Date('2026-04-20T00:00:00Z'),
+      );
+    });
+  });
+
   describe('POST /ecosystem/rescan', () => {
     it('kicks off a capture when none is running and returns started=true', async () => {
       service.isCapturing.mockReturnValue(false);

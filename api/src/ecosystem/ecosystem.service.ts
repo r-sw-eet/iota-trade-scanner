@@ -3,7 +3,12 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Cron } from '@nestjs/schedule';
 import { Model } from 'mongoose';
 import { createHash } from 'crypto';
-import { EcosystemSnapshot } from './schemas/ecosystem-snapshot.schema';
+import {
+  OnchainSnapshot,
+  PackageFact,
+  ModuleMetrics,
+  FingerprintSampleDoc,
+} from './schemas/onchain-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
 import { ALL_PROJECTS, ProjectDefinition } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
@@ -105,6 +110,8 @@ export interface Project {
   uniqueSenders: number;
   /** Prose explaining how this project's display name was derived (shown only on the details page). */
   attribution: string | null;
+  /** ISO-8601 date the project was first added to the registry (from `ProjectDefinition.addedAt`). `null` for defs that predate the field or for DefiLlama-synthesized L2 rows. */
+  addedAt: string | null;
 }
 
 interface PackageInfo {
@@ -131,8 +138,27 @@ export class EcosystemService implements OnModuleInit {
     return this.capturing;
   }
 
+  /**
+   * In-process cache for the classified view of a snapshot. Classification
+   * against the current registry is deterministic for a given snapshot + the
+   * live chain state probed for fingerprint matching, so the first request
+   * after a capture pays the classify cost (~1–2 s + any fingerprint probes)
+   * and every subsequent request within the cache window is free.
+   *
+   * Keyed by snapshot `_id` — if a new snapshot lands, the old key is stale
+   * and `getLatest()` recomputes. A short TTL (5 min) also bounds staleness
+   * against live-chain-state drift that would change fingerprint matching.
+   */
+  private classifyCache: {
+    key: string;
+    expiresAt: number;
+    value: Awaited<ReturnType<EcosystemService['classifyFromRaw']>>;
+  } | null = null;
+
+  private static readonly CLASSIFY_CACHE_TTL_MS = 5 * 60 * 1000;
+
   constructor(
-    @InjectModel(EcosystemSnapshot.name) private ecoModel: Model<EcosystemSnapshot>,
+    @InjectModel(OnchainSnapshot.name) private ecoModel: Model<OnchainSnapshot>,
     @InjectModel(ProjectSenders.name) private senderModel: Model<ProjectSenders>,
   ) {}
 
@@ -145,12 +171,195 @@ export class EcosystemService implements OnModuleInit {
     }
   }
 
+  /**
+   * Classified ecosystem view for the most recent `OnchainSnapshot`. Returns
+   * the same JSON shape the Nuxt frontend already consumes (`l1`, `l2`,
+   * `unattributed`, totals, `networkTxTotal`, `txRates`) — no API contract
+   * change. Classification runs every call but is cached in-process per
+   * snapshot id, so repeat requests are O(1).
+   */
   async getLatest() {
+    const snap = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    if (!snap) return null;
+    return this.classifyCached(snap);
+  }
+
+  /** Fetch the raw latest snapshot without classification. Used by the growth endpoint. */
+  async getLatestRaw() {
     return this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
   }
 
-  // Refresh every 6 hours
-  @Cron('0 */6 * * *')
+  /** Fetch raw snapshots in a `[from, to]` `createdAt` window. Used by the growth endpoint. */
+  async findSnapshotsBetween(from: Date, to: Date) {
+    return this.ecoModel
+      .find({ createdAt: { $gte: from, $lte: to } })
+      .sort({ createdAt: 1 })
+      .lean()
+      .exec();
+  }
+
+  /**
+   * Compute per-package / per-module growth deltas between two snapshots.
+   * Baseline = latest snapshot with `createdAt <= from`; latest = latest
+   * snapshot with `createdAt <= to`. Both are looked up from the raw
+   * `onchainsnapshots` collection — no classification, no live RPC. The
+   * delta is plain subtraction on cumulative counters keyed by the on-chain-
+   * stable `(address, module)`, so adding a project definition or renaming
+   * a team in between the two snapshots doesn't perturb the numbers.
+   *
+   * Packages present in the `to` snapshot but not the `from` snapshot are
+   * flagged `isNew: true`; their module-level deltas are taken against zero.
+   * Packages missing from `to` (should never happen on mainnet — packages
+   * don't un-publish) are omitted.
+   *
+   * Returns `null` when either end of the window has no matching snapshot —
+   * the caller surfaces this as a 404 rather than synthesizing numbers
+   * against a nonexistent baseline.
+   */
+  async computeGrowth(from: Date, to: Date): Promise<{
+    from: Date;
+    to: Date;
+    baseline: { snapshotId: string; createdAt: Date };
+    latest: { snapshotId: string; createdAt: Date };
+    network: {
+      totalEventsDelta: number;
+      totalStorageRebateDelta: number;
+      networkTxTotalDelta: number;
+      newPackages: number;
+    };
+    packages: Array<{
+      address: string;
+      isNew: boolean;
+      eventsDelta: number;
+      uniqueSendersDelta: number;
+      storageRebateDelta: number;
+      modules: Array<{ module: string; eventsDelta: number; uniqueSendersDelta: number }>;
+    }>;
+  } | null> {
+    const baseline = await this.ecoModel
+      .findOne({ createdAt: { $lte: from } })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+    const latest = await this.ecoModel
+      .findOne({ createdAt: { $lte: to } })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+    if (!baseline || !latest) return null;
+    if (String(baseline._id) === String(latest._id)) {
+      // Both endpoints resolve to the same snapshot — no growth window.
+      // Return zeros rather than erroring so the frontend can render a
+      // "no change yet" state without branching.
+      return {
+        from,
+        to,
+        baseline: { snapshotId: String(baseline._id), createdAt: baseline.createdAt! },
+        latest: { snapshotId: String(latest._id), createdAt: latest.createdAt! },
+        network: {
+          totalEventsDelta: 0,
+          totalStorageRebateDelta: 0,
+          networkTxTotalDelta: 0,
+          newPackages: 0,
+        },
+        packages: [],
+      };
+    }
+
+    // Index the baseline by address for O(1) lookups while scanning `latest`.
+    const baselineByAddr = new Map<string, typeof baseline.packages[number]>();
+    for (const p of baseline.packages) baselineByAddr.set(p.address, p);
+
+    let totalEventsDelta = 0;
+    let totalStorageRebateDelta = 0;
+    let newPackages = 0;
+    const packages: Array<{
+      address: string;
+      isNew: boolean;
+      eventsDelta: number;
+      uniqueSendersDelta: number;
+      storageRebateDelta: number;
+      modules: Array<{ module: string; eventsDelta: number; uniqueSendersDelta: number }>;
+    }> = [];
+
+    for (const pkg of latest.packages) {
+      const prev = baselineByAddr.get(pkg.address);
+      const isNew = !prev;
+      if (isNew) newPackages += 1;
+
+      const prevModules = new Map<string, typeof pkg.moduleMetrics[number]>();
+      for (const mm of prev?.moduleMetrics ?? []) prevModules.set(mm.module, mm);
+
+      let pkgEventsDelta = 0;
+      let pkgSendersDelta = 0;
+      const moduleDeltas: Array<{ module: string; eventsDelta: number; uniqueSendersDelta: number }> = [];
+      for (const mm of pkg.moduleMetrics) {
+        const p = prevModules.get(mm.module);
+        const eventsDelta = mm.events - (p?.events ?? 0);
+        const sendersDelta = mm.uniqueSenders - (p?.uniqueSenders ?? 0);
+        pkgEventsDelta += eventsDelta;
+        pkgSendersDelta += sendersDelta;
+        if (eventsDelta !== 0 || sendersDelta !== 0 || isNew) {
+          moduleDeltas.push({ module: mm.module, eventsDelta, uniqueSendersDelta: sendersDelta });
+        }
+      }
+      const storageRebateDelta = pkg.storageRebateNanos - (prev?.storageRebateNanos ?? 0);
+      totalEventsDelta += pkgEventsDelta;
+      totalStorageRebateDelta += storageRebateDelta;
+      if (pkgEventsDelta !== 0 || pkgSendersDelta !== 0 || storageRebateDelta !== 0 || isNew) {
+        packages.push({
+          address: pkg.address,
+          isNew,
+          eventsDelta: pkgEventsDelta,
+          uniqueSendersDelta: pkgSendersDelta,
+          storageRebateDelta,
+          modules: moduleDeltas,
+        });
+      }
+    }
+    packages.sort((a, b) => b.eventsDelta - a.eventsDelta);
+
+    return {
+      from,
+      to,
+      baseline: { snapshotId: String(baseline._id), createdAt: baseline.createdAt! },
+      latest: { snapshotId: String(latest._id), createdAt: latest.createdAt! },
+      network: {
+        totalEventsDelta,
+        totalStorageRebateDelta,
+        networkTxTotalDelta: latest.networkTxTotal - baseline.networkTxTotal,
+        newPackages,
+      },
+      packages,
+    };
+  }
+
+  private async classifyCached(snap: any) {
+    const key = String(snap._id);
+    const now = Date.now();
+    if (this.classifyCache && this.classifyCache.key === key && this.classifyCache.expiresAt > now) {
+      return this.classifyCache.value;
+    }
+    const value = await this.classifyFromRaw(snap);
+    this.classifyCache = {
+      key,
+      expiresAt: now + EcosystemService.CLASSIFY_CACHE_TTL_MS,
+      value,
+    };
+    return value;
+  }
+
+  /** Clear the classified-view cache. Called after a successful capture so the next read picks up the new snapshot. */
+  invalidateClassifyCache() {
+    this.classifyCache = null;
+  }
+
+  // Refresh every 2 hours (was 6h prior to the 2026-04-20 raw-snapshot refactor).
+  // 2h is a compromise between fresh deltas on the growth chart and scan duration —
+  // a captureRaw() today takes ~45–60 min against mainnet, leaving headroom but not
+  // unlimited. If we ever extend per-package scanning (e.g. add tx counts), revisit
+  // the cadence before cranking it further.
+  @Cron('0 */2 * * *')
   async capture() {
     // In-flight guard: only one capture at a time. `getLatest()` keeps
     // serving the previous snapshot throughout, so the dashboard never
@@ -163,9 +372,13 @@ export class EcosystemService implements OnModuleInit {
     this.capturing = true;
     this.logger.log('Capturing ecosystem snapshot...');
     try {
-      const data = await this.fetchFull();
-      await this.ecoModel.create(data);
-      this.logger.log(`Ecosystem snapshot saved: ${data.totalProjects} projects, ${data.totalEvents} events`);
+      const raw = await this.captureRaw();
+      await this.ecoModel.create(raw);
+      this.invalidateClassifyCache();
+      this.logger.log(
+        `Ecosystem snapshot saved: ${raw.packages.length} packages, ` +
+          `${raw.packages.reduce((s, p) => s + p.moduleMetrics.reduce((ss, m) => ss + m.events, 0), 0)} events`,
+      );
     } catch (e) {
       this.logger.error('Ecosystem capture failed', e);
     } finally {
@@ -314,20 +527,24 @@ export class EcosystemService implements OnModuleInit {
       throw new Error('No ecosystem snapshot exists yet — run a scan first.');
     }
 
-    const projects = snapshot.l1.filter((p) => p.latestPackageAddress && p.modules?.length);
+    // Backfill runs over every raw package × module recorded in the snapshot.
+    // Classification doesn't matter for sender drain — `ProjectSenders` is
+    // keyed by `(packageAddress, module)`, which is stable regardless of
+    // which ProjectDefinition the package ultimately maps to at read time.
+    const packages = snapshot.packages.filter((p) => p.modules.length > 0);
     let totalModules = 0;
     let totalSenders = 0;
 
-    for (const p of projects) {
-      for (const mod of p.modules!) {
-        const count = await this.backfillSendersForModule(p.latestPackageAddress!, mod);
+    for (const p of packages) {
+      for (const mod of p.modules) {
+        const count = await this.backfillSendersForModule(p.address, mod);
         totalModules += 1;
         totalSenders += count;
-        onProgress?.({ project: p.name, module: mod, senders: count });
+        onProgress?.({ project: p.address, module: mod, senders: count });
       }
     }
 
-    return { totalProjects: projects.length, totalModules, totalSenders };
+    return { totalProjects: packages.length, totalModules, totalSenders };
   }
 
   /**
@@ -617,13 +834,35 @@ export class EcosystemService implements OnModuleInit {
     return null;
   }
 
-  private async fetchFull() {
+  /**
+   * Gathers raw on-chain facts for every mainnet package and stores them
+   * classification-free in the snapshot. No project-registry dependence —
+   * the output is verbatim chain state, so historical snapshots stay valid
+   * forever, even as `ALL_PROJECTS`/`ALL_TEAMS` evolve.
+   *
+   * Per-package output:
+   *   - `address`, `deployer`, `storageRebateNanos`, `modules[]`
+   *   - `moduleMetrics[]` — cumulative per-module `events` + `uniqueSenders`
+   *     (senders taken from the maintained `ProjectSenders` collection,
+   *     updated in place during this scan)
+   *   - `fingerprint` — one identity probe per package (object-level first,
+   *     tx-effects fallback for logic-only packages). Raw key:value strings
+   *     suitable for UI display and (with a follow-up rule shape) classifier
+   *     fingerprint matching without live RPC
+   *
+   * The framework filter (`0x0000…0001` etc.) is registry-dependent but
+   * cheap — it only decides whether we capture these at all, not how we
+   * label them downstream.
+   */
+  private async captureRaw(): Promise<{
+    packages: PackageFact[];
+    totalStorageRebateNanos: number;
+    networkTxTotal: number;
+    txRates: Record<string, number>;
+  }> {
     const allPackages = await this.getAllPackages();
 
-    // Framework packages (0x1, 0x2, 0x3, …) are skipped by default because
-    // their generic module names would collide with too many matchers. But
-    // packages explicitly claimed via `packageAddresses` in a ProjectDefinition
-    // are allowed through — e.g. native staking on 0x3.
+    // Framework filter (see doc-comment above).
     const claimedAddresses = new Set<string>();
     for (const def of ALL_PROJECTS) {
       for (const addr of def.match.packageAddresses ?? []) {
@@ -631,15 +870,121 @@ export class EcosystemService implements OnModuleInit {
       }
     }
 
-    const projectMap = new Map<string, { def: ProjectDefinition; packages: PackageInfo[]; splitDeployer?: string }>();
+    const packages: PackageFact[] = [];
+    let totalStorageRebateNanos = 0;
+
+    for (const pkg of allPackages) {
+      if (
+        pkg.address.startsWith('0x000000000000000000000000000000000000000000000000000000000000000') &&
+        !claimedAddresses.has(pkg.address.toLowerCase())
+      ) {
+        continue;
+      }
+
+      const deployer = pkg.previousTransactionBlock?.sender?.address?.toLowerCase() ?? null;
+      const modules = (pkg.modules?.nodes || []).map((m) => m.name);
+      const storageRebateNanos = Number(pkg.storageRebate || 0);
+      totalStorageRebateNanos += storageRebateNanos;
+
+      // Per-module counters. These stay cumulative across scans so delta
+      // queries are plain subtraction between any two snapshots.
+      const moduleMetrics: ModuleMetrics[] = [];
+      for (const mod of modules) {
+        const { count: events, capped: eventsCapped } = await this.countEvents(`${pkg.address}::${mod}`);
+        const senders = await this.updateSendersForModule(pkg.address, mod);
+        moduleMetrics.push({
+          module: mod,
+          events,
+          eventsCapped,
+          uniqueSenders: senders.length,
+        });
+      }
+
+      // Identity probe — one shot per package. Pass 1 reads owned Move
+      // objects (NFTs, configs with brand metadata); pass 2 falls back to
+      // tx-effect object changes for logic-only packages (CDP-style
+      // protocols whose package contains logic but never owns objects of
+      // its own types). Storing the raw output keeps classification
+      // schema-independent at read time.
+      const ident = await this.probeIdentityFields(pkg.address);
+      let identifiers = ident.identifiers;
+      let objectType: string | null = ident.objectType;
+      if (identifiers.length === 0) {
+        const tx = await this.probeTxEffects(pkg.address);
+        if (tx.identifiers.length) {
+          identifiers = tx.identifiers;
+          if (!objectType) objectType = tx.objectType;
+        }
+      }
+      const fingerprint: FingerprintSampleDoc | null =
+        identifiers.length > 0 || objectType
+          ? { sampledObjectType: objectType, identifiers }
+          : null;
+
+      packages.push({
+        address: pkg.address,
+        deployer,
+        storageRebateNanos,
+        modules,
+        moduleMetrics,
+        objectCount: 0, // reserved for future — see schema doc-comment
+        fingerprint,
+      } as PackageFact);
+    }
+
+    const checkpointData: any = await this.graphql(`{ checkpoint { networkTotalTransactions } }`);
+    const networkTxTotal = Number(checkpointData.checkpoint.networkTotalTransactions);
+    const daysLive = 332;
+    const secondsLive = daysLive * 86400;
+
+    this.logger.log(
+      `captureRaw: ${packages.length} packages, ` +
+        `${packages.reduce((s, p) => s + p.moduleMetrics.reduce((ss, m) => ss + m.events, 0), 0)} events, ` +
+        `${packages.filter((p) => p.fingerprint).length} with identity fingerprint`,
+    );
+
+    return {
+      packages,
+      totalStorageRebateNanos,
+      networkTxTotal,
+      txRates: {
+        perYear: Math.round((networkTxTotal / daysLive) * 365),
+        perMonth: Math.round((networkTxTotal / daysLive) * 30),
+        perWeek: Math.round((networkTxTotal / daysLive) * 7),
+        perDay: Math.round(networkTxTotal / daysLive),
+        perHour: Math.round(networkTxTotal / (daysLive * 24)),
+        perMinute: Math.round(networkTxTotal / (daysLive * 24 * 60)),
+        perSecond: Math.round((networkTxTotal / secondsLive) * 100) / 100,
+      },
+    };
+  }
+
+  /**
+   * Applies the current `ALL_PROJECTS` / `ALL_TEAMS` registry to a raw
+   * `OnchainSnapshot`, producing the classified view the frontend renders.
+   * Pure with respect to the snapshot — running the same `(snapshot, registry)`
+   * combination always returns the same output, modulo live RPC for
+   * fingerprint matching and live DefiLlama TVL.
+   *
+   * A new project definition landed today retroactively re-labels every
+   * historical snapshot at read time (schema independence goal), because
+   * the matching lookup happens here, not at capture.
+   */
+  private async classifyFromRaw(raw: {
+    _id?: unknown;
+    packages: PackageFact[];
+    totalStorageRebateNanos?: number;
+    networkTxTotal: number;
+    txRates: Record<string, number>;
+    createdAt?: Date;
+  }) {
+    const projectMap = new Map<string, { def: ProjectDefinition; facts: PackageFact[]; splitDeployer?: string }>();
     // Unmatched packages grouped by deployer. `unknown` collects packages
     // whose deployer resolves to null (framework / legacy publish records).
-    const unattributedByDeployer = new Map<string, PackageInfo[]>();
-    for (const pkg of allPackages) {
-      if (pkg.address.startsWith('0x000000000000000000000000000000000000000000000000000000000000000')
-        && !claimedAddresses.has(pkg.address.toLowerCase())) continue;
-      const mods = new Set((pkg.modules?.nodes || []).map((m) => m.name));
-      const pkgDeployer = pkg.previousTransactionBlock?.sender?.address ?? null;
+    const unattributedByDeployer = new Map<string, PackageFact[]>();
+    for (const pkg of raw.packages) {
+      const mods = new Set(pkg.modules);
+      const pkgDeployer = pkg.deployer;
       let def = this.matchProject(mods, pkg.address, pkgDeployer);
       // When the synchronous match is an aggregate bucket, consult fingerprint
       // first — a more-specific project may claim this package by `issuer`/`tag`.
@@ -659,7 +1004,7 @@ export class EcosystemService implements OnModuleInit {
       let mapKey = def.name;
       let splitDeployer: string | undefined;
       if (def.splitByDeployer) {
-        const deployer = pkg.previousTransactionBlock?.sender?.address?.toLowerCase() ?? 'unknown';
+        const deployer = pkg.deployer?.toLowerCase() ?? 'unknown';
         // Team routing: route aggregate-bucket packages (NFT Collections) to
         // a team's "routing-only" project — one that sets `match: {}` to
         // declare "I exist only to receive team-deployer-routed packages".
@@ -698,36 +1043,40 @@ export class EcosystemService implements OnModuleInit {
         }
       }
       const existing = projectMap.get(mapKey);
-      if (existing) { existing.packages.push(pkg); } else { projectMap.set(mapKey, { def, packages: [pkg], splitDeployer }); }
+      if (existing) { existing.facts.push(pkg); } else { projectMap.set(mapKey, { def, facts: [pkg], splitDeployer }); }
     }
 
     const projects: Project[] = [];
-    for (const [, { def, packages, splitDeployer }] of projectMap) {
-      const latestPkg = packages[packages.length - 1];
-      const latestMods = (latestPkg.modules?.nodes || []).map((m) => m.name);
-      const totalStorage = packages.reduce((sum, p) => sum + Number(p.storageRebate || 0), 0) / 1_000_000_000;
+    for (const [, { def, facts, splitDeployer }] of projectMap) {
+      const latestPkg = facts[facts.length - 1];
+      const latestMods = latestPkg.modules;
+      const totalStorage = facts.reduce((sum, p) => sum + Number(p.storageRebateNanos || 0), 0) / 1_000_000_000;
 
-      // Sum events (and accumulate senders) across every package in the
+      // Events: sum stored per-module counters across every package in the
       // project's set — not just the latest. Move events are scoped by the
       // emitting package's address: when a package is upgraded, the new
       // address gets its own event stream, and events on the old address
-      // stay bound there forever. Querying only `latestPackageAddress`
-      // silently drops historical activity (e.g. TWIN's 2000+ `store_data`
-      // events on the prior `0xf951…cc13` package address). Same rationale
-      // for deployer-matched projects (LayerZero, Tradeport, ObjectID, etc.)
-      // where the project's `packages` set contains sibling packages, not
-      // only an upgrade chain.
+      // stay bound there forever. Summing across packages preserves historical
+      // activity (e.g. TWIN's 2000+ `store_data` events on the prior
+      // `0xf951…cc13` package address). Same rationale for deployer-matched
+      // projects (LayerZero, Tradeport, ObjectID, etc.) where the project's
+      // package set contains sibling packages, not only an upgrade chain.
+      //
+      // Senders: live-read from `ProjectSenders` + UNION across the project's
+      // (package, module) pairs. The snapshot stores per-module counts for
+      // the growth endpoint's delta math, but for the classified view we
+      // still need the actual sender addresses to dedupe cross-module usage
+      // (same address calling mod_a and mod_b counts once). Reading live
+      // preserves the exact display semantics from the pre-refactor code.
       let events = 0;
       let eventsCapped = false;
       const projectSenders = new Set<string>();
-      for (const pkg of packages) {
-        const pkgMods = (pkg.modules?.nodes || []).map((m) => m.name);
-        for (const mod of pkgMods) {
-          const result = await this.countEvents(`${pkg.address}::${mod}`);
-          events += result.count;
-          if (result.capped) eventsCapped = true;
-          const senders = await this.updateSendersForModule(pkg.address, mod);
-          senders.forEach((s) => projectSenders.add(s));
+      for (const pkg of facts) {
+        for (const mm of pkg.moduleMetrics) {
+          events += mm.events;
+          if (mm.eventsCapped) eventsCapped = true;
+          const rec = await this.senderModel.findOne({ packageAddress: pkg.address, module: mm.module });
+          rec?.senders?.forEach((s) => projectSenders.add(s));
         }
       }
       // The `modules` snapshot field stays as the latest package's module
@@ -736,11 +1085,7 @@ export class EcosystemService implements OnModuleInit {
 
       const team = getTeam(def.teamId) ?? null;
       const detectedDeployers = [
-        ...new Set(
-          packages
-            .map((p) => p.previousTransactionBlock?.sender?.address?.toLowerCase())
-            .filter((a): a is string => !!a),
-        ),
+        ...new Set(facts.map((p) => p.deployer).filter((a): a is string => !!a)),
       ];
       const knownDeployers = new Set((team?.deployers ?? []).map((d) => d.toLowerCase()));
       const anomalousDeployers = detectedDeployers.filter((d) => !knownDeployers.has(d));
@@ -759,13 +1104,13 @@ export class EcosystemService implements OnModuleInit {
           : `${def.name} (deployer-${hash})`;
       }
 
-      const firstPkg = packages[0]; // original deployment — address never changes
+      const firstPkg = facts[0]; // original deployment — address never changes
       const addrPrefix = firstPkg.address.slice(2, 8);
       projects.push({
         slug: `${addrPrefix}-${displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`,
         name: displayName, layer: def.layer, category: def.category,
         description: def.description, urls: def.urls,
-        packages: packages.length,
+        packages: facts.length,
         packageAddress: firstPkg.address,
         latestPackageAddress: latestPkg.address,
         storageIota: Math.round(totalStorage * 10000) / 10000,
@@ -782,6 +1127,7 @@ export class EcosystemService implements OnModuleInit {
         anomalousDeployers,
         uniqueSenders: projectSenders.size,
         attribution: def.attribution ?? null,
+        addedAt: def.addedAt ?? null,
       });
     }
 
@@ -899,6 +1245,7 @@ export class EcosystemService implements OnModuleInit {
           anomalousDeployers: [],
           uniqueSenders: 0,
           attribution: null,
+          addedAt: null,
         });
       }
     } catch (e) {
@@ -907,72 +1254,47 @@ export class EcosystemService implements OnModuleInit {
 
     projects.sort((a, b) => b.events - a.events);
 
-    // Build unattributed clusters: one row per deployer, ranked so the loudest
-    // unknowns (most packages, then biggest on-chain footprint) rise to the
-    // top. Probe only the top N to keep the scan cheap — no point probing
-    // long-tail one-off deployers on every 6-hour cycle.
-    const UNATTRIBUTED_PROBE_CAP = 50;
+    // Build unattributed clusters from the snapshot's stored fingerprint
+    // samples — no live RPC here. `captureRaw` already ran
+    // probeIdentityFields (+ probeTxEffects fallback) per package, so the
+    // identifiers/objectType are present on `PackageFact.fingerprint`.
+    // Walk the cluster's packages latest → earliest picking the first
+    // fingerprint with identifiers; fall back to the first available
+    // sampledObjectType if every package came back with no identifiers
+    // (e.g. new logic-only package with no tx effects yet).
     const unattributedRanked = [...unattributedByDeployer.entries()]
-      .map(([deployer, packages]) => {
-        const sortedPkgs = [...packages].sort((a, b) => Number(a.storageRebate) - Number(b.storageRebate));
-        const storageIota = packages.reduce((s, p) => s + Number(p.storageRebate || 0), 0) / 1_000_000_000;
-        return { deployer, packages: sortedPkgs, storageIota };
+      .map(([deployer, facts]) => {
+        const sorted = [...facts].sort((a, b) => Number(a.storageRebateNanos) - Number(b.storageRebateNanos));
+        const storageIota = facts.reduce((s, p) => s + Number(p.storageRebateNanos || 0), 0) / 1_000_000_000;
+        return { deployer, facts: sorted, storageIota };
       })
       .sort((a, b) => {
-        if (b.packages.length !== a.packages.length) return b.packages.length - a.packages.length;
+        if (b.facts.length !== a.facts.length) return b.facts.length - a.facts.length;
         return b.storageIota - a.storageIota;
       });
 
     const unattributed: UnattributedCluster[] = [];
-    for (let i = 0; i < unattributedRanked.length; i++) {
-      const { deployer, packages, storageIota } = unattributedRanked[i];
-      const firstPkg = packages[0];
-      const latestPkg = packages[packages.length - 1];
+    for (const { deployer, facts, storageIota } of unattributedRanked) {
+      const firstPkg = facts[0];
+      const latestPkg = facts[facts.length - 1];
       const modulesUnion = new Set<string>();
-      for (const pkg of packages) {
-        for (const m of pkg.modules?.nodes ?? []) modulesUnion.add(m.name);
-      }
+      for (const pkg of facts) for (const m of pkg.modules) modulesUnion.add(m);
+
       let identifiers: string[] = [];
       let objectType: string | null = null;
-      if (i < UNATTRIBUTED_PROBE_CAP) {
-        // Pass 1 — object-based probe across all packages (heaviest → lightest).
-        // Capture the first objectType seen as a fallback signal, but only
-        // short-circuit on identifiers — a probe that returns objectType but
-        // no idents (e.g. an internal Registry/Cap object whose fields are all
-        // addresses) tells us the package owns *something* but doesn't give us
-        // brand information, so we keep looking. The cluster's `latestPkg`
-        // may be a deploy-but-uninstantiated upgrade while an earlier package
-        // owns the objects we can read identity fields from.
-        for (const pkg of [...packages].reverse()) {
-          const probe = await this.probeIdentityFields(pkg.address);
-          if (probe.objectType && !objectType) objectType = probe.objectType;
-          if (probe.identifiers.length > 0) {
-            identifiers = probe.identifiers;
-            if (probe.objectType) objectType = probe.objectType;
-            break;
-          }
-        }
-        // Pass 2 — fallback for logic-only packages (e.g. CDP-style protocols
-        // where the package contains stability_pool / borrow_incentive logic
-        // but never owns objects of its own types). Reads TX effects to harvest
-        // sibling-package types (`vusd::VUSD`, `cert::CERT`, …) as identity
-        // signal. Runs whenever pass 1 didn't surface identifiers, even if it
-        // captured an objectType — because the objectType alone (e.g. an
-        // internal Registry) usually isn't brand-revealing.
-        if (identifiers.length === 0) {
-          for (const pkg of [...packages].reverse()) {
-            const probe = await this.probeTxEffects(pkg.address);
-            if (probe.identifiers.length > 0) {
-              identifiers = probe.identifiers;
-              if (!objectType && probe.objectType) objectType = probe.objectType;
-              break;
-            }
-          }
+      for (const pkg of [...facts].reverse()) {
+        const fp = pkg.fingerprint;
+        if (!fp) continue;
+        if (fp.sampledObjectType && !objectType) objectType = fp.sampledObjectType;
+        if (fp.identifiers?.length) {
+          identifiers = fp.identifiers;
+          break;
         }
       }
+
       unattributed.push({
         deployer,
-        packages: packages.length,
+        packages: facts.length,
         firstPackageAddress: firstPkg.address,
         latestPackageAddress: latestPkg.address,
         storageIota: Math.round(storageIota * 10000) / 10000,
@@ -983,13 +1305,9 @@ export class EcosystemService implements OnModuleInit {
     }
     const totalUnattributedPackages = unattributed.reduce((s, c) => s + c.packages, 0);
     this.logger.log(
-      `Unattributed: ${unattributed.length} deployer cluster(s), ${totalUnattributedPackages} package(s)`,
+      `classifyFromRaw: ${projects.length} projects, ` +
+        `${unattributed.length} unattributed cluster(s) / ${totalUnattributedPackages} package(s)`,
     );
-
-    const checkpointData: any = await this.graphql(`{ checkpoint { networkTotalTransactions } }`);
-    const networkTxTotal = Number(checkpointData.checkpoint.networkTotalTransactions);
-    const daysLive = 332;
-    const secondsLive = daysLive * 86400;
 
     return {
       l1: projects.filter((p) => p.layer === 'L1'),
@@ -999,16 +1317,8 @@ export class EcosystemService implements OnModuleInit {
       totalEvents: projects.reduce((sum, p) => sum + p.events, 0),
       totalStorageIota: Math.round(projects.reduce((sum, p) => sum + p.storageIota, 0) * 10000) / 10000,
       totalUnattributedPackages,
-      networkTxTotal,
-      txRates: {
-        perYear: Math.round((networkTxTotal / daysLive) * 365),
-        perMonth: Math.round((networkTxTotal / daysLive) * 30),
-        perWeek: Math.round((networkTxTotal / daysLive) * 7),
-        perDay: Math.round(networkTxTotal / daysLive),
-        perHour: Math.round(networkTxTotal / (daysLive * 24)),
-        perMinute: Math.round(networkTxTotal / (daysLive * 24 * 60)),
-        perSecond: Math.round((networkTxTotal / secondsLive) * 100) / 100,
-      },
+      networkTxTotal: raw.networkTxTotal,
+      txRates: raw.txRates,
     };
   }
 }
