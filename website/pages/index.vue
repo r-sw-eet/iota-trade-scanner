@@ -21,6 +21,59 @@ const shadeTeamless = ref(true)
 const hideIotaFoundation = ref(true)
 const hideCollectibles = ref(true)
 
+/**
+ * Activity time-window selector. `all` = lifetime event counters from the
+ * current snapshot (default, preserves pre-2026-04-20 dashboard behaviour).
+ * Anything else fetches `/ecosystem/growth-ranking?window=X` and re-renders
+ * the Events columns as deltas over that window — attributed project rows
+ * and unattributed deployer clusters both re-sort. Single dropdown replaces
+ * separate "leaderboard" views / toggles.
+ */
+type ActivityWindow = 'all' | '24h' | '7d' | '30d'
+const activityWindow = ref<ActivityWindow>('all')
+const ranking = ref<{ items: Array<{ scope: string; key: string; eventsDelta: number; uniqueSendersDelta: number; packagesDelta: number; eventsCapped: boolean }> } | null>(null)
+const rankingLoading = ref(false)
+
+/** Lookup: row key (project slug for attributed, deployer address for unattributed) → eventsDelta. Empty when window=all. */
+const eventsDeltaByKey = computed<Map<string, number>>(() => {
+  if (!ranking.value) return new Map()
+  const m = new Map<string, number>()
+  for (const item of ranking.value.items) m.set(item.key, item.eventsDelta)
+  return m
+})
+const uniqueSendersDeltaByKey = computed<Map<string, number>>(() => {
+  if (!ranking.value) return new Map()
+  const m = new Map<string, number>()
+  for (const item of ranking.value.items) m.set(item.key, item.uniqueSendersDelta)
+  return m
+})
+
+watch(activityWindow, async (w) => {
+  if (w === 'all') { ranking.value = null; return }
+  rankingLoading.value = true
+  try {
+    ranking.value = await $api<any>(`/ecosystem/growth-ranking?window=${w}&scope=all`)
+  } catch (e) {
+    ranking.value = null
+  } finally {
+    rankingLoading.value = false
+  }
+})
+
+/** Row key used by the ranking lookups. Attributed rows key on `slug`; unattributed clusters key on `deployer`. */
+function rowKey(row: any): string {
+  return row.slug ?? row.deployer ?? ''
+}
+/** Displayed events value — either the lifetime total (window=all) or the windowed delta. */
+function rowEvents(row: any): number {
+  if (activityWindow.value === 'all') return row.events ?? 0
+  return eventsDeltaByKey.value.get(rowKey(row)) ?? 0
+}
+function rowUniqueSenders(row: any): number {
+  if (activityWindow.value === 'all') return row.uniqueSenders ?? 0
+  return uniqueSendersDeltaByKey.value.get(rowKey(row)) ?? 0
+}
+
 function isIotaFoundation(p: any): boolean {
   // Narrow "Hide IOTA Foundation" filter: hides only the team flagged as
   // IF proper. TLIP (IF × TMEA partnership), TWIN Foundation (IF-co-founded
@@ -43,7 +96,7 @@ type SortDir = 'asc' | 'desc'
 type L1Key = 'name' | 'team' | 'category' | 'events' | 'uniqueSenders' | 'storageIota' | 'tvl' | 'packages'
 type L2Key = 'name' | 'category' | 'tvl'
 type TeamsKey = 'name' | 'categories' | 'projectCount' | 'events' | 'storageIota' | 'tvl'
-type UnattributedKey = 'deployer' | 'packages' | 'storageIota'
+type UnattributedKey = 'deployer' | 'packages' | 'storageIota' | 'events'
 
 const l1Sort = ref<{ key: L1Key | null; dir: SortDir }>({ key: 'events', dir: 'desc' })
 const l2Sort = ref<{ key: L2Key | null; dir: SortDir }>({ key: 'tvl', dir: 'desc' })
@@ -83,6 +136,11 @@ function sortValue(p: any, key: string): any {
   // `tvlShared`. Fall back to it so siblings sort alongside the primary rather than
   // dropping to zero. The primary-above-sibling tie-break is applied in sortRows.
   if (key === 'tvl') return p.tvl ?? p.tvlShared ?? 0
+  // When a time-window is active, sorting by `events` / `uniqueSenders`
+  // operates on the delta, not the lifetime total — this is what turns the
+  // existing tables into time-windowed leaderboards without any new views.
+  if (key === 'events') return rowEvents(p)
+  if (key === 'uniqueSenders') return rowUniqueSenders(p)
   return p[key] ?? 0
 }
 function sortRows(rows: any[], sort: { key: string | null; dir: SortDir }) {
@@ -610,6 +668,16 @@ const projectTvlChartOptions = {
                   <h3 class="text-sm font-semibold text-scanner-accent">L1 — Move VM ({{ l1Filtered.length }}{{ l1Filtered.length !== ecosystem.l1.length ? ` of ${ecosystem.l1.length}` : '' }} projects)</h3>
                 </div>
                 <div class="flex items-center justify-center gap-4 mb-4 flex-wrap">
+                  <label class="flex items-center gap-2 text-xs text-[#a1a1aa] cursor-pointer select-none" title="Choose an activity window. `All-time` shows lifetime event totals; the other windows switch the Events and Wallets columns to growth deltas over that window, and re-sort all tables by delta. Both attributed projects and unattributed deployer clusters are ranked side-by-side — top of the Unattributed section becomes your triage queue.">
+                    Activity:
+                    <select v-model="activityWindow" class="bg-scanner-card border border-scanner-border rounded px-2 py-0.5 text-xs text-[#d4d4d8] focus:outline-none focus:border-scanner-accent">
+                      <option value="all">All-time</option>
+                      <option value="24h">24h</option>
+                      <option value="7d">7d</option>
+                      <option value="30d">30d</option>
+                    </select>
+                    <span v-if="rankingLoading" class="text-[#71717a]">loading…</span>
+                  </label>
                   <label class="flex items-center gap-2 text-xs text-[#a1a1aa] cursor-pointer select-none" title="Dim projects that are not attributed to a known team">
                     <input v-model="shadeTeamless" type="checkbox" class="accent-scanner-accent" />
                     Shade untagged
@@ -665,8 +733,8 @@ const projectTvlChartOptions = {
                         <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('name')">Project<span class="ml-1" :class="sortActive(l1Sort, 'name') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'name') }}</span></th>
                         <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('team')">Team<span class="ml-1" :class="sortActive(l1Sort, 'team') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'team') }}</span></th>
                         <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('category')">Category<span class="ml-1" :class="sortActive(l1Sort, 'category') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'category') }}</span></th>
-                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('events')">Events<span class="ml-1" :class="sortActive(l1Sort, 'events') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'events') }}</span></th>
-                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" title="Unique sender addresses across all modules" @click="toggleL1Sort('uniqueSenders')">Wallets<span class="ml-1" :class="sortActive(l1Sort, 'uniqueSenders') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'uniqueSenders') }}</span></th>
+                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('events')">Events{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'events') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'events') }}</span></th>
+                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" title="Unique sender addresses across all modules" @click="toggleL1Sort('uniqueSenders')">Wallets{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'uniqueSenders') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'uniqueSenders') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(l1Sort, 'storageIota') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'storageIota') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('tvl')">TVL<span class="ml-1" :class="sortActive(l1Sort, 'tvl') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'tvl') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('packages')">Packages<span class="ml-1" :class="sortActive(l1Sort, 'packages') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'packages') }}</span></th>
@@ -696,8 +764,8 @@ const projectTvlChartOptions = {
                         </td>
                         <td class="py-3 pr-4 text-sm" :class="p.team ? 'text-[#d4d4d8]' : 'text-[#52525b]'">{{ p.team?.name || '—' }}</td>
                         <td class="py-3 pr-4 text-sm text-scanner-accent">{{ p.category }}</td>
-                        <td class="py-3 pr-4 text-right font-mono text-base" :class="p.events > 0 ? 'text-[#f4f4f5]' : 'text-[#52525b]'">{{ p.events.toLocaleString() }}{{ p.eventsCapped ? '+' : '' }}</td>
-                        <td class="py-3 pr-4 text-right font-mono text-base" :class="p.uniqueSenders > 0 ? 'text-[#f4f4f5]' : 'text-[#52525b]'">{{ (p.uniqueSenders || 0).toLocaleString() }}</td>
+                        <td class="py-3 pr-4 text-right font-mono text-base" :class="rowEvents(p) > 0 ? 'text-[#f4f4f5]' : (rowEvents(p) < 0 ? 'text-[#ef4444]' : 'text-[#52525b]')">{{ activityWindow !== 'all' && rowEvents(p) > 0 ? '+' : '' }}{{ rowEvents(p).toLocaleString() }}{{ p.eventsCapped && activityWindow === 'all' ? '+' : '' }}</td>
+                        <td class="py-3 pr-4 text-right font-mono text-base" :class="rowUniqueSenders(p) > 0 ? 'text-[#f4f4f5]' : (rowUniqueSenders(p) < 0 ? 'text-[#ef4444]' : 'text-[#52525b]')">{{ activityWindow !== 'all' && rowUniqueSenders(p) > 0 ? '+' : '' }}{{ rowUniqueSenders(p).toLocaleString() }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#a1a1aa]">{{ p.storageIota.toFixed(4) }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base" :class="p.tvl != null ? 'text-[#a1a1aa]' : (p.tvlShared != null ? 'text-[#71717a]' : 'text-[#52525b]')">
                           <template v-if="p.tvl != null">${{ formatCompact(p.tvl) }}</template>
@@ -793,6 +861,7 @@ const projectTvlChartOptions = {
                       <tr class="text-[#71717a] text-sm border-b border-scanner-border select-none">
                         <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('deployer')">Deployer<span class="ml-1" :class="sortActive(unattributedSort, 'deployer') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'deployer') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('packages')">Packages<span class="ml-1" :class="sortActive(unattributedSort, 'packages') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'packages') }}</span></th>
+                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('events')">Events{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(unattributedSort, 'events') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'events') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(unattributedSort, 'storageIota') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'storageIota') }}</span></th>
                         <th class="text-left pb-2 pr-4 whitespace-nowrap">Modules</th>
                         <th class="text-left pb-2 pr-4">Sample identifiers</th>
@@ -809,6 +878,7 @@ const projectTvlChartOptions = {
                           </div>
                         </td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#f4f4f5]">{{ c.packages }}</td>
+                        <td class="py-3 pr-4 text-right font-mono text-base" :class="rowEvents(c) > 0 ? 'text-[#f4f4f5]' : (rowEvents(c) < 0 ? 'text-[#ef4444]' : 'text-[#52525b]')">{{ activityWindow !== 'all' && rowEvents(c) > 0 ? '+' : '' }}{{ rowEvents(c).toLocaleString() }}{{ c.eventsCapped && activityWindow === 'all' ? '+' : '' }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#f4f4f5]">{{ c.storageIota.toFixed(2) }}</td>
                         <td class="py-3 pr-4">
                           <div class="flex flex-wrap gap-1 max-w-xs">
