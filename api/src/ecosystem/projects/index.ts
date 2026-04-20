@@ -8,7 +8,7 @@ import { pythOracle, switchboardOracle } from './oracles/_index';
 import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip } from './games/_index';
 import {
-  marketplaceEscrow, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
+  clawnera, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,
   nativeStaking, iotaFramework, ifTesting, stardustMigratedTokens, krillTube, giveRep,
   carbonCredits,
@@ -77,7 +77,7 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   chess, ticTacToe, game2048, iotaFlip,
 
   // Misc
-  marketplaceEscrow, vault, tokenSale, izipublish,
+  clawnera, vault, tokenSale, izipublish,
   giftDrop, liquidlink, boltEarth,
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,
   nativeStaking, iotaFramework,

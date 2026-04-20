@@ -7,7 +7,7 @@ import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
 import { switchboard } from './oracles/_index';
 import { tradeport, iotaPunks, apeDao } from './nft/_index';
 import { iotaFlip, gamifly } from './games/_index';
-import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, studio49c4, studiob5fc, studio457d, studiocebe, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
+import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, studio49c4, studiob5fc, studio457d, studiocebe, clawnera, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
 
 /**
  * Team registry. Every project references exactly one team via `teamId`.
@@ -52,8 +52,12 @@ export const ALL_TEAMS: Team[] = [
   // Traceability + Asset Framework + Accreditation + Testing)
   iotaFoundation,
 
-  // Misc — anonymous studios + single-project teams
-  studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, studio49c4,
+  // Misc — anonymous studios + single-project teams.
+  // `clawnera` and `studio-0a0d` are sibling teams (shared operator Moron1337
+  // / shared deployer keys / different product brands). Both claim the shared
+  // deployers — the routing code at `ecosystem.service.ts` splitByDeployer
+  // iterates all claiming teams, so the overlap is explicitly supported.
+  studioB8b1, studio0a0d, clawnera, studioCb69, studio295e, studio5451, studio49c4,
   studiob5fc, studio457d, studiocebe,
   izipublish, liquidlink, boltEarth, tokenlabs,
 ];

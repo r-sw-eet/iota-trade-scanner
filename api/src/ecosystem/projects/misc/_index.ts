@@ -1,4 +1,4 @@
-export { marketplaceEscrow } from './marketplace-escrow';
+export { clawnera } from './clawnera';
 export { vault } from './vault';
 export { tokenSale } from './token-sale';
 export { izipublish } from './izipublish';

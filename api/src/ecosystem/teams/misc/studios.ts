@@ -217,11 +217,12 @@ Evidence leans (1): \`tic_tac_iota::AdminCap\` is owned directly by the deployer
 export const studio0a0d: Team = {
   id: 'studio-0a0d',
   name: 'Studio 0x0a0d4c9a (Clawnera / Spec Weekly)',
-  description: 'Operated by GitHub user Moron1337 — CLAWNERA marketplace, CLAW meme-coin, SPEC launchpad, and an IOTA Discord #speculations community presence. Meme-coin adjacent; formally a one-person / small-community operation with no registered company.',
+  description: "Umbrella team for the CLAW meme-coin + swap gateway and the SPEC launchpad — sibling products to the CLAWNERA marketplace, all operated by GitHub user Moron1337. The CLAWNERA marketplace itself has its own dedicated `clawnera` team; this team holds the rest of the Moron1337 portfolio (CLAW token + swap gateway, SPEC launchpad) since they share the same deployer keys but ship under distinct product brands.",
   urls: [
     { label: 'CLAW sale', href: 'https://buy.claw-coin.com' },
     { label: 'SPEC sale', href: 'https://buy.spec-coin.cc' },
     { label: 'GitHub (Moron1337)', href: 'https://github.com/Moron1337' },
+    { label: 'Clawnera (sibling team)', href: 'https://clawnera.com' },
   ],
   deployers: [
     '0x0a0d4c9a9f935dac9f9bee55ca0632c187077a04d0dffcc479402f2de9a82140',
@@ -238,18 +239,18 @@ Chain of evidence:
 1. SPEC CoinMetadata icon URL: \`raw.githubusercontent.com/Moron1337/SPEC/main/Spec.png\`.
 2. CLAW CoinMetadata icon URL: \`raw.githubusercontent.com/Moron1337/CLAW/main/logo/claw.png\`.
 3. GitHub user \`Moron1337\` has 4 public repos: \`SPEC\`, \`CLAW\`, \`openclaw-iota-wallet\`, **\`clawnera-bot-market\`**.
-4. \`clawnera-bot-market\` README (MIT-licensed, v0.1.97 of 2026-04-15) embeds the exact on-chain type \`0x7a38b9af32e37eb55133ec6755fa18418b10f39a86f51618883aa5f466e828b6::claw_coin::CLAW_COIN\` — which is package #10 in our Studio 0a0d inventory. **Direct contract-address match in an MIT-licensed README** — strongest possible single attribution signal.
-5. The repo's workflow (seller / buyer / request-buyer / request-seller / reviewer / operator + listings + bids + orders + juror voting + dispute evidence) maps module-for-module to Studio 0a0d's 15 commerce packages: \`order_escrow\`, \`dispute_quorum\`, \`manifest_anchor\`, \`reputation\`, \`review\`, \`tier\`, \`milestone_escrow\`, \`bond\`, \`deadline_ext\`, \`escrow\`, \`listing_deposit\`, \`mutual_cancel\`, \`order_mailbox\`, \`payment_assets\`, \`rewards\`, \`admin\`.
+4. \`clawnera-bot-market\` README (MIT-licensed, v0.1.97 of 2026-04-15) embeds the exact on-chain type \`0x7a38b9af32e37eb55133ec6755fa18418b10f39a86f51618883aa5f466e828b6::claw_coin::CLAW_COIN\` — which is package #10 in the shared inventory. **Direct contract-address match in an MIT-licensed README** — strongest possible single attribution signal.
+5. The repo's workflow (seller / buyer / request-buyer / request-seller / reviewer / operator + listings + bids + orders + juror voting + dispute evidence) maps module-for-module to the 15 commerce packages: \`order_escrow\`, \`dispute_quorum\`, \`manifest_anchor\`, \`reputation\`, \`review\`, \`tier\`, \`milestone_escrow\`, \`bond\`, \`deadline_ext\`, \`escrow\`, \`listing_deposit\`, \`mutual_cancel\`, \`order_mailbox\`, \`payment_assets\`, \`rewards\`, \`admin\` — these are surfaced under the sibling \`clawnera\` team.
 6. Both tokens use 1,337-based max supply (SPEC: 1.337e12, CLAW: 1.337e19 = 1337 × 10^16 at 6 decimals) — meme-coin / leet numerology signature consistent with a single operator.
 
 Brand names revealed:
-- **Marketplace:** CLAWNERA (previously unknown on-chain).
-- **Token:** CLAW (symbol; "Claw Coin" name; icon \`claw.png\`).
+- **Marketplace:** CLAWNERA (promoted 2026-04-20 to its own \`clawnera\` team — see sibling).
+- **Token:** CLAW (symbol; "Claw Coin" name; icon \`claw.png\`) — CLAW swap gateway stays on this team.
 - **Launchpad:** SPEC (sale UI at \`buy.spec-coin.cc\` states the project was "born in the speculative depths of the #speculations channel on IOTA Discord"; meme-coin disclaimer).
-- **Operator handle:** \`Moron1337\` (GitHub).
+- **Operator handle:** \`Moron1337\` (GitHub) — the shared GitHub account is what links this team and the sibling \`clawnera\` team.
 - **Public presence:** Spec Weekly YouTube channel (\`youtube.com/c/SpecWeekly\`, tagline "Speculation for IOTA, Shimmer, and Crypto degenerates") + IOTA Discord \`#speculations\`.
 - **Company:** no formal team — reads as a one-person / small community-run meme-coin project.
 
-Kept the synthetic team id \`studio-0a0d\` rather than renaming to \`clawnera\` pending confirmation the operator wants to be surfaced under the Clawnera brand publicly on our site; the team name surfaces the brand so users see it.
+**Team split rationale.** The \`clawnera\` marketplace brand was promoted to its own team on 2026-04-20 (confirmed by the operator). The CLAW token / swap gateway and the SPEC launchpad remain under this synthetic \`studio-0a0d\` label because they ship under distinct product brands (not "Clawnera"), but share the same deployer keys and the same operator as the Clawnera marketplace. Per \`ecosystem.service.ts\` (comment at \`splitByDeployer\` routing), one deployer can belong to multiple teams; both teams claim the deployer so that downstream-deployer routing and the \`anomalousDeployers\` check resolve correctly for projects on either team.
 `.trim(),
 };
