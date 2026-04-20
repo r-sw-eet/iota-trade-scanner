@@ -228,7 +228,7 @@ export const studio0a0d: Team = {
     '0x0a0d4c9a9f935dac9f9bee55ca0632c187077a04d0dffcc479402f2de9a82140',
     '0x4468c8ddb42728fd1194033c1dd14ffd015f0d81e4b5329ddc11793c989f3f39',
   ],
-  logo: '/logos/clawnera.png',
+  logo: '/logos/studio-0a0d.png',
   attribution: `
 Previously 🟠 UNVERIFIED and attributed to a synthetic "Studio 0x0a0d4c9a" label. Hard-linked 2026-04-18 via downstream-dependency scan + coin-metadata icon probing.
 
