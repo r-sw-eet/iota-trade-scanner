@@ -4,10 +4,11 @@ Implements TODO.md § Activity metric — count TXs, not just events. Fills the 
 
 ## Pre-work — resolved (2026-04-21)
 
-Task 1 of this plan (probe `TransactionBlockConnection.totalCount`) ran. Findings:
+Task 1 of this plan (probe `TransactionBlockConnection.totalCount`) ran. Findings (see `limits.md` for the fleet-wide GraphQL limits the probe surfaced):
 
-- **`totalCount` does not exist.** Schema introspection confirms `TransactionBlockConnection` exposes only `{ pageInfo, edges, nodes }`. Cursor-model pagination is the only path. No optimistic single-query shortcut.
-- **Filter granularity is richer than TODO assumed.** `TransactionBlockFilter.function` supports three forms per the schema docs: `package`, `package::module`, or `package::module::function_name`. Opens the per-module-vs-per-package design choice below.
+- **No `totalCount`, ever.** Not just on `TransactionBlockConnection` — on every Connection type. Cursor-model pagination is the only way to count anything. See `limits.md` § "No Connection exposes `totalCount`".
+- **Page size hard-capped at `first: 50`**. Universal across every Connection. See `limits.md` § "Connection page size is hard-capped at `first: 50`".
+- **Filter granularity is richer than TODO assumed.** `TransactionBlockFilter.function` supports `package`, `package::module`, or `package::module::function_name`. Opens the per-module-vs-per-package design choice below. See `limits.md` for the full filter-granularity entry.
 - **Pagination mechanics validated** on 5 real packages (Salus, TWIN verifiable_storage, Gamifly Otterfly, IOTA Identity WoT, Virtue). Per-page latency 70–180 ms. `hasNextPage` + `endCursor` work exactly like the events connection — the existing `ProjectSenders` cursor pattern ports 1:1.
 
 Real-world TX distribution (deep dive on Salus / TLIP / TWIN / Gamifly):
@@ -67,6 +68,7 @@ If per-module breakdown on details-page turns out to matter more than expected, 
 1. **On-chain-stable keying.** `ProjectTxCounts` is keyed by `packageAddress`, never references `ProjectDefinition`. Adding/renaming a project today retroactively picks up its historical TX counts for free — same retroactivity guarantee we already have for `ProjectSenders` and for events/storage in the raw snapshot. Put this on the schema file, mirroring `ecosystem.service.ts:679-681`.
 2. **Capture is classification-free.** TX counts go on `PackageFact` (raw on-chain facts), not on classified output. The capture loop MUST NOT consult `ALL_PROJECTS` to decide whether to count a package's TXs — every mainnet package gets a count.
 3. **Cursor = watermark, never regresses.** Once saved, `ProjectTxCounts.cursor` only moves forward. The `last: 1` first-sight anchor is a one-time operation per package; all subsequent scans `after: <saved_cursor>`.
+4. **Parallelism is across packages, never within.** Pagination *within* a single package is inherently serial — each `after:` cursor depends on the prior page's response. Parallelism lives in `backfillAllTxCounts` (and optionally the per-scan capture loop): multiple packages drain concurrently, but each package's page-fetches stay sequential. This property bounds the minimum backfill wall-clock to the drain time of the single heaviest package.
 
 ## Steps
 
@@ -92,7 +94,7 @@ If per-module breakdown on details-page turns out to matter more than expected, 
 
 6. **`backfillTxCountsForPackage(packageAddress)`** — mirrors `backfillSendersForModule` (`ecosystem.service.ts:639`). Reset cursor to null, drain all historical TXs in 100-page batches. Resumable + idempotent.
 
-7. **`backfillAllTxCounts(onProgress?)`** — mirrors `backfillAllSenders` (`ecosystem.service.ts:670`). Iterates every package in the latest snapshot (classification-free, just reads `packages[].address`). Returns `{ totalPackages, totalTxs }`.
+7. **`backfillAllTxCounts(onProgress?, concurrency = 10)`** — mirrors `backfillAllSenders` (`ecosystem.service.ts:670`) but with a worker-pool to parallelize across packages. Iterates every package in the latest snapshot (classification-free, just reads `packages[].address`). Drains up to `concurrency` packages in parallel; each package's internal pagination stays sequential per invariant 4. Returns `{ totalPackages, totalTxs }`. Default `concurrency = 10` validated against mainnet (118 pkgs drained in 145 s, zero HTTP errors, ~2.9× speedup over serial). Serial-equivalent behaviour via `concurrency = 1` for debugging.
 
 8. **CLI entrypoint** — new `api/src/backfill-tx-counts.ts` (mirrors the existing senders CLI, whichever file exposes `backfill:senders`). Add `"backfill:txcounts": "node dist/backfill-tx-counts"` to `api/package.json`. Document in CLAUDE.md § API commands.
 
@@ -125,24 +127,29 @@ If per-module breakdown on details-page turns out to matter more than expected, 
 
 ## Cost estimates (grounded in deep-dive data)
 
-Measured against 4 projects spanning 76 packages; Gamifly's cap-hit result reshaped the upper-bound math.
+Measured against 7 projects spanning 127 packages (serial) + 118 packages (parallel, concurrency=10); Gamifly's cap-hit result reshaped the upper-bound math.
 
 - **Steady-state scan** (per 2h cron): ~750 packages × 1 GraphQL call per scan = ~60–180 ms × 750 ≈ **45–135 s added per capture** for cold/idle packages. Hot packages need forward pagination; a per-call page budget of `maxPages = 100` (mirrors `pageForwardSenders`) handles up to 5,000 new TXs per package per scan. Gamifly's amortized rate — 225k TXs over months of activity — works out to ~600 TXs/2h window, fits comfortably. Bursty traffic (a drop event generating 50k TXs in a day) will lag the cursor for a few scan cycles and catch up during quieter windows — acceptable, but worth surfacing in the UI as "last updated N scans ago" on package-detail views.
-- **First-time backfill** — highly project-dependent:
+- **First-time backfill, serial** — highly project-dependent:
   - Salus (60 pkgs × 1-3 TXs each): **~2 s**
   - TLIP (1 pkg × 13 TXs): **<1 s**
   - TWIN (6 pkgs, hot one = 2,328 TXs): **~5 s**
-  - Gamifly (9 pkgs × ≥25k TXs each, real number likely 10× higher): **~5 min measured, up to 2–3 hours** if true per-package volume is ~500k
-  - Other unknown heavy hitters (Virtue, DeepBook, Swirl, other active games): **unknown — likely comparable to Gamifly**
-  - **Whole-fleet backfill: assume several hours, schedule as overnight/maintenance-window operation.** Resumable + idempotent (via `ProjectTxCounts` unique index) makes interruption safe.
+  - Tokenlabs (2 pkgs, 5k TXs): **~10 s**
+  - Swirl V2 (9 pkgs, hot one = 81k TXs): **~2.5 min** (that one pkg is the critical path)
+  - Virtue (36 pkgs, 132k TXs spread across ~10 active pkgs): **~3 min**
+  - Gamifly (9 pkgs × ≥25k TXs each, real number likely 10× higher): **~5 min at the 25k cap, 15 min-2 h uncapped** depending on true per-pkg volume
+- **First-time backfill, parallel (concurrency=10)** — *measured on 118 non-Gamifly packages*:
+  - Non-Gamifly 118 pkgs: **145 s wall-clock** (vs ~7 min serial) — **2.9× speedup**, zero HTTP errors
+  - Speedup ceiling: wall-clock ≈ max(slowest-single-package drain, total-work / concurrency). For Gamifly, the slowest single package is the floor.
+  - **Revised full-fleet backfill estimate at concurrency=10: 20-35 min total.** Replaces the earlier "several hours" overnight-operation framing.
 - **Per-scan safety cap during live capture**: set `pageForwardTxs(record, maxPages: 100)` = up to 5,000 TXs per package per scan. Packages with sustained steady-state >5,000 TXs/2h (≈ 0.7 TX/sec) will see persistent cursor lag. Detectable via `txsScanned` diagnostics; if observed in prod, raise the budget or add a dedicated "catch-up" pass for lagging packages.
-- **GraphQL rate-limit exposure**: endpoint is public (no API key). The existing per-call `try/catch` swallow (`pageForwardSenders`, `ecosystem.service.ts:727`) handles transient errors. Gamifly-scale backfill (hundreds of thousands of pages) needs monitoring — add log lines on 429-style errors and exponential-backoff the pagination loop if they appear.
+- **GraphQL rate-limit exposure** — empirical: 118-package parallel probe (~1200+ GraphQL requests in 145 s, ~8 req/s sustained, concurrency=10) produced **zero HTTP errors, zero throttling**. Concurrency=10 has plenty of safety margin. Pre-deploy: probe concurrency=20 or 30 on staging to find the real ceiling before committing a default. The existing per-call `try/catch` swallow (`pageForwardSenders`, `ecosystem.service.ts:727`) handles transient errors; add log lines on 429-style errors and exponential-backoff if they start appearing at higher concurrency.
 
 ## Risks & assumptions
 
 - **Cursor opacity**: cursors look like `eyJjIjox...` (base64'd `{checkpoint, tx_seq}` per my decoding glance). Treating them as opaque strings is safe — don't parse. Schema change in cursor format would break us; low risk historically.
 - **Hot-spot imbalance within a project**: 93% of TWIN TXs on one of six packages means one package gets almost all the pagination work for TWIN. Per-package cursor isolation keeps this contained — quiet packages remain cheap.
-- **Hot project backfill cost (Gamifly-shape)**: at 225k+ TXs (floor) for a single project across 9 packages, the probe took 5 min. True volumes are likely higher. Full-fleet first-scan backfill is an overnight operation, not a minutes-scale one. Matches `backfill:senders`'s actual prod cost after migration to `ProjectSender` collection (also hours).
+- **Hot project backfill cost (Gamifly-shape)**: at 225k+ TXs (floor) for a single project across 9 packages, serial probe took 5 min. True volumes are likely higher. With concurrency=10 and drain-multiple-packages-in-parallel, Gamifly's floor drops to ~5-15 min wall-clock (critical path = one Gamifly package). Full-fleet parallel backfill is **minutes-scale (20-35 min)**, not the earlier overnight framing.
 - **Per-scan cursor lag on sustained-hot packages**: with `maxPages = 100` per call (5,000 TX budget), a package generating >5,000 TXs/2h will accumulate cursor lag each scan. Detectable via `txsScanned` watermark vs elapsed-time comparison; fix by raising `maxPages` or adding a separate catch-up job if ever observed.
 - **"First-sight gap"**: `last: 1` anchor misses TXs landing between the anchor query and cursor save. Same known gap `ProjectSenders` has today. Closed by the backfill CLI for packages where complete history matters.
 - **Default-sort shift**: if we later flip default sort to TXs without a toggle, some projects' rankings will swap visibly. Hold default on events until the toggle lands.
@@ -160,4 +167,5 @@ Measured against 4 projects spanning 76 packages; Gamifly's cap-hit result resha
 
 1. **Option A vs. B** — per-module or per-package? Plan is written around B; see Design decision section above. Decide before Step 1 ships.
 2. **Ship order vs. object count** — TODO's cross-reference notes "whichever lands first de-zeros Salus." Both Salus + TWIN are de-zeroed by TX count alone (this plan). Object count (`plan_object_count.md`) is broader (Gamifly, Healthy Gang, Iota Punks) but requires per-project `countTypes` config. Plausible order: ship TX count (one backfill, zero per-project config), then object count (bigger scope).
-3. **Backfill cadence coexistence** — if a full TX-count backfill takes >2 h and overlaps the capture cron, what breaks? Senders backfill handled it via resumable + idempotent writes; same property should hold here (`ProjectTxCounts` unique index on `packageAddress` prevents duplicate rows). Test with one package on staging before prod.
+3. **Backfill cadence coexistence** — at parallel concurrency=10, full-fleet backfill drops to ~20-35 min, well inside the 2h cron window. Original overlap concern is mostly moot. If a capture cron fires mid-backfill, both are resumable + idempotent via the `ProjectTxCounts` unique index. Still worth validating once with one package on staging before prod.
+4. **Concurrency ceiling** — `concurrency = 10` validated against mainnet (zero errors at ~8 req/s sustained). Not the ceiling. Pre-deploy: probe concurrency=20 then 30 on staging; pick the highest value that stays error-free, with a safety buffer. Bakes into `backfillAllTxCounts` default.
