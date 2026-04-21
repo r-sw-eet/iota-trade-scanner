@@ -15,6 +15,7 @@ import { ProjectSender } from './schemas/project-sender.schema';
 import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
 import { ProjectHolders } from './schemas/project-holders.schema';
 import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
+import { ProjectTxDigest } from './schemas/project-tx-digest.schema';
 import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ALL_PROJECTS, ProjectDefinition } from './projects';
@@ -278,6 +279,7 @@ export class EcosystemService implements OnModuleInit {
     @InjectModel(ProjectTxCounts.name) private txCountModel: Model<ProjectTxCounts>,
     @InjectModel(ProjectHolders.name) private holdersStateModel: Model<ProjectHolders>,
     @InjectModel(ProjectHolderEntry.name) private holderEntryModel: Model<ProjectHolderEntry>,
+    @InjectModel(ProjectTxDigest.name) private txDigestModel: Model<ProjectTxDigest>,
     @InjectModel(ClassifiedSnapshot.name) private classifiedModel: Model<ClassifiedSnapshot>,
     private alerts: AlertsService,
   ) {}
@@ -909,31 +911,16 @@ export class EcosystemService implements OnModuleInit {
    * historical backfill — that's a separate one-time job). Subsequent scans
    * fetch only events after the stored cursor.
    */
+  /**
+   * Live-cron tick: paginate newest-first through recent events for
+   * `(packageAddress, module)`, writing unique senders into
+   * `ProjectSender` with dup-key silencing. Stops when caught up (a
+   * full page contributed no new senders) or when the 100-page budget
+   * is exhausted. No persistent cursor state — each tick is
+   * self-contained. Total = `countDocuments({packageAddress, module})`.
+   */
   private async updateSendersForModule(packageAddress: string, module: string): Promise<number> {
-    const emittingModule = `${packageAddress}::${module}`;
-    let record = await this.senderModel.findOne({ packageAddress, module });
-
-    if (!record) {
-      try {
-        const latest: any = await this.graphql(`{
-          events(filter: { emittingModule: "${emittingModule}" }, last: 1) {
-            pageInfo { endCursor }
-          }
-        }`);
-        await this.senderModel.create({
-          packageAddress,
-          module,
-          cursor: latest.events?.pageInfo?.endCursor ?? null,
-          senders: [],
-          eventsScanned: 0,
-        });
-      } catch {
-        // ignore
-      }
-      return 0;
-    }
-
-    await this.pageForwardSenders(record, emittingModule, 100);
+    await this.pageBackwardSenders(packageAddress, module, 100);
     return this.senderDocModel.countDocuments({ packageAddress, module });
   }
 
@@ -948,33 +935,11 @@ export class EcosystemService implements OnModuleInit {
    * Returns the total unique sender count for the module after the drain.
    */
   async backfillSendersForModule(packageAddress: string, module: string): Promise<number> {
-    const emittingModule = `${packageAddress}::${module}`;
-    let record = await this.senderModel.findOne({ packageAddress, module });
-
-    if (!record) {
-      record = await this.senderModel.create({
-        packageAddress,
-        module,
-        cursor: null,
-        senders: [],
-        eventsScanned: 0,
-      });
-    } else {
-      record.cursor = null;
-      record.eventsScanned = 0;
-      await record.save();
-    }
-
-    // Drain in 100-page batches (5000 events each) until no more pages.
-    let prevCursor: string | null | undefined;
-    let safety = 0;
-    while (record.cursor !== prevCursor && safety < 100) {
-      prevCursor = record.cursor;
-      const moreScanned = await this.pageForwardSenders(record, emittingModule, 100);
-      if (moreScanned === 0) break;
-      safety += 1;
-    }
-
+    // Drain backwards with a generous page budget — the caught-up heuristic
+    // in `pageBackwardSenders` fires on the first all-dupes page, so a
+    // backfill that's already been run is a quick no-op. On fresh packages
+    // we page until `hasPreviousPage: false` (full history) or the budget.
+    await this.pageBackwardSenders(packageAddress, module, 10000);
     return this.senderDocModel.countDocuments({ packageAddress, module });
   }
 
@@ -1013,58 +978,98 @@ export class EcosystemService implements OnModuleInit {
    * Mutates + saves the cursor and eventsScanned counter on `record`.
    * Returns the number of events scanned in this call.
    */
-  private async pageForwardSenders(record: ProjectSenders, emittingModule: string, maxPages: number): Promise<number> {
-    let cursor = record.cursor;
-    const newSenders = new Set<string>();
+  /**
+   * Paginate the `events` connection newest-first via `last: 50` +
+   * `before: <prevStartCursor>`, accumulating unique senders into
+   * `ProjectSender` with dup-key silencing. Stops when: (a) a full page
+   * contributed zero new senders (caught up to prior scans), (b) the
+   * connection reports `hasPreviousPage: false` (full history drained),
+   * or (c) the per-tick page budget is exhausted.
+   *
+   * No persistent cursor is carried across ticks — each invocation starts
+   * fresh from `last: 50`, which side-steps two IOTA GraphQL realities
+   * that broke the prior `last: 1` + `pageForward` design: the `last: 1`
+   * cursor is a permanent past-end sentinel (no new items ever appear
+   * `after:` it), and natural forward cursors have a limited server-side
+   * validity window. Dedup via the unique compound index makes re-scan
+   * of the "tip" of the stream idempotent.
+   *
+   * Returns `{ scanned, reachedEnd }`. `reachedEnd: true` means we
+   * terminated via `hasPreviousPage: false` or caught-up; `false` means
+   * the caller should treat the count as a floor (capped this tick).
+   */
+  private async pageBackwardSenders(
+    packageAddress: string,
+    module: string,
+    maxPages: number,
+  ): Promise<{ scanned: number; reachedEnd: boolean }> {
+    const emittingModule = `${packageAddress}::${module}`;
+    let beforeCursor: string | null = null;
     let scanned = 0;
+    let reachedEnd = false;
 
     for (let i = 0; i < maxPages; i++) {
-      const after = cursor ? `, after: "${cursor}"` : '';
+      const before = beforeCursor ? `, before: "${beforeCursor}"` : '';
+      let data: any;
       try {
-        const data: any = await this.graphql(`{
-          events(filter: { emittingModule: "${emittingModule}" }, first: 50${after}) {
+        data = await this.graphql(`{
+          events(filter: { emittingModule: "${emittingModule}" }, last: 50${before}) {
             nodes { sender { address } }
-            pageInfo { hasNextPage endCursor }
+            pageInfo { hasPreviousPage startCursor }
           }
         }`);
-        const nodes = data.events?.nodes ?? [];
-        for (const e of nodes) {
-          const addr = e.sender?.address?.toLowerCase();
-          if (addr) newSenders.add(addr);
-        }
-        scanned += nodes.length;
-        cursor = data.events?.pageInfo?.endCursor ?? cursor;
-        if (!data.events?.pageInfo?.hasNextPage) break;
       } catch {
+        break;
+      }
+
+      const nodes = data.events?.nodes ?? [];
+      if (nodes.length === 0) {
+        reachedEnd = true;
+        break;
+      }
+      scanned += nodes.length;
+
+      const pageSenders = new Set<string>();
+      for (const e of nodes) {
+        const addr = e.sender?.address?.toLowerCase();
+        if (addr) pageSenders.add(addr);
+      }
+
+      let newlyInserted = 0;
+      if (pageSenders.size > 0) {
+        const docs = Array.from(pageSenders).map((address) => ({
+          packageAddress,
+          module,
+          address,
+        }));
+        try {
+          const res = await this.senderDocModel.insertMany(docs, { ordered: false });
+          newlyInserted = Array.isArray(res) ? res.length : 0;
+        } catch (e: any) {
+          const writeErrors = Array.isArray(e?.writeErrors) ? e.writeErrors : [];
+          const allDupKey =
+            e?.code === 11000 ||
+            (writeErrors.length > 0 && writeErrors.every((we: any) => (we?.code ?? we?.err?.code) === 11000));
+          if (!allDupKey) throw e;
+          newlyInserted = Math.max(0, docs.length - writeErrors.length);
+        }
+      }
+
+      // Caught-up heuristic: entire page contributed zero new senders.
+      // Safe because dup-key tells us exactly — no ambiguity.
+      if (newlyInserted === 0 && pageSenders.size > 0) {
+        reachedEnd = true;
+        break;
+      }
+
+      beforeCursor = data.events?.pageInfo?.startCursor ?? beforeCursor;
+      if (!data.events?.pageInfo?.hasPreviousPage) {
+        reachedEnd = true;
         break;
       }
     }
 
-    if (newSenders.size > 0) {
-      const docs = Array.from(newSenders).map((address) => ({
-        packageAddress: record.packageAddress,
-        module: record.module,
-        address,
-      }));
-      try {
-        await this.senderDocModel.insertMany(docs, { ordered: false });
-      } catch (e: any) {
-        // Duplicate-key errors (code 11000) on the compound unique index are
-        // expected — they simply mean we've seen the sender before. Re-throw
-        // anything else so unexpected write failures are not hidden.
-        const allDupKey =
-          e?.code === 11000 ||
-          (Array.isArray(e?.writeErrors) && e.writeErrors.every((we: any) => (we?.code ?? we?.err?.code) === 11000));
-        if (!allDupKey) throw e;
-      }
-    }
-
-    if (scanned > 0) {
-      record.cursor = cursor;
-      record.eventsScanned += scanned;
-      await record.save();
-    }
-    return scanned;
+    return { scanned, reachedEnd };
   }
 
   /**
@@ -1077,38 +1082,76 @@ export class EcosystemService implements OnModuleInit {
    * with more history pending — the caller sets `transactionsCapped: true`
    * in that case to keep the `transactions` field honest as a floor.
    */
-  private async pageForwardTxs(record: ProjectTxCounts, maxPages: number): Promise<{ scanned: number; reachedEnd: boolean }> {
-    let cursor = record.cursor;
+  /**
+   * Paginate `transactionBlocks(filter: { function })` newest-first via
+   * `last: 50` + `before: <prevStartCursor>`, storing digests into
+   * `ProjectTxDigest` with dup-key silencing. Mirrors the senders
+   * pattern; see `pageBackwardSenders` for the rationale on backward
+   * pagination + no-persistent-cursor. Count-of-total is served by
+   * `countDocuments({packageAddress})` on the digest collection.
+   *
+   * Returns `{ scanned, reachedEnd }` with the same "floor" semantics.
+   */
+  private async pageBackwardTxs(
+    packageAddress: string,
+    maxPages: number,
+  ): Promise<{ scanned: number; reachedEnd: boolean }> {
+    let beforeCursor: string | null = null;
     let scanned = 0;
     let reachedEnd = false;
 
     for (let i = 0; i < maxPages; i++) {
-      const after = cursor ? `, after: "${cursor}"` : '';
+      const before = beforeCursor ? `, before: "${beforeCursor}"` : '';
+      let data: any;
       try {
-        const data: any = await this.graphql(`{
-          transactionBlocks(filter: { function: "${record.packageAddress}" }, first: 50${after}) {
+        data = await this.graphql(`{
+          transactionBlocks(filter: { function: "${packageAddress}" }, last: 50${before}) {
             nodes { digest }
-            pageInfo { hasNextPage endCursor }
+            pageInfo { hasPreviousPage startCursor }
           }
         }`);
-        const nodes = data.transactionBlocks?.nodes ?? [];
-        scanned += nodes.length;
-        cursor = data.transactionBlocks?.pageInfo?.endCursor ?? cursor;
-        if (!data.transactionBlocks?.pageInfo?.hasNextPage) {
-          reachedEnd = true;
-          break;
-        }
       } catch {
+        break;
+      }
+
+      const nodes = data.transactionBlocks?.nodes ?? [];
+      if (nodes.length === 0) {
+        reachedEnd = true;
+        break;
+      }
+      scanned += nodes.length;
+
+      const docs = nodes
+        .filter((n: any) => typeof n?.digest === 'string' && n.digest.length > 0)
+        .map((n: any) => ({ packageAddress, digest: n.digest }));
+
+      let newlyInserted = 0;
+      if (docs.length > 0) {
+        try {
+          const res = await this.txDigestModel.insertMany(docs, { ordered: false });
+          newlyInserted = Array.isArray(res) ? res.length : 0;
+        } catch (e: any) {
+          const writeErrors = Array.isArray(e?.writeErrors) ? e.writeErrors : [];
+          const allDupKey =
+            e?.code === 11000 ||
+            (writeErrors.length > 0 && writeErrors.every((we: any) => (we?.code ?? we?.err?.code) === 11000));
+          if (!allDupKey) throw e;
+          newlyInserted = Math.max(0, docs.length - writeErrors.length);
+        }
+      }
+
+      if (newlyInserted === 0 && docs.length > 0) {
+        reachedEnd = true;
+        break;
+      }
+
+      beforeCursor = data.transactionBlocks?.pageInfo?.startCursor ?? beforeCursor;
+      if (!data.transactionBlocks?.pageInfo?.hasPreviousPage) {
+        reachedEnd = true;
         break;
       }
     }
 
-    if (scanned > 0) {
-      record.cursor = cursor;
-      record.total += scanned;
-      record.txsScanned += scanned;
-      await record.save();
-    }
     return { scanned, reachedEnd };
   }
 
@@ -1124,30 +1167,17 @@ export class EcosystemService implements OnModuleInit {
    * is a floor until the next scan catches up. Mirrors the `eventsCapped`
    * / `countEvents` honesty convention.
    */
+  /**
+   * Live-cron tick: paginate newest-first through TXs for a package,
+   * writing unique digests into `ProjectTxDigest`. Stops on caught-up
+   * or 100-page budget. Total = `countDocuments({packageAddress})`.
+   * `capped: true` when we exited via the page cap rather than caught-up
+   * or end-of-history — the count is a floor until the next tick.
+   */
   private async updateTxCountForPackage(packageAddress: string): Promise<{ total: number; capped: boolean }> {
-    let record = await this.txCountModel.findOne({ packageAddress });
-
-    if (!record) {
-      try {
-        const latest: any = await this.graphql(`{
-          transactionBlocks(filter: { function: "${packageAddress}" }, last: 1) {
-            pageInfo { endCursor }
-          }
-        }`);
-        await this.txCountModel.create({
-          packageAddress,
-          cursor: latest.transactionBlocks?.pageInfo?.endCursor ?? null,
-          total: 0,
-          txsScanned: 0,
-        });
-      } catch {
-        // First-sight anchor failed; leave uncreated so next scan retries.
-      }
-      return { total: 0, capped: false };
-    }
-
-    const { reachedEnd } = await this.pageForwardTxs(record, 100);
-    return { total: record.total, capped: !reachedEnd };
+    const { reachedEnd } = await this.pageBackwardTxs(packageAddress, 100);
+    const total = await this.txDigestModel.countDocuments({ packageAddress });
+    return { total, capped: !reachedEnd };
   }
 
   /**
@@ -1160,38 +1190,13 @@ export class EcosystemService implements OnModuleInit {
    * Returns `{ total, capped }`.
    */
   async backfillTxCountsForPackage(packageAddress: string): Promise<{ total: number; capped: boolean }> {
-    let record = await this.txCountModel.findOne({ packageAddress });
-
-    if (!record) {
-      record = await this.txCountModel.create({
-        packageAddress,
-        cursor: null,
-        total: 0,
-        txsScanned: 0,
-      });
-    } else {
-      record.cursor = null;
-      record.total = 0;
-      record.txsScanned = 0;
-      await record.save();
-    }
-
-    // Drain in 100-page batches (5000 TXs each) until hasNextPage:false.
-    // Safety cap at 1000 outer iterations ≈ 5M TXs — no mainnet package
-    // comes close today; bumps the ceiling if that ever changes.
-    let safety = 0;
-    let reachedEnd = false;
-    while (safety < 1000) {
-      const result = await this.pageForwardTxs(record, 100);
-      if (result.reachedEnd) {
-        reachedEnd = true;
-        break;
-      }
-      if (result.scanned === 0) break; // endpoint swallowed an error; stop rather than loop
-      safety += 1;
-    }
-
-    return { total: record.total, capped: !reachedEnd };
+    // Drain backwards with a generous page budget. Dup-key silencing in
+    // `pageBackwardTxs` dedups re-inserts on re-runs, so this is
+    // idempotent. The caught-up heuristic short-circuits quickly on
+    // already-drained packages.
+    const { reachedEnd } = await this.pageBackwardTxs(packageAddress, 10000);
+    const total = await this.txDigestModel.countDocuments({ packageAddress });
+    return { total, capped: !reachedEnd };
   }
 
   /**
@@ -1263,21 +1268,38 @@ export class EcosystemService implements OnModuleInit {
    * `hasNextPage: false` — caller treats `capped: false`. Early break on
    * GraphQL error (swallowed, like the other `pageForward*` writers).
    */
-  private async pageForwardHolders(
-    record: ProjectHolders,
+  /**
+   * Paginate `objects(filter: { type })` newest-first via `last: 50` +
+   * `before: <prevStartCursor>`. Buckets each node's owner: AddressOwner
+   * writes to `ProjectHolderEntry` (dedup'd), Parent increments the
+   * tick-local `listed` counter, Shared/Immutable/burn are skipped.
+   * Mirrors the senders pattern; see `pageBackwardSenders` for rationale.
+   *
+   * Caught-up heuristic fires when a full page contributed zero new
+   * addresses to the entry collection AND had at least one AddressOwner
+   * node (if the whole page is Parent/Shared we can't tell, so continue).
+   *
+   * Returns `{ scanned, listed, reachedEnd }`. Caller tracks running
+   * `listedCount` on the `ProjectHolders` record (Parent observations are
+   * not dedup'd; backfill resets `listedCount` to avoid over-accumulation
+   * across re-drains).
+   */
+  private async pageBackwardHolders(
+    packageAddress: string,
+    type: string,
     maxPages: number,
   ): Promise<{ scanned: number; listed: number; reachedEnd: boolean }> {
-    let cursor = record.cursor;
+    let beforeCursor: string | null = null;
     let scanned = 0;
     let listed = 0;
     let reachedEnd = false;
-    const newAddresses = new Set<string>();
 
     for (let i = 0; i < maxPages; i++) {
-      const after = cursor ? `, after: "${cursor}"` : '';
+      const before = beforeCursor ? `, before: "${beforeCursor}"` : '';
+      let data: any;
       try {
-        const data: any = await this.graphql(`{
-          objects(filter: { type: "${record.type}" }, first: 50${after}) {
+        data = await this.graphql(`{
+          objects(filter: { type: "${type}" }, last: 50${before}) {
             nodes {
               owner {
                 __typename
@@ -1287,57 +1309,71 @@ export class EcosystemService implements OnModuleInit {
                 ... on Immutable { __typename }
               }
             }
-            pageInfo { hasNextPage endCursor }
+            pageInfo { hasPreviousPage startCursor }
           }
         }`);
-        const nodes = data.objects?.nodes ?? [];
-        scanned += nodes.length;
-        for (const n of nodes) {
-          const owner = n?.owner;
-          if (!owner) continue;
-          if (owner.__typename === 'AddressOwner') {
-            const addr = owner.owner?.address?.toLowerCase();
-            if (!addr) continue;
-            // Skip burn: all-zero address. 66 chars = "0x" + 64 zeros.
-            if (/^0x0+$/.test(addr)) continue;
-            newAddresses.add(addr);
-          } else if (owner.__typename === 'Parent') {
-            listed += 1;
-          }
-          // Shared / Immutable: ignored (not a wallet).
-        }
-        cursor = data.objects?.pageInfo?.endCursor ?? cursor;
-        if (!data.objects?.pageInfo?.hasNextPage) {
-          reachedEnd = true;
-          break;
-        }
       } catch {
+        break;
+      }
+
+      const nodes = data.objects?.nodes ?? [];
+      if (nodes.length === 0) {
+        reachedEnd = true;
+        break;
+      }
+      scanned += nodes.length;
+
+      const pageAddresses = new Set<string>();
+      let pageListed = 0;
+      for (const n of nodes) {
+        const owner = n?.owner;
+        if (!owner) continue;
+        if (owner.__typename === 'AddressOwner') {
+          const addr = owner.owner?.address?.toLowerCase();
+          if (!addr) continue;
+          if (/^0x0+$/.test(addr)) continue;
+          pageAddresses.add(addr);
+        } else if (owner.__typename === 'Parent') {
+          pageListed += 1;
+        }
+      }
+      listed += pageListed;
+
+      let newlyInserted = 0;
+      if (pageAddresses.size > 0) {
+        const docs = Array.from(pageAddresses).map((address) => ({
+          packageAddress,
+          type,
+          address,
+        }));
+        try {
+          const res = await this.holderEntryModel.insertMany(docs, { ordered: false });
+          newlyInserted = Array.isArray(res) ? res.length : 0;
+        } catch (e: any) {
+          const writeErrors = Array.isArray(e?.writeErrors) ? e.writeErrors : [];
+          const allDupKey =
+            e?.code === 11000 ||
+            (writeErrors.length > 0 && writeErrors.every((we: any) => (we?.code ?? we?.err?.code) === 11000));
+          if (!allDupKey) throw e;
+          newlyInserted = Math.max(0, docs.length - writeErrors.length);
+        }
+      }
+
+      // Caught-up heuristic: page had AddressOwner nodes, all were dupes.
+      // Parent-only or mixed pages are indeterminate (can't tell if those
+      // wrappers are new or old), so we keep paginating.
+      if (newlyInserted === 0 && pageAddresses.size > 0) {
+        reachedEnd = true;
+        break;
+      }
+
+      beforeCursor = data.objects?.pageInfo?.startCursor ?? beforeCursor;
+      if (!data.objects?.pageInfo?.hasPreviousPage) {
+        reachedEnd = true;
         break;
       }
     }
 
-    if (newAddresses.size > 0) {
-      const docs = Array.from(newAddresses).map((address) => ({
-        packageAddress: record.packageAddress,
-        type: record.type,
-        address,
-      }));
-      try {
-        await this.holderEntryModel.insertMany(docs, { ordered: false });
-      } catch (e: any) {
-        const allDupKey =
-          e?.code === 11000 ||
-          (Array.isArray(e?.writeErrors) && e.writeErrors.every((we: any) => (we?.code ?? we?.err?.code) === 11000));
-        if (!allDupKey) throw e;
-      }
-    }
-
-    if (scanned > 0) {
-      record.cursor = cursor;
-      record.nodesScanned += scanned;
-      record.listedCount += listed;
-      await record.save();
-    }
     return { scanned, listed, reachedEnd };
   }
 
@@ -1350,33 +1386,41 @@ export class EcosystemService implements OnModuleInit {
    * addresses in `project_holder_entries` for this pair), `listedCount` is
    * the cumulative Parent-owned observations tracked on the cursor record.
    */
+  /**
+   * Live-cron tick: paginate newest-first through objects of a
+   * `(packageAddress, type)`, writing unique AddressOwner wallets into
+   * `ProjectHolderEntry` with dup-key silencing; Parent-owned
+   * observations accumulate into `record.listedCount`. Stops on
+   * caught-up or 100-page budget.
+   *
+   * `count` is `countDocuments({packageAddress, type})` on the entry
+   * collection. `listedCount` comes from the `ProjectHolders` state
+   * record — the live cron *adds* this tick's Parent observations to
+   * the running total. Backfill resets `listedCount` before draining
+   * so it doesn't over-accumulate on re-runs.
+   */
   private async updateHoldersForType(
     packageAddress: string,
     type: string,
   ): Promise<{ count: number; listedCount: number; capped: boolean }> {
     let record = await this.holdersStateModel.findOne({ packageAddress, type });
-
     if (!record) {
-      try {
-        const latest: any = await this.graphql(`{
-          objects(filter: { type: "${type}" }, last: 1) {
-            pageInfo { endCursor }
-          }
-        }`);
-        await this.holdersStateModel.create({
-          packageAddress,
-          type,
-          cursor: latest.objects?.pageInfo?.endCursor ?? null,
-          nodesScanned: 0,
-          listedCount: 0,
-        });
-      } catch {
-        // First-sight anchor failed; leave uncreated so next scan retries.
-      }
-      return { count: 0, listedCount: 0, capped: false };
+      record = await this.holdersStateModel.create({
+        packageAddress,
+        type,
+        cursor: null,
+        nodesScanned: 0,
+        listedCount: 0,
+      });
     }
 
-    const { reachedEnd } = await this.pageForwardHolders(record, 100);
+    const { scanned, listed, reachedEnd } = await this.pageBackwardHolders(packageAddress, type, 100);
+    if (scanned > 0 || listed > 0) {
+      record.nodesScanned += scanned;
+      record.listedCount += listed;
+      await record.save();
+    }
+
     const count = await this.holderEntryModel.countDocuments({ packageAddress, type });
     return { count, listedCount: record.listedCount, capped: !reachedEnd };
   }
@@ -1392,8 +1436,11 @@ export class EcosystemService implements OnModuleInit {
     packageAddress: string,
     type: string,
   ): Promise<{ count: number; listedCount: number; capped: boolean }> {
+    // Reset listedCount on the state record before the full drain — Parent
+    // observations aren't dedup'd, so re-running the backfill would double-
+    // count without this reset. Address entries are safe to leave (dedup
+    // via the unique compound index). nodesScanned is informational.
     let record = await this.holdersStateModel.findOne({ packageAddress, type });
-
     if (!record) {
       record = await this.holdersStateModel.create({
         packageAddress,
@@ -1403,22 +1450,16 @@ export class EcosystemService implements OnModuleInit {
         listedCount: 0,
       });
     } else {
-      record.cursor = null;
-      record.nodesScanned = 0;
       record.listedCount = 0;
+      record.nodesScanned = 0;
       await record.save();
     }
 
-    let safety = 0;
-    let reachedEnd = false;
-    while (safety < 1000) {
-      const result = await this.pageForwardHolders(record, 100);
-      if (result.reachedEnd) {
-        reachedEnd = true;
-        break;
-      }
-      if (result.scanned === 0) break;
-      safety += 1;
+    const { scanned, listed, reachedEnd } = await this.pageBackwardHolders(packageAddress, type, 10000);
+    if (scanned > 0 || listed > 0) {
+      record.nodesScanned += scanned;
+      record.listedCount += listed;
+      await record.save();
     }
 
     const count = await this.holderEntryModel.countDocuments({ packageAddress, type });

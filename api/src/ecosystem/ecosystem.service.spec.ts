@@ -7,6 +7,7 @@ import { ProjectSender } from './schemas/project-sender.schema';
 import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
 import { ProjectHolders } from './schemas/project-holders.schema';
 import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
+import { ProjectTxDigest } from './schemas/project-tx-digest.schema';
 import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ProjectDefinition } from './projects';
@@ -235,6 +236,7 @@ describe('EcosystemService', () => {
   let senderModel: any;
   let senderDocModel: any;
   let txCountModel: any;
+  let txDigestModel: any;
   let holdersStateModel: any;
   let holderEntryModel: any;
   let classifiedModel: any;
@@ -259,6 +261,11 @@ describe('EcosystemService', () => {
     txCountModel = {
       findOne: jest.fn(),
       create: jest.fn(),
+    };
+    txDigestModel = {
+      insertMany: jest.fn().mockResolvedValue([]),
+      countDocuments: jest.fn().mockResolvedValue(0),
+      collection: { name: 'project_tx_digests' },
     };
     holdersStateModel = {
       findOne: jest.fn(),
@@ -285,6 +292,7 @@ describe('EcosystemService', () => {
         { provide: getModelToken(ProjectSenders.name), useValue: senderModel },
         { provide: getModelToken(ProjectSender.name), useValue: senderDocModel },
         { provide: getModelToken(ProjectTxCounts.name), useValue: txCountModel },
+        { provide: getModelToken(ProjectTxDigest.name), useValue: txDigestModel },
         { provide: getModelToken(ProjectHolders.name), useValue: holdersStateModel },
         { provide: getModelToken(ProjectHolderEntry.name), useValue: holderEntryModel },
         { provide: getModelToken(ClassifiedSnapshot.name), useValue: classifiedModel },
@@ -1638,385 +1646,231 @@ describe('EcosystemService', () => {
     const update = (pkg: string, mod: string) =>
       (service as any).updateSendersForModule(pkg, mod) as Promise<number>;
 
-    it('anchors the cursor and returns 0 when no record exists', async () => {
-      senderModel.findOne.mockResolvedValue(null);
-      fetchMock.mockResolvedValue({
-        json: async () => ({
-          data: { events: { pageInfo: { endCursor: 'latest-cur' } } },
-        }),
-      });
-      senderModel.create.mockResolvedValue({});
-      const r = await update('0xaa', 'mod');
-      expect(r).toBe(0);
-      expect(senderModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({ packageAddress: '0xaa', module: 'mod', cursor: 'latest-cur' }),
-      );
-    });
+    it('delegates to pageBackwardSenders with a 100-page budget and returns countDocuments', async () => {
+      const pageSpy = jest
+        .spyOn(service as any, 'pageBackwardSenders')
+        .mockResolvedValue({ scanned: 17, reachedEnd: true });
+      senderDocModel.countDocuments.mockResolvedValue(42);
 
-    it('ignores errors on first-encounter cursor anchor', async () => {
-      senderModel.findOne.mockResolvedValue(null);
-      fetchMock.mockResolvedValue({ json: async () => ({ errors: [{ message: 'boom' }] }) });
       const r = await update('0xaa', 'mod');
-      expect(r).toBe(0);
-      expect(senderModel.create).not.toHaveBeenCalled();
-    });
 
-    it('pages forward and returns the current sender count from the new collection', async () => {
-      const record = {
+      expect(pageSpy).toHaveBeenCalledWith('0xaa', 'mod', 100);
+      expect(senderDocModel.countDocuments).toHaveBeenCalledWith({
         packageAddress: '0xaa',
         module: 'mod',
-        cursor: 'prev',
-        eventsScanned: 10,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      senderModel.findOne.mockResolvedValue(record);
-      fetchMock.mockResolvedValue({
-        json: async () => ({
-          data: {
-            events: {
-              nodes: [{ sender: { address: '0xNEW' } }],
-              pageInfo: { hasNextPage: false, endCursor: 'after' },
-            },
-          },
-        }),
       });
-      senderDocModel.countDocuments.mockResolvedValue(42);
-      const r = await update('0xaa', 'mod');
       expect(r).toBe(42);
-      expect(senderDocModel.countDocuments).toHaveBeenCalledWith({ packageAddress: '0xaa', module: 'mod' });
-      expect(record.save).toHaveBeenCalled();
+    });
+
+    it('still returns countDocuments when the backward page-run caps at the budget', async () => {
+      jest
+        .spyOn(service as any, 'pageBackwardSenders')
+        .mockResolvedValue({ scanned: 5000, reachedEnd: false });
+      senderDocModel.countDocuments.mockResolvedValue(5000);
+
+      const r = await update('0xaa', 'mod');
+      // No persistent cursor state is touched — the scanner is idempotent.
+      expect(r).toBe(5000);
     });
   });
 
-  // ---------- pageForwardSenders ----------
+  // ---------- pageBackwardSenders ----------
 
-  describe('pageForwardSenders (private)', () => {
-    const run = (record: any, emit: string, max = 100) =>
-      (service as any).pageForwardSenders(record, emit, max) as Promise<number>;
+  describe('pageBackwardSenders (private)', () => {
+    const run = (pkg: string, mod: string, max = 100) =>
+      (service as any).pageBackwardSenders(pkg, mod, max) as Promise<{ scanned: number; reachedEnd: boolean }>;
 
-    it('lowercases and dedupes addresses, inserts into the per-sender collection, and advances cursor', async () => {
-      const record = {
-        packageAddress: '0xaa',
-        module: 'm',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      fetchMock
-        .mockResolvedValueOnce({
-          json: async () => ({
-            data: {
-              events: {
-                nodes: [
-                  { sender: { address: '0xAAA' } },
-                  { sender: { address: '0xBBB' } },
-                  { sender: null },
-                ],
-                pageInfo: { hasNextPage: true, endCursor: 'p1' },
-              },
+    it('first page uses `last: 50` with no `before:`; subsequent pages chain on startCursor', async () => {
+      let page = 0;
+      jest.spyOn(service as any, 'graphql').mockImplementation(async (q: unknown) => {
+        page += 1;
+        const body = String(q);
+        if (page === 1) {
+          // No before on first call — just the bare `last: 50`.
+          expect(body).toMatch(/last: 50/);
+          expect(body).not.toMatch(/before:/);
+          return {
+            events: {
+              nodes: [{ sender: { address: '0xAAA' } }],
+              pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
             },
-          }),
-        })
-        .mockResolvedValueOnce({
-          json: async () => ({
-            data: {
-              events: {
-                nodes: [{ sender: { address: '0xAAA' } }], // dupe across pages
-                pageInfo: { hasNextPage: false, endCursor: 'p2' },
-              },
-            },
-          }),
-        });
-      const scanned = await run(record, '0xaa::m');
-      expect(scanned).toBe(4);
+          };
+        }
+        // Second call must reference the prior startCursor.
+        expect(body).toMatch(/before: "sc-1"/);
+        return {
+          events: {
+            nodes: [{ sender: { address: '0xBBB' } }],
+            pageInfo: { hasPreviousPage: false, startCursor: 'sc-2' },
+          },
+        };
+      });
+      senderDocModel.insertMany
+        .mockResolvedValueOnce([{}])
+        .mockResolvedValueOnce([{}]);
+
+      const result = await run('0xaa', 'm');
+      expect(result).toEqual({ scanned: 2, reachedEnd: true });
+      expect(senderDocModel.insertMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('lowercases addresses, dedupes within a page, writes insertMany with ordered:false', async () => {
+      jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+        events: {
+          nodes: [
+            { sender: { address: '0xAAA' } },
+            { sender: { address: '0xBBB' } },
+            { sender: { address: '0xaaa' } }, // dup within page
+            { sender: null },
+          ],
+          pageInfo: { hasPreviousPage: false, startCursor: null },
+        },
+      });
+      senderDocModel.insertMany.mockResolvedValueOnce([{}, {}]);
+
+      const result = await run('0xaa', 'm');
+      expect(result).toEqual({ scanned: 4, reachedEnd: true });
       expect(senderDocModel.insertMany).toHaveBeenCalledTimes(1);
-      const docs = senderDocModel.insertMany.mock.calls[0][0] as Array<{
-        packageAddress: string; module: string; address: string;
-      }>;
-      const addresses = docs.map((d) => d.address).sort();
+      const [docs, opts] = senderDocModel.insertMany.mock.calls[0];
+      expect(opts).toEqual({ ordered: false });
+      const addresses = (docs as any[]).map((d) => d.address).sort();
       expect(addresses).toEqual(['0xaaa', '0xbbb']);
-      expect(docs.every((d) => d.packageAddress === '0xaa' && d.module === 'm')).toBe(true);
-      expect(senderDocModel.insertMany.mock.calls[0][1]).toEqual({ ordered: false });
-      expect(record.cursor).toBe('p2');
-      expect(record.eventsScanned).toBe(4);
-      expect(record.save).toHaveBeenCalledTimes(1);
+      expect((docs as any[]).every((d) => d.packageAddress === '0xaa' && d.module === 'm')).toBe(true);
     });
 
-    it('silently ignores duplicate-key errors from insertMany (top-level code 11000)', async () => {
-      const record = {
-        packageAddress: '0xaa',
-        module: 'm',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: {
-            events: {
-              nodes: [{ sender: { address: '0xAAA' } }],
-              pageInfo: { hasNextPage: false, endCursor: 'p1' },
-            },
-          },
-        }),
+    it('silently swallows top-level E11000 dup-key on insertMany', async () => {
+      jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+        events: {
+          nodes: [{ sender: { address: '0xA' } }],
+          pageInfo: { hasPreviousPage: false, startCursor: null },
+        },
       });
-      const dupErr: any = new Error('E11000 duplicate key');
-      dupErr.code = 11000;
-      senderDocModel.insertMany.mockRejectedValueOnce(dupErr);
-      const scanned = await run(record, '0xaa::m');
-      expect(scanned).toBe(1);
-      expect(record.save).toHaveBeenCalledTimes(1);
-      expect(record.cursor).toBe('p1');
+      const err: any = new Error('E11000 dup');
+      err.code = 11000;
+      senderDocModel.insertMany.mockRejectedValueOnce(err);
+
+      const result = await run('0xaa', 'm');
+      expect(result.scanned).toBe(1);
+      // All-dupes page → caught-up → reachedEnd must be true.
+      expect(result.reachedEnd).toBe(true);
     });
 
-    it('silently ignores duplicate-key writeErrors from bulk insertMany', async () => {
-      // Mongo's bulk-error shape: `writeErrors: [{ code: 11000, ... }, ...]`
-      // rather than a top-level `code`. Every entry must be a dup for the
-      // error to be swallowed.
-      const record = {
-        packageAddress: '0xaa',
-        module: 'm',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: {
-            events: {
-              nodes: [{ sender: { address: '0xAAA' } }, { sender: { address: '0xBBB' } }],
-              pageInfo: { hasNextPage: false, endCursor: 'p1' },
-            },
-          },
-        }),
+    it('silently swallows bulk writeErrors when every entry is 11000', async () => {
+      jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+        events: {
+          nodes: [{ sender: { address: '0xA' } }, { sender: { address: '0xB' } }],
+          pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+        },
       });
-      const bulkErr: any = new Error('BulkWriteError');
-      bulkErr.writeErrors = [
-        { code: 11000, err: { code: 11000 } },
-        { err: { code: 11000 } },
-      ];
-      senderDocModel.insertMany.mockRejectedValueOnce(bulkErr);
-      const scanned = await run(record, '0xaa::m');
-      expect(scanned).toBe(2);
-      expect(record.save).toHaveBeenCalledTimes(1);
+      const bulk: any = new Error('Bulk');
+      bulk.writeErrors = [{ code: 11000 }, { err: { code: 11000 } }];
+      senderDocModel.insertMany.mockRejectedValueOnce(bulk);
+
+      const result = await run('0xaa', 'm');
+      // All-dupes page → caught-up heuristic fires BEFORE the loop chains.
+      expect(result.reachedEnd).toBe(true);
     });
 
-    it('re-throws bulk writeErrors when any entry is not a dup-key', async () => {
-      const record = {
-        packageAddress: '0xaa',
-        module: 'm',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: {
-            events: {
-              nodes: [{ sender: { address: '0xAAA' } }],
-              pageInfo: { hasNextPage: false, endCursor: 'p1' },
-            },
-          },
-        }),
+    it('re-throws mixed writeErrors (one non-11000 entry present)', async () => {
+      jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+        events: {
+          nodes: [{ sender: { address: '0xA' } }],
+          pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+        },
       });
-      const bulkErr: any = new Error('BulkWriteError mixed');
-      bulkErr.writeErrors = [{ code: 11000 }, { code: 66 }];
-      senderDocModel.insertMany.mockRejectedValueOnce(bulkErr);
-      await expect(run(record, '0xaa::m')).rejects.toThrow(/BulkWriteError mixed/);
-      expect(record.save).not.toHaveBeenCalled();
+      const bulk: any = new Error('mixed');
+      bulk.writeErrors = [{ code: 11000 }, { code: 66 }];
+      senderDocModel.insertMany.mockRejectedValueOnce(bulk);
+
+      await expect(run('0xaa', 'm')).rejects.toThrow(/mixed/);
     });
 
-    it('re-throws non-duplicate insertMany errors', async () => {
-      const record = {
-        packageAddress: '0xaa',
-        module: 'm',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: {
-            events: {
-              nodes: [{ sender: { address: '0xAAA' } }],
-              pageInfo: { hasNextPage: false, endCursor: 'p1' },
-            },
-          },
-        }),
+    it('re-throws non-duplicate top-level errors', async () => {
+      jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+        events: {
+          nodes: [{ sender: { address: '0xA' } }],
+          pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+        },
       });
       senderDocModel.insertMany.mockRejectedValueOnce(new Error('network down'));
-      await expect(run(record, '0xaa::m')).rejects.toThrow(/network down/);
-      expect(record.save).not.toHaveBeenCalled();
+
+      await expect(run('0xaa', 'm')).rejects.toThrow(/network down/);
     });
 
-    it('breaks on a thrown page', async () => {
-      const record = {
-        packageAddress: '0xaa',
-        module: 'm',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      fetchMock.mockResolvedValueOnce({ json: async () => ({ errors: [{ message: 'x' }] }) });
-      const scanned = await run(record, '0xaa::m');
-      expect(scanned).toBe(0);
-      expect(record.save).not.toHaveBeenCalled();
+    it('reachedEnd=true on empty nodes', async () => {
+      jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+        events: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } },
+      });
+      const result = await run('0xaa', 'm');
+      expect(result).toEqual({ scanned: 0, reachedEnd: true });
       expect(senderDocModel.insertMany).not.toHaveBeenCalled();
     });
 
-    it('does not save or insert when no events found', async () => {
-      const record = {
-        packageAddress: '0xaa',
-        module: 'm',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
-        }),
+    it('reachedEnd=true on hasPreviousPage:false (full history drained)', async () => {
+      jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+        events: {
+          nodes: [{ sender: { address: '0xA' } }],
+          pageInfo: { hasPreviousPage: false, startCursor: 'sc' },
+        },
       });
-      const scanned = await run(record, '0xaa::m');
-      expect(scanned).toBe(0);
-      expect(record.save).not.toHaveBeenCalled();
-      expect(senderDocModel.insertMany).not.toHaveBeenCalled();
+      senderDocModel.insertMany.mockResolvedValueOnce([{}]);
+      const result = await run('0xaa', 'm');
+      expect(result.reachedEnd).toBe(true);
     });
 
-    it('sends the after cursor once one is set', async () => {
-      const record = {
-        packageAddress: '0xaa',
-        module: 'm',
-        cursor: 'start-cur',
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: 'start-cur' } } },
-        }),
+    it('reachedEnd=false when maxPages budget exhausted with more pages pending', async () => {
+      jest.spyOn(service as any, 'graphql').mockImplementation(async () => ({
+        events: {
+          nodes: [{ sender: { address: '0x' + Math.random().toString(16).slice(2, 10) } }],
+          pageInfo: { hasPreviousPage: true, startCursor: 'cursor-' + Math.random() },
+        },
+      }));
+      senderDocModel.insertMany.mockResolvedValue([{}]);
+
+      const result = await run('0xaa', 'm', 3);
+      expect(result.reachedEnd).toBe(false);
+      expect(result.scanned).toBe(3);
+    });
+
+    it('graphql throw breaks the loop gracefully (returns, does not throw)', async () => {
+      let page = 0;
+      jest.spyOn(service as any, 'graphql').mockImplementation(async () => {
+        page += 1;
+        if (page === 1) {
+          return {
+            events: {
+              nodes: [{ sender: { address: '0xA' } }],
+              pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+            },
+          };
+        }
+        throw new Error('gql blew up');
       });
-      await run(record, '0xaa::m');
-      expect(fetchMock.mock.calls[0][1].body).toMatch(/after: \\?"start-cur\\?"/);
+      senderDocModel.insertMany.mockResolvedValueOnce([{}]);
+
+      const result = await run('0xaa', 'm');
+      expect(result.scanned).toBe(1);
+      expect(result.reachedEnd).toBe(false);
     });
   });
 
   // ---------- backfillSendersForModule ----------
 
   describe('backfillSendersForModule', () => {
-    it('creates a cursor=null record when none exists and drains events', async () => {
-      const created = {
-        packageAddress: '0xpkg',
-        module: 'mod',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      senderModel.findOne.mockResolvedValue(null);
-      senderModel.create.mockResolvedValue(created);
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: {
-            events: {
-              nodes: [{ sender: { address: '0xA' } }],
-              pageInfo: { hasNextPage: false, endCursor: 'done' },
-            },
-          },
-        }),
-      });
-      senderDocModel.countDocuments.mockResolvedValue(1);
-      const n = await service.backfillSendersForModule('0xpkg', 'mod');
-      expect(senderModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({ cursor: null }),
-      );
-      expect(senderDocModel.insertMany).toHaveBeenCalledWith(
-        [{ packageAddress: '0xpkg', module: 'mod', address: '0xa' }],
-        { ordered: false },
-      );
-      expect(n).toBe(1);
-    });
-
-    it('drains in batches until a cycle sees zero progress', async () => {
-      const record = {
-        packageAddress: '0xpkg',
-        module: 'mod',
-        cursor: null,
-        eventsScanned: 0,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      senderModel.findOne.mockResolvedValue(record);
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: {
-            events: {
-              nodes: [{ sender: { address: '0xA' } }, { sender: { address: '0xB' } }],
-              pageInfo: { hasNextPage: false, endCursor: 'end' },
-            },
-          },
-        }),
-      });
-      senderDocModel.countDocuments.mockResolvedValue(2);
-      const n = await service.backfillSendersForModule('0xpkg', 'mod');
-      expect(n).toBe(2);
-      const inserted = (senderDocModel.insertMany.mock.calls[0][0] as Array<{ address: string }>)
-        .map((d) => d.address)
-        .sort();
-      expect(inserted).toEqual(['0xa', '0xb']);
-    });
-
-    it('resets cursor and eventsScanned on an existing record before draining', async () => {
-      // Live cron anchored this record at end-of-history; without the reset,
-      // pageForwardSenders would page forward from 'end-anchor' and find
-      // nothing. Prior ProjectSender docs stay put (deduped by unique index).
-      const record = {
-        packageAddress: '0xpkg',
-        module: 'mod',
-        cursor: 'end-anchor',
-        eventsScanned: 500,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      senderModel.findOne.mockResolvedValue(record);
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: {
-            events: {
-              nodes: [{ sender: { address: '0xNEW' } }],
-              pageInfo: { hasNextPage: false, endCursor: 'drained' },
-            },
-          },
-        }),
-      });
-      senderDocModel.countDocuments.mockResolvedValue(2);
+    it('calls pageBackwardSenders with a 10000-page budget and returns countDocuments', async () => {
+      const pageSpy = jest
+        .spyOn(service as any, 'pageBackwardSenders')
+        .mockResolvedValue({ scanned: 7, reachedEnd: true });
+      senderDocModel.countDocuments.mockResolvedValue(7);
 
       const n = await service.backfillSendersForModule('0xpkg', 'mod');
 
-      // First fetch must not carry the `after:` clause — cursor was reset before drain.
-      expect(fetchMock.mock.calls[0][1].body).not.toMatch(/after: \\?"end-anchor\\?"/);
-      // Reset save + drain save = 2.
-      expect(record.save).toHaveBeenCalledTimes(2);
-      expect(n).toBe(2);
-      expect(senderDocModel.insertMany).toHaveBeenCalledWith(
-        [{ packageAddress: '0xpkg', module: 'mod', address: '0xnew' }],
-        { ordered: false },
-      );
-    });
-
-    it('does not create a new record when one already exists', async () => {
-      const record = {
+      expect(pageSpy).toHaveBeenCalledWith('0xpkg', 'mod', 10000);
+      expect(senderDocModel.countDocuments).toHaveBeenCalledWith({
         packageAddress: '0xpkg',
         module: 'mod',
-        cursor: 'anchor',
-        eventsScanned: 10,
-        save: jest.fn().mockResolvedValue({}),
-      };
-      senderModel.findOne.mockResolvedValue(record);
-      fetchMock.mockResolvedValueOnce({
-        json: async () => ({
-          data: { events: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
-        }),
       });
-      await service.backfillSendersForModule('0xpkg', 'mod');
-      expect(senderModel.create).not.toHaveBeenCalled();
+      expect(n).toBe(7);
     });
   });
 
@@ -2101,8 +1955,23 @@ describe('EcosystemService', () => {
             const nodes = Array.from({ length: count }, () => ({ __typename: 'MoveEvent' }));
             return { json: async () => ({ data: { events: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }) };
           }
+          // Backward-paginated senders: `events(filter:...) { nodes { sender { address } } pageInfo { hasPreviousPage startCursor } }`.
+          // Distinguish from the countEvents shape (__typename-only nodes) via `sender { address }` in the selection set.
+          if (body.includes('events(filter:') && body.includes('sender { address }')) {
+            return { json: async () => ({ data: { events: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } } } }) };
+          }
           if (body.includes('events(filter:') && body.includes('last: 1')) {
             return { json: async () => ({ data: { events: { pageInfo: { endCursor: null } } } }) };
+          }
+          // MovePackage module/datatypes enumeration from `captureObjectTypesForPackage`.
+          // Return an empty module list so `updateHoldersForType` is never reached via capture.
+          if (body.includes('asMovePackage') && body.includes('datatypes(')) {
+            return { json: async () => ({ data: { object: { asMovePackage: { modules: { nodes: [] } } } } }) };
+          }
+          // Backward-paginated holders: `objects(filter:...) { nodes { owner { ... } } pageInfo { hasPreviousPage startCursor } }`.
+          // Stubbed to empty so the capture doesn't try to classify unexpected holders.
+          if (body.includes('objects(filter:') && body.includes('__typename') && body.includes('hasPreviousPage')) {
+            return { json: async () => ({ data: { objects: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } } } }) };
           }
           if (body.includes('objects(filter:')) {
             // Strip JSON-stringify backslash-escaping so we can match on raw type.
@@ -2117,6 +1986,11 @@ describe('EcosystemService', () => {
                 },
               }),
             };
+          }
+          // Backward-paginated TX digest scanner: `transactionBlocks(filter:...) { nodes { digest } pageInfo { hasPreviousPage startCursor } }`.
+          // Distinguish from probeTxEffects (which selects objectChanges) by looking for digest + hasPreviousPage.
+          if (body.includes('transactionBlocks(filter:') && body.includes('nodes { digest }')) {
+            return { json: async () => ({ data: { transactionBlocks: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } } } }) };
           }
           if (body.includes('transactionBlocks(filter:')) {
             const unescaped = body.replace(/\\/g, '');
@@ -2995,173 +2869,214 @@ describe('EcosystemService', () => {
   // ---------- TX-count cursor + backfill ----------
 
   describe('tx-count helpers', () => {
-    /**
-     * Builds a thin ProjectTxCounts-like record shape. Doesn't go through
-     * Mongoose; `save()` is a jest mock so assertions can verify the cursor
-     * watermark moves exactly once per pageForward call.
-     */
-    function mkTxRecord(packageAddress: string, init: Partial<{ cursor: string | null; total: number; txsScanned: number }> = {}) {
-      return {
-        packageAddress,
-        cursor: init.cursor ?? null,
-        total: init.total ?? 0,
-        txsScanned: init.txsScanned ?? 0,
-        save: jest.fn().mockResolvedValue(undefined),
-      };
-    }
+    describe('pageBackwardTxs', () => {
+      it('first page uses `last: 50` with no `before:`; second uses `before: <startCursor>`', async () => {
+        let page = 0;
+        jest.spyOn(service as any, 'graphql').mockImplementation(async (q: unknown) => {
+          page += 1;
+          const body = String(q);
+          if (page === 1) {
+            expect(body).toMatch(/last: 50/);
+            expect(body).not.toMatch(/before:/);
+            return {
+              transactionBlocks: {
+                nodes: [{ digest: 'd1' }],
+                pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+              },
+            };
+          }
+          expect(body).toMatch(/before: "sc-1"/);
+          return {
+            transactionBlocks: {
+              nodes: [{ digest: 'd2' }],
+              pageInfo: { hasPreviousPage: false, startCursor: 'sc-2' },
+            },
+          };
+        });
+        txDigestModel.insertMany
+          .mockResolvedValueOnce([{}])
+          .mockResolvedValueOnce([{}]);
 
-    describe('pageForwardTxs', () => {
-      it('counts node lengths into record.total, advances cursor, breaks on hasNextPage=false (reachedEnd=true)', async () => {
-        const record = mkTxRecord('0xpkg');
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        expect(result).toEqual({ scanned: 2, reachedEnd: true });
+        expect(txDigestModel.insertMany).toHaveBeenCalledTimes(2);
+        const [docs, opts] = txDigestModel.insertMany.mock.calls[0];
+        expect(opts).toEqual({ ordered: false });
+        expect((docs as any[])[0]).toEqual({ packageAddress: '0xpkg', digest: 'd1' });
+      });
+
+      it('reachedEnd=true on empty nodes', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          transactionBlocks: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } },
+        });
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        expect(result).toEqual({ scanned: 0, reachedEnd: true });
+        expect(txDigestModel.insertMany).not.toHaveBeenCalled();
+      });
+
+      it('reachedEnd=true on hasPreviousPage:false', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          transactionBlocks: {
+            nodes: [{ digest: 'd1' }],
+            pageInfo: { hasPreviousPage: false, startCursor: 'sc' },
+          },
+        });
+        txDigestModel.insertMany.mockResolvedValueOnce([{}]);
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        expect(result.reachedEnd).toBe(true);
+      });
+
+      it('reachedEnd=false when page budget is exhausted with more pages pending', async () => {
+        jest.spyOn(service as any, 'graphql').mockImplementation(async () => ({
+          transactionBlocks: {
+            nodes: [{ digest: 'd-' + Math.random() }],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-' + Math.random() },
+          },
+        }));
+        txDigestModel.insertMany.mockResolvedValue([{}]);
+
+        const result = await (service as any).pageBackwardTxs('0xpkg', 3);
+        expect(result.reachedEnd).toBe(false);
+        expect(result.scanned).toBe(3);
+      });
+
+      it('silently swallows top-level E11000 on insertMany', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          transactionBlocks: {
+            nodes: [{ digest: 'd' }],
+            pageInfo: { hasPreviousPage: false, startCursor: null },
+          },
+        });
+        const err: any = new Error('E11000 dup');
+        err.code = 11000;
+        txDigestModel.insertMany.mockRejectedValueOnce(err);
+
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        expect(result.reachedEnd).toBe(true);
+        expect(result.scanned).toBe(1);
+      });
+
+      it('silently swallows bulk writeErrors when every entry is 11000', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          transactionBlocks: {
+            nodes: [{ digest: 'd' }, { digest: 'e' }],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+          },
+        });
+        const bulk: any = new Error('bulk');
+        bulk.writeErrors = [{ code: 11000 }, { err: { code: 11000 } }];
+        txDigestModel.insertMany.mockRejectedValueOnce(bulk);
+
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        // All-dupes fires the caught-up heuristic.
+        expect(result.reachedEnd).toBe(true);
+      });
+
+      it('re-throws mixed writeErrors (one non-11000 entry)', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          transactionBlocks: {
+            nodes: [{ digest: 'd' }],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+          },
+        });
+        const bulk: any = new Error('mixed');
+        bulk.writeErrors = [{ code: 11000 }, { code: 66 }];
+        txDigestModel.insertMany.mockRejectedValueOnce(bulk);
+
+        await expect((service as any).pageBackwardTxs('0xpkg', 10)).rejects.toThrow(/mixed/);
+      });
+
+      it('re-throws non-duplicate top-level insertMany errors', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          transactionBlocks: {
+            nodes: [{ digest: 'd' }],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+          },
+        });
+        txDigestModel.insertMany.mockRejectedValueOnce(new Error('network'));
+
+        await expect((service as any).pageBackwardTxs('0xpkg', 10)).rejects.toThrow(/network/);
+      });
+
+      it('graphql throw breaks the loop gracefully', async () => {
         let page = 0;
         jest.spyOn(service as any, 'graphql').mockImplementation(async () => {
           page += 1;
-          if (page === 1) return { transactionBlocks: { nodes: new Array(50).fill({ digest: 'd' }), pageInfo: { hasNextPage: true, endCursor: 'c1' } } };
-          if (page === 2) return { transactionBlocks: { nodes: new Array(50).fill({ digest: 'd' }), pageInfo: { hasNextPage: true, endCursor: 'c2' } } };
-          return { transactionBlocks: { nodes: new Array(7).fill({ digest: 'd' }), pageInfo: { hasNextPage: false, endCursor: 'c3' } } };
+          if (page === 1) {
+            return {
+              transactionBlocks: {
+                nodes: [{ digest: 'd' }],
+                pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+              },
+            };
+          }
+          throw new Error('gql down');
         });
-        const result = await (service as any).pageForwardTxs(record, 100);
-        expect(result).toEqual({ scanned: 107, reachedEnd: true });
-        expect(record.total).toBe(107);
-        expect(record.txsScanned).toBe(107);
-        expect(record.cursor).toBe('c3');
-        expect(record.save).toHaveBeenCalledTimes(1);
+        txDigestModel.insertMany.mockResolvedValueOnce([{}]);
+
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        expect(result.scanned).toBe(1);
+        expect(result.reachedEnd).toBe(false);
       });
 
-      it('returns reachedEnd=false when the page budget is exhausted with hasNextPage still true (floor; caller flags transactionsCapped)', async () => {
-        const record = mkTxRecord('0xpkg');
-        jest.spyOn(service as any, 'graphql').mockResolvedValue({
-          transactionBlocks: { nodes: new Array(50).fill({ digest: 'd' }), pageInfo: { hasNextPage: true, endCursor: 'c' } },
+      it('filters out nodes with missing digest (defensive) — empty doc list does not trigger caught-up', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          transactionBlocks: {
+            nodes: [{ digest: null }, { digest: '' }],
+            pageInfo: { hasPreviousPage: false, startCursor: null },
+          },
         });
-        const result = await (service as any).pageForwardTxs(record, 3);
-        expect(result).toEqual({ scanned: 150, reachedEnd: false });
-        expect(record.total).toBe(150);
-      });
-
-      it('breaks cleanly on graphql error — commits any partial scan count + cursor so retries resume from a valid watermark', async () => {
-        const record = mkTxRecord('0xpkg');
-        let page = 0;
-        jest.spyOn(service as any, 'graphql').mockImplementation(async () => {
-          page += 1;
-          if (page === 1) return { transactionBlocks: { nodes: new Array(5).fill({ digest: 'd' }), pageInfo: { hasNextPage: true, endCursor: 'c1' } } };
-          throw new Error('graphql blew up');
-        });
-        const result = await (service as any).pageForwardTxs(record, 10);
-        expect(result).toEqual({ scanned: 5, reachedEnd: false });
-        expect(record.total).toBe(5);
-        expect(record.cursor).toBe('c1');
-      });
-
-      it('skips the save() call when scanned=0 — no cursor regression when graphql errors on the very first page', async () => {
-        const record = mkTxRecord('0xpkg', { cursor: 'preserved' });
-        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('network'));
-        const result = await (service as any).pageForwardTxs(record, 10);
-        expect(result).toEqual({ scanned: 0, reachedEnd: false });
-        expect(record.save).not.toHaveBeenCalled();
-        expect(record.cursor).toBe('preserved');
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        // Nodes scanned (2), but nothing written. reachedEnd via hasPreviousPage=false.
+        expect(result.scanned).toBe(2);
+        expect(result.reachedEnd).toBe(true);
+        expect(txDigestModel.insertMany).not.toHaveBeenCalled();
       });
     });
 
     describe('updateTxCountForPackage', () => {
-      it('first-sight: anchors cursor at end-of-history via `last: 1`, creates the record with total=0, returns {0, false}', async () => {
-        txCountModel.findOne.mockResolvedValue(null);
-        txCountModel.create.mockResolvedValue({});
-        jest.spyOn(service as any, 'graphql').mockResolvedValue({
-          transactionBlocks: { pageInfo: { endCursor: 'anchor-cursor' } },
-        });
-        const result = await (service as any).updateTxCountForPackage('0xpkg');
-        expect(result).toEqual({ total: 0, capped: false });
-        expect(txCountModel.create).toHaveBeenCalledWith({
-          packageAddress: '0xpkg',
-          cursor: 'anchor-cursor',
-          total: 0,
-          txsScanned: 0,
-        });
-      });
+      it('delegates to pageBackwardTxs with 100-page budget; total = countDocuments; capped = !reachedEnd (false)', async () => {
+        const spy = jest
+          .spyOn(service as any, 'pageBackwardTxs')
+          .mockResolvedValue({ scanned: 42, reachedEnd: true });
+        txDigestModel.countDocuments.mockResolvedValue(142);
 
-      it('first-sight graphql error: swallowed so the capture continues — no record created, returns {0, false}', async () => {
-        txCountModel.findOne.mockResolvedValue(null);
-        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('timeout'));
         const result = await (service as any).updateTxCountForPackage('0xpkg');
-        expect(result).toEqual({ total: 0, capped: false });
-        expect(txCountModel.create).not.toHaveBeenCalled();
-      });
 
-      it('subsequent sight: pageForwardTxs runs against the saved cursor; {total, capped} mirrors its reachedEnd', async () => {
-        const record = mkTxRecord('0xpkg', { cursor: 'saved', total: 100 });
-        txCountModel.findOne.mockResolvedValue(record);
-        jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
-          r.total += 42;
-          return { scanned: 42, reachedEnd: true };
-        });
-        const result = await (service as any).updateTxCountForPackage('0xpkg');
+        expect(spy).toHaveBeenCalledWith('0xpkg', 100);
+        expect(txDigestModel.countDocuments).toHaveBeenCalledWith({ packageAddress: '0xpkg' });
         expect(result).toEqual({ total: 142, capped: false });
       });
 
-      it('subsequent sight with pagination cap hit: capped=true — transactions field is treated as a floor', async () => {
-        const record = mkTxRecord('0xpkg', { cursor: 'saved', total: 100 });
-        txCountModel.findOne.mockResolvedValue(record);
-        jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
-          r.total += 5000;
-          return { scanned: 5000, reachedEnd: false };
-        });
+      it('capped=true when the backward page-run hits the budget', async () => {
+        jest
+          .spyOn(service as any, 'pageBackwardTxs')
+          .mockResolvedValue({ scanned: 5000, reachedEnd: false });
+        txDigestModel.countDocuments.mockResolvedValue(5100);
         const result = await (service as any).updateTxCountForPackage('0xpkg');
         expect(result).toEqual({ total: 5100, capped: true });
       });
     });
 
     describe('backfillTxCountsForPackage', () => {
-      it('resets existing record (cursor=null, total=0, txsScanned=0) then drains until reachedEnd — matches backfill-senders cursor-reset precedent', async () => {
-        const record = mkTxRecord('0xpkg', { cursor: 'live-anchor', total: 999, txsScanned: 999 });
-        txCountModel.findOne.mockResolvedValue(record);
-        const pageSpy = jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
-          // First invocation after reset: scanned=50, hasNextPage
-          // Second invocation: scanned=0 (forcing end) — simulates graphql swallow at page boundary
-          r.total += 50;
-          return { scanned: 50, reachedEnd: true };
-        });
-        const result = await (service as any).backfillTxCountsForPackage('0xpkg');
-        // Cursor/total were reset to 0 before drain, then +50 from pageForward
-        expect(record.cursor).toBeNull();
-        expect(record.save).toHaveBeenCalled();
-        expect(pageSpy).toHaveBeenCalled();
+      it('delegates to pageBackwardTxs with 10000-page budget and returns {total, capped}', async () => {
+        const spy = jest
+          .spyOn(service as any, 'pageBackwardTxs')
+          .mockResolvedValue({ scanned: 50, reachedEnd: true });
+        txDigestModel.countDocuments.mockResolvedValue(50);
+
+        const result = await service.backfillTxCountsForPackage('0xpkg');
+        expect(spy).toHaveBeenCalledWith('0xpkg', 10000);
         expect(result).toEqual({ total: 50, capped: false });
       });
 
-      it('creates a fresh record when none exists, then drains', async () => {
-        txCountModel.findOne.mockResolvedValue(null);
-        const fresh = mkTxRecord('0xpkg');
-        txCountModel.create.mockResolvedValue(fresh);
-        jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
-          r.total += 3;
-          return { scanned: 3, reachedEnd: true };
-        });
-        const result = await (service as any).backfillTxCountsForPackage('0xpkg');
-        expect(txCountModel.create).toHaveBeenCalled();
-        expect(result).toEqual({ total: 3, capped: false });
-      });
-
-      it('breaks the drain loop when pageForwardTxs returns scanned=0 — avoids infinite loop on persistent endpoint error', async () => {
-        const record = mkTxRecord('0xpkg');
-        txCountModel.findOne.mockResolvedValue(record);
-        jest.spyOn(service as any, 'pageForwardTxs').mockResolvedValue({ scanned: 0, reachedEnd: false });
-        const result = await (service as any).backfillTxCountsForPackage('0xpkg');
-        expect(result).toEqual({ total: 0, capped: true });
-      });
-
-      it('iterates the drain loop multiple times when pages keep coming — safety counter advances until reachedEnd', async () => {
-        const record = mkTxRecord('0xpkg');
-        txCountModel.findOne.mockResolvedValue(record);
-        let call = 0;
-        jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
-          call += 1;
-          r.total += 50;
-          if (call < 3) return { scanned: 50, reachedEnd: false };
-          return { scanned: 50, reachedEnd: true };
-        });
-        const result = await (service as any).backfillTxCountsForPackage('0xpkg');
-        expect(call).toBe(3);
-        expect(result).toEqual({ total: 150, capped: false });
+      it('capped=true when the drain hits the 10000-page budget', async () => {
+        jest
+          .spyOn(service as any, 'pageBackwardTxs')
+          .mockResolvedValue({ scanned: 500000, reachedEnd: false });
+        txDigestModel.countDocuments.mockResolvedValue(500000);
+        const result = await service.backfillTxCountsForPackage('0xpkg');
+        expect(result).toEqual({ total: 500000, capped: true });
       });
     });
 
@@ -3212,9 +3127,8 @@ describe('EcosystemService', () => {
       };
     }
 
-    describe('pageForwardHolders', () => {
-      it('buckets each node by owner.__typename — AddressOwner → insertMany doc, Parent → listed counter, Shared/Immutable/burn → skip', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+    describe('pageBackwardHolders', () => {
+      it('buckets each node by owner.__typename — AddressOwner → insertMany, Parent → listed counter, Shared/Immutable/burn → skip', async () => {
         jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
           objects: {
             nodes: [
@@ -3226,16 +3140,13 @@ describe('EcosystemService', () => {
               { owner: { __typename: 'Immutable' } },
               { owner: { __typename: 'AddressOwner', owner: { address: '0x' + '0'.repeat(64) } } },  // burn
             ],
-            pageInfo: { hasNextPage: false, endCursor: 'end' },
+            pageInfo: { hasPreviousPage: false, startCursor: 'sc' },
           },
         });
-        const result = await (service as any).pageForwardHolders(record, 100);
+        holderEntryModel.insertMany.mockResolvedValueOnce([{}, {}]);
+
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10);
         expect(result).toEqual({ scanned: 7, listed: 2, reachedEnd: true });
-        expect(record.cursor).toBe('end');
-        expect(record.nodesScanned).toBe(7);
-        expect(record.listedCount).toBe(2);
-        expect(record.save).toHaveBeenCalledTimes(1);
-        // 2 AddressOwner nodes, burn filtered — 2 docs inserted, addresses lowercased.
         expect(holderEntryModel.insertMany).toHaveBeenCalledWith(
           [
             { packageAddress: '0xpkg', type: '0xpkg::m::T', address: '0xaaa' },
@@ -3245,188 +3156,319 @@ describe('EcosystemService', () => {
         );
       });
 
-      it('returns reachedEnd=false when page budget is exhausted with more pages remaining (caller flags capped)', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
-        jest.spyOn(service as any, 'graphql').mockResolvedValue({
-          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xA' } } }], pageInfo: { hasNextPage: true, endCursor: 'c' } },
+      it('first page uses `last: 50` with no `before:`; second uses `before: <startCursor>`', async () => {
+        let page = 0;
+        jest.spyOn(service as any, 'graphql').mockImplementation(async (q: unknown) => {
+          page += 1;
+          const body = String(q);
+          if (page === 1) {
+            expect(body).toMatch(/last: 50/);
+            expect(body).not.toMatch(/before:/);
+            return {
+              objects: {
+                nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }],
+                pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+              },
+            };
+          }
+          expect(body).toMatch(/before: "sc-1"/);
+          return {
+            objects: {
+              nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xb' } } }],
+              pageInfo: { hasPreviousPage: false, startCursor: 'sc-2' },
+            },
+          };
         });
-        const result = await (service as any).pageForwardHolders(record, 3);
+        holderEntryModel.insertMany
+          .mockResolvedValueOnce([{}])
+          .mockResolvedValueOnce([{}]);
+
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10);
+        expect(result).toEqual({ scanned: 2, listed: 0, reachedEnd: true });
+      });
+
+      it('reachedEnd=true on empty nodes', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } },
+        });
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10);
+        expect(result).toEqual({ scanned: 0, listed: 0, reachedEnd: true });
+        expect(holderEntryModel.insertMany).not.toHaveBeenCalled();
+      });
+
+      it('reachedEnd=true on hasPreviousPage:false', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: {
+            nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }],
+            pageInfo: { hasPreviousPage: false, startCursor: 'sc' },
+          },
+        });
+        holderEntryModel.insertMany.mockResolvedValueOnce([{}]);
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10);
+        expect(result.reachedEnd).toBe(true);
+      });
+
+      it('reachedEnd=false when page budget is exhausted with more pages pending', async () => {
+        jest.spyOn(service as any, 'graphql').mockImplementation(async () => ({
+          objects: {
+            nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0x' + Math.random().toString(16).slice(2, 10) } } }],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-' + Math.random() },
+          },
+        }));
+        holderEntryModel.insertMany.mockResolvedValue([{}]);
+
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 3);
         expect(result.reachedEnd).toBe(false);
         expect(result.scanned).toBe(3);
       });
 
-      it('silently drops dup-key errors (11000) on insertMany — existing holders stay untouched', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+      it('all-dupes page (writeErrors form) triggers caught-up (reachedEnd=true even without hasPreviousPage:false)', async () => {
         jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
-          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }], pageInfo: { hasNextPage: false, endCursor: 'c' } },
+          objects: {
+            nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+          },
         });
-        holderEntryModel.insertMany.mockRejectedValueOnce(Object.assign(new Error('E11000 duplicate'), { code: 11000 }));
-        const result = await (service as any).pageForwardHolders(record, 10);
+        // writeErrors-form: newlyInserted computes to 0 (docs.length - writeErrors.length),
+        // which then trips the caught-up heuristic. Top-level `code: 11000` doesn't populate
+        // writeErrors, so it leaves newlyInserted = docs.length — covered separately.
+        holderEntryModel.insertMany.mockRejectedValueOnce({
+          name: 'MongoBulkWriteError',
+          writeErrors: [{ code: 11000 }],
+        });
+
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10);
+        expect(result.reachedEnd).toBe(true);
         expect(result.scanned).toBe(1);
-        expect(record.save).toHaveBeenCalledTimes(1);
       });
 
-      it('re-throws non-dup insertMany errors (11000-only writeErrors swallowed; mixed errors propagate)', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+      it('silently swallows bulk writeErrors when every entry is 11000', async () => {
         jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
-          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }], pageInfo: { hasNextPage: false, endCursor: 'c' } },
-        });
-        holderEntryModel.insertMany.mockRejectedValueOnce(Object.assign(new Error('network'), { code: 12345 }));
-        await expect((service as any).pageForwardHolders(record, 10)).rejects.toThrow(/network/);
-      });
-
-      it('silently drops writeErrors-array-of-all-dup-keys form (bulk write error shape)', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
-        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
-          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }], pageInfo: { hasNextPage: false, endCursor: 'c' } },
+          objects: {
+            nodes: [
+              { owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } },
+              { owner: { __typename: 'AddressOwner', owner: { address: '0xb' } } },
+            ],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+          },
         });
         holderEntryModel.insertMany.mockRejectedValueOnce({
           name: 'MongoBulkWriteError',
           writeErrors: [{ code: 11000 }, { err: { code: 11000 } }],
         });
-        const result = await (service as any).pageForwardHolders(record, 10);
-        expect(result.scanned).toBe(1);
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10);
+        expect(result.reachedEnd).toBe(true);
       });
 
-      it('skips nodes without a resolvable AddressOwner.owner.address (defensive null-check)', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
-        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
-          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: null } }, { owner: null }], pageInfo: { hasNextPage: false, endCursor: 'c' } },
-        });
-        const result = await (service as any).pageForwardHolders(record, 10);
-        expect(result.scanned).toBe(2);
-        expect(holderEntryModel.insertMany).not.toHaveBeenCalled();
-      });
-
-      it('breaks cleanly on graphql error — partial scan count preserved + cursor advanced to last-successful watermark', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
-        let page = 0;
-        jest.spyOn(service as any, 'graphql').mockImplementation(async () => {
-          page += 1;
-          if (page === 1) return { objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }], pageInfo: { hasNextPage: true, endCursor: 'c1' } } };
-          throw new Error('gql down');
-        });
-        const result = await (service as any).pageForwardHolders(record, 10);
-        expect(result).toEqual({ scanned: 1, listed: 0, reachedEnd: false });
-        expect(record.cursor).toBe('c1');
-      });
-
-      it('skips save + insertMany when scanned=0 (no progress = no cursor regression)', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'preserved' });
-        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('network'));
-        const result = await (service as any).pageForwardHolders(record, 5);
-        expect(result.scanned).toBe(0);
-        expect(record.save).not.toHaveBeenCalled();
-        expect(holderEntryModel.insertMany).not.toHaveBeenCalled();
-        expect(record.cursor).toBe('preserved');
-      });
-
-      it('preserves record.cursor when the endpoint returns endCursor:null on a non-final page (fallback branch: `endCursor ?? cursor`)', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'prior' });
+      it('re-throws non-duplicate insertMany errors', async () => {
         jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
           objects: {
             nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }],
-            pageInfo: { hasNextPage: false, endCursor: null },
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
           },
         });
-        await (service as any).pageForwardHolders(record, 5);
-        // endCursor=null triggered `?? cursor` → record.cursor stays at 'prior' rather than regressing to null.
-        expect(record.cursor).toBe('prior');
+        holderEntryModel.insertMany.mockRejectedValueOnce(
+          Object.assign(new Error('network'), { code: 12345 }),
+        );
+        await expect((service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10)).rejects.toThrow(/network/);
+      });
+
+      it('re-throws mixed writeErrors (one non-11000 entry)', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: {
+            nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+          },
+        });
+        holderEntryModel.insertMany.mockRejectedValueOnce({
+          writeErrors: [{ code: 11000 }, { code: 66 }],
+          message: 'mixed bulk',
+        });
+        await expect((service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10)).rejects.toBeTruthy();
+      });
+
+      it('graphql throw breaks the loop gracefully', async () => {
+        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('gql down'));
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10);
+        expect(result).toEqual({ scanned: 0, listed: 0, reachedEnd: false });
+        expect(holderEntryModel.insertMany).not.toHaveBeenCalled();
+      });
+
+      it('skips nodes without a resolvable AddressOwner.owner.address (defensive null-check)', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: {
+            nodes: [
+              { owner: { __typename: 'AddressOwner', owner: null } },
+              { owner: null },
+            ],
+            pageInfo: { hasPreviousPage: false, startCursor: null },
+          },
+        });
+        const result = await (service as any).pageBackwardHolders('0xpkg', '0xpkg::m::T', 10);
+        expect(result.scanned).toBe(2);
+        expect(holderEntryModel.insertMany).not.toHaveBeenCalled();
       });
     });
 
     describe('updateHoldersForType', () => {
-      it('first-sight: anchors cursor via `last: 1`, creates record with 0-counters, returns {0, 0, false}', async () => {
+      it('creates a ProjectHolders state record when none exists (cursor=null + 0 counters)', async () => {
         holdersStateModel.findOne.mockResolvedValue(null);
-        holdersStateModel.create.mockResolvedValue({});
-        jest.spyOn(service as any, 'graphql').mockResolvedValue({
-          objects: { pageInfo: { endCursor: 'anchor' } },
-        });
+        const fresh = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        holdersStateModel.create.mockResolvedValue(fresh);
+        jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 0, listed: 0, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(0);
+
         const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
-        expect(result).toEqual({ count: 0, listedCount: 0, capped: false });
+
         expect(holdersStateModel.create).toHaveBeenCalledWith({
           packageAddress: '0xpkg',
           type: '0xpkg::m::T',
-          cursor: 'anchor',
+          cursor: null,
           nodesScanned: 0,
           listedCount: 0,
         });
-      });
-
-      it('first-sight graphql error: swallowed (capture continues), no record created', async () => {
-        holdersStateModel.findOne.mockResolvedValue(null);
-        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('timeout'));
-        const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
         expect(result).toEqual({ count: 0, listedCount: 0, capped: false });
-        expect(holdersStateModel.create).not.toHaveBeenCalled();
       });
 
-      it('subsequent sight: pageForwardHolders runs against saved cursor; count from countDocuments; capped = !reachedEnd', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'saved', listedCount: 5 });
+      it('delegates to pageBackwardHolders with a 100-page budget', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
         holdersStateModel.findOne.mockResolvedValue(record);
-        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 10, listed: 0, reachedEnd: true });
-        holderEntryModel.countDocuments.mockResolvedValue(42);
+        const spy = jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 5, listed: 2, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(5);
+
+        await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(spy).toHaveBeenCalledWith('0xpkg', '0xpkg::m::T', 100);
+      });
+
+      it('accumulates scanned + listed onto the record and saves when progress was made', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { nodesScanned: 10, listedCount: 1 });
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 7, listed: 3, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(20);
+
         const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
-        expect(result).toEqual({ count: 42, listedCount: 5, capped: false });
-        expect(holderEntryModel.countDocuments).toHaveBeenCalledWith({ packageAddress: '0xpkg', type: '0xpkg::m::T' });
+
+        expect(record.nodesScanned).toBe(17);
+        expect(record.listedCount).toBe(4);
+        expect(record.save).toHaveBeenCalledTimes(1);
+        expect(result).toEqual({ count: 20, listedCount: 4, capped: false });
       });
 
-      it('page-budget cap: reachedEnd=false → capped=true (count is a floor)', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'saved' });
+      it('does not save when no progress (scanned=0 && listed=0)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { listedCount: 5 });
         holdersStateModel.findOne.mockResolvedValue(record);
-        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 5000, listed: 0, reachedEnd: false });
+        jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 0, listed: 0, reachedEnd: false });
+        holderEntryModel.countDocuments.mockResolvedValue(42);
+
+        const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
+
+        expect(record.save).not.toHaveBeenCalled();
+        expect(result).toEqual({ count: 42, listedCount: 5, capped: true });
+      });
+
+      it('count comes from holderEntryModel.countDocuments filtered by package+type', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 5, listed: 0, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(77);
+
+        const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(holderEntryModel.countDocuments).toHaveBeenCalledWith({
+          packageAddress: '0xpkg',
+          type: '0xpkg::m::T',
+        });
+        expect(result.count).toBe(77);
+      });
+
+      it('capped=true when the backward scanner bumped the budget', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 5000, listed: 0, reachedEnd: false });
         holderEntryModel.countDocuments.mockResolvedValue(5000);
+
         const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
         expect(result.capped).toBe(true);
       });
     });
 
     describe('backfillHoldersForType', () => {
-      it('resets existing record counters + cursor before drain — cursor-reset precedent matches backfillTxCountsForPackage', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'live-anchor', nodesScanned: 999, listedCount: 50 });
-        holdersStateModel.findOne.mockResolvedValue(record);
-        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 10, listed: 3, reachedEnd: true });
-        holderEntryModel.countDocuments.mockResolvedValue(10);
-        const result = await (service as any).backfillHoldersForType('0xpkg', '0xpkg::m::T');
-        expect(record.cursor).toBeNull();
-        expect(record.save).toHaveBeenCalled();
-        expect(result.count).toBe(10);
-        expect(result.capped).toBe(false);
-      });
-
-      it('creates a fresh record when none exists, then drains', async () => {
+      it('creates a ProjectHolders record when none exists, then drains with 10000-page budget', async () => {
         holdersStateModel.findOne.mockResolvedValue(null);
         const fresh = mkHoldersRecord('0xpkg', '0xpkg::m::T');
         holdersStateModel.create.mockResolvedValue(fresh);
-        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 3, listed: 0, reachedEnd: true });
+        const spy = jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 3, listed: 0, reachedEnd: true });
         holderEntryModel.countDocuments.mockResolvedValue(3);
-        const result = await (service as any).backfillHoldersForType('0xpkg', '0xpkg::m::T');
-        expect(holdersStateModel.create).toHaveBeenCalled();
-        expect(result.count).toBe(3);
-      });
 
-      it('breaks drain loop on scanned=0 — avoids infinite loop on persistent endpoint error', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
-        holdersStateModel.findOne.mockResolvedValue(record);
-        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 0, listed: 0, reachedEnd: false });
-        holderEntryModel.countDocuments.mockResolvedValue(0);
-        const result = await (service as any).backfillHoldersForType('0xpkg', '0xpkg::m::T');
-        expect(result).toEqual({ count: 0, listedCount: 0, capped: true });
-      });
+        const result = await service.backfillHoldersForType('0xpkg', '0xpkg::m::T');
 
-      it('iterates drain multi-times until reachedEnd', async () => {
-        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
-        holdersStateModel.findOne.mockResolvedValue(record);
-        let call = 0;
-        jest.spyOn(service as any, 'pageForwardHolders').mockImplementation(async () => {
-          call += 1;
-          if (call < 3) return { scanned: 50, listed: 0, reachedEnd: false };
-          return { scanned: 50, listed: 0, reachedEnd: true };
+        expect(holdersStateModel.create).toHaveBeenCalledWith({
+          packageAddress: '0xpkg',
+          type: '0xpkg::m::T',
+          cursor: null,
+          nodesScanned: 0,
+          listedCount: 0,
         });
-        holderEntryModel.countDocuments.mockResolvedValue(150);
-        const result = await (service as any).backfillHoldersForType('0xpkg', '0xpkg::m::T');
-        expect(call).toBe(3);
-        expect(result.count).toBe(150);
+        expect(spy).toHaveBeenCalledWith('0xpkg', '0xpkg::m::T', 10000);
+        expect(result).toEqual({ count: 3, listedCount: 0, capped: false });
+      });
+
+      it('resets listedCount=0 + nodesScanned=0 on an existing record before drain; address entries untouched', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { nodesScanned: 999, listedCount: 50 });
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 10, listed: 3, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(10);
+
+        const result = await service.backfillHoldersForType('0xpkg', '0xpkg::m::T');
+
+        // Reset save + progress save = 2.
+        expect(record.save).toHaveBeenCalledTimes(2);
+        // After drain + accumulation: listedCount started at 0 then +3, nodesScanned +10.
+        expect(record.listedCount).toBe(3);
+        expect(record.nodesScanned).toBe(10);
+        expect(result).toEqual({ count: 10, listedCount: 3, capped: false });
+      });
+
+      it('capped=true when the backward drain hits the 10000-page budget', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 500000, listed: 0, reachedEnd: false });
+        holderEntryModel.countDocuments.mockResolvedValue(500000);
+
+        const result = await service.backfillHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(result.capped).toBe(true);
+      });
+
+      it('skips the post-drain save when scanned=0 && listed=0 (still returns a stable count)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { nodesScanned: 10, listedCount: 5 });
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest
+          .spyOn(service as any, 'pageBackwardHolders')
+          .mockResolvedValue({ scanned: 0, listed: 0, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(0);
+
+        const result = await service.backfillHoldersForType('0xpkg', '0xpkg::m::T');
+        // Only the pre-drain reset save fires.
+        expect(record.save).toHaveBeenCalledTimes(1);
+        expect(record.listedCount).toBe(0);
+        expect(result).toEqual({ count: 0, listedCount: 0, capped: false });
       });
     });
 
