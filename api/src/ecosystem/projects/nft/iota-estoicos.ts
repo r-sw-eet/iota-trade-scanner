@@ -12,6 +12,7 @@ export const iotaEstoicos: ProjectDefinition = {
     deployerAddresses: ['0x457dfa6b2594e250535af12d886f77ae3a32db63785830949927e8247f8c8a38'],
     all: ['estoicos'],
   },
+  countTypes: ['estoicos::EstoicosNFT'],
   attribution: `
 Matches the 7 packages on the studio-457d deployer whose module is \`estoicos\` — all 7 are upgrade versions of the same codebase, so they cleanly roll into one project row.
 

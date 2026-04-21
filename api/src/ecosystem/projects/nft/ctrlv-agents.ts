@@ -12,6 +12,7 @@ export const ctrlvAgents: ProjectDefinition = {
     deployerAddresses: ['0xcebec37ad6c05b7fa54344c0bc4dd7e0c340eab11e691f57bdf9f9ed0e75999a'],
     all: ['ctrlv_agent'],
   },
+  countTypes: ['ctrlv_agent::AgentNFT'],
   attribution: `
 Matches the single \`ctrlv_agent\`-module package on the studio-cebe deployer — \`0xbda68e9bff262135feaeb47e1111471789574e138a0d03b523fe95fda0e00269\`.
 

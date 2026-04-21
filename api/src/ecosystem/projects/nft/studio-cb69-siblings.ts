@@ -42,6 +42,7 @@ export const ghostLights: ProjectDefinition = {
   teamId: SHARED_STUDIO,
   isCollectible: true,
   match: { exact: ['ghost_lights'] },
+  countTypes: ['ghost_lights::Nft'],
   attribution: sharedAttribution('ghost_lights', '0xd4750b15d032e321ef07a39131a33cec65dd43ac2e93f2134d1839b887bcd743'),
 };
 
@@ -54,6 +55,7 @@ export const tanapaz: ProjectDefinition = {
   teamId: SHARED_STUDIO,
   isCollectible: true,
   match: { exact: ['tanapaz'] },
+  countTypes: ['tanapaz::Nft'],
   attribution: sharedAttribution(
     'tanapaz',
     '0xcbf7c2ab0c21fd03d1fa7d35db570b0f24ea45370b8a5e48f11527014d505515',
@@ -70,6 +72,7 @@ export const tomaRajadao: ProjectDefinition = {
   teamId: SHARED_STUDIO,
   isCollectible: true,
   match: { exact: ['toma_rajadao'] },
+  countTypes: ['toma_rajadao::Nft'],
   attribution: sharedAttribution(
     'toma_rajadao',
     '0xa66e3b6d0a5d7e812b622484a2a0402605808d217e6e9f3c937c2024887c5400',
@@ -86,6 +89,7 @@ export const tranquilidadeDrops: ProjectDefinition = {
   teamId: SHARED_STUDIO,
   isCollectible: true,
   match: { exact: ['tranquilidade_drops'] },
+  countTypes: ['tranquilidade_drops::Nft'],
   attribution: sharedAttribution(
     'tranquilidade_drops',
     '0x9ee45268d778b3b8d80fcd93f0b004716156d7e84aac42d0f973867e524005f4',
