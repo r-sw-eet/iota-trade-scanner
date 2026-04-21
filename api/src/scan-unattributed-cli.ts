@@ -301,12 +301,14 @@ async function main() {
       latestPackageAddress: latestPkg.address,
       storageIota: Math.round(storageIota * 10000) / 10000,
       modules: Array.from(modulesUnion).slice(0, 20),
-      // The CLI doesn't pull event counts — it's a one-shot triage tool that
-      // only cares about deployer/modules/identity. Zero out the fields the
-      // production `UnattributedCluster` carries so the shared type still fits.
+      // The CLI doesn't pull event / TX counts — it's a one-shot triage tool
+      // that only cares about deployer/modules/identity. Zero out the fields
+      // the production `UnattributedCluster` carries so the shared type still fits.
       events: 0,
       eventsCapped: false,
       uniqueSenders: 0,
+      transactions: 0,
+      transactionsCapped: false,
       sampleIdentifiers: identifiers,
       sampledObjectType: objectType,
     });

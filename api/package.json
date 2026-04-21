@@ -15,7 +15,8 @@
     "test:cov": "jest --config test/jest-cov.config.js --coverage",
     "cov:check": "node ../scripts/check-coverage.js api",
     "test:functional": "jest --config test/jest-functional.config.js",
-    "backfill:senders": "node dist/backfill-senders"
+    "backfill:senders": "node dist/backfill-senders",
+    "backfill:txcounts": "node dist/backfill-tx-counts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

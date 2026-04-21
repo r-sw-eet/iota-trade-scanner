@@ -4,6 +4,8 @@ import { EcosystemService } from './ecosystem.service';
 import { OnchainSnapshot } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
 import { ProjectSender } from './schemas/project-sender.schema';
+import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
+import { AlertsService } from '../alerts/alerts.service';
 import { ProjectDefinition } from './projects';
 
 jest.mock('./projects', () => {
@@ -227,6 +229,7 @@ describe('EcosystemService', () => {
   let ecoModel: any;
   let senderModel: any;
   let senderDocModel: any;
+  let txCountModel: any;
   let fetchMock: FetchMock;
 
   beforeEach(async () => {
@@ -244,12 +247,19 @@ describe('EcosystemService', () => {
       countDocuments: jest.fn().mockResolvedValue(0),
       aggregate: jest.fn().mockResolvedValue([]),
     };
+    txCountModel = {
+      findOne: jest.fn(),
+      create: jest.fn(),
+    };
+    const alertsMock = { notifyCaptureAlarm: jest.fn().mockResolvedValue(undefined) };
     const module = await Test.createTestingModule({
       providers: [
         EcosystemService,
         { provide: getModelToken(OnchainSnapshot.name), useValue: ecoModel },
         { provide: getModelToken(ProjectSenders.name), useValue: senderModel },
         { provide: getModelToken(ProjectSender.name), useValue: senderDocModel },
+        { provide: getModelToken(ProjectTxCounts.name), useValue: txCountModel },
+        { provide: AlertsService, useValue: alertsMock },
       ],
     }).compile();
     service = module.get(EcosystemService);
@@ -679,10 +689,44 @@ describe('EcosystemService', () => {
   describe('capture', () => {
     const rawStub = { packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
 
-    it('saves the raw snapshot returned by captureRaw', async () => {
+    it('saves the raw snapshot returned by captureRaw, enriched with captureDurationMs', async () => {
       jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
       await service.capture();
-      expect(ecoModel.create).toHaveBeenCalledWith(rawStub);
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ ...rawStub, captureDurationMs: expect.any(Number) }),
+      );
+    });
+
+    it('emits ERROR log + alerts.notifyCaptureAlarm when duration crosses the 90min alarm threshold', async () => {
+      // Advance Date.now() by 95 min while captureRaw runs — simulates a slow capture
+      // without the test itself taking 95 real minutes.
+      let t = 1_000_000_000;
+      const dateSpy = jest.spyOn(Date, 'now').mockImplementation(() => t);
+      const errorSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+      const notifySpy = (service as any).alerts.notifyCaptureAlarm as jest.Mock;
+      notifySpy.mockClear();
+      jest.spyOn(service as any, 'captureRaw').mockImplementation(async () => {
+        t += 95 * 60 * 1000;
+        return rawStub;
+      });
+      await service.capture();
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('ALARM'));
+      expect(notifySpy).toHaveBeenCalledWith('alarm', expect.stringContaining('ALARM'));
+      dateSpy.mockRestore();
+    });
+
+    it('skips the email alarm when duration is below the 90min threshold', async () => {
+      let t = 1_000_000_000;
+      const dateSpy = jest.spyOn(Date, 'now').mockImplementation(() => t);
+      const notifySpy = (service as any).alerts.notifyCaptureAlarm as jest.Mock;
+      notifySpy.mockClear();
+      jest.spyOn(service as any, 'captureRaw').mockImplementation(async () => {
+        t += 80 * 60 * 1000; // 80 min: WARN territory, not ALARM
+        return rawStub;
+      });
+      await service.capture();
+      expect(notifySpy).not.toHaveBeenCalled();
+      dateSpy.mockRestore();
     });
 
     it('swallows captureRaw errors (logs only)', async () => {
@@ -2431,6 +2475,47 @@ describe('EcosystemService', () => {
       expect(exact.eventsCapped).toBe(true);
     });
 
+    it('sums transactions across every package in a project\'s set — same pattern as events', async () => {
+      // Regression guard analogous to the TWIN events test above: TX count
+      // lives on PackageFact (package-level, not per-module). A project with
+      // N matched packages should sum all N, not sample one. Single package
+      // per project contributes `transactions` directly; multi-package sums
+      // are what rescue the upgrade-trail case (TWIN's 93%-on-one-pkg shape).
+      (service as any).updateTxCountForPackage = jest.fn(async (addr: string) => {
+        if (addr === '0xv1') return { total: 2328, capped: false };
+        if (addr === '0xv2') return { total: 165, capped: false };
+        return { total: 0, capped: false };
+      });
+
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xv1', modules: ['foo', 'bar'] }),
+          pkg({ address: '0xv2', modules: ['foo', 'bar'] }),
+        ],
+      });
+      const snap = await runCapture();
+      const exact = snap.l1.find((p: any) => p.name === 'Exact');
+      expect(exact.transactions).toBe(2328 + 165);
+      expect(exact.transactionsCapped).toBe(false);
+    });
+
+    it('propagates transactionsCapped=true when any package hits the TX pagination cap', async () => {
+      (service as any).updateTxCountForPackage = jest.fn(async (addr: string) => ({
+        total: 100,
+        capped: addr === '0xv2', // only the second package is capped
+      }));
+
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xv1', modules: ['foo', 'bar'] }),
+          pkg({ address: '0xv2', modules: ['foo', 'bar'] }),
+        ],
+      });
+      const snap = await runCapture();
+      const exact = snap.l1.find((p: any) => p.name === 'Exact');
+      expect(exact.transactionsCapped).toBe(true);
+    });
+
     it('sums events across sibling packages when project uses deployerAddresses match', async () => {
       // Deployer-matched projects (LayerZero, Tradeport, etc.) have packages
       // that are NOT an upgrade chain — they're siblings with potentially
@@ -2486,6 +2571,30 @@ describe('EcosystemService', () => {
         'name: Mystery Thing',
       ]));
       expect(snap.totalUnattributedPackages).toBe(2);
+    });
+
+    it('sums transactions across an unattributed cluster\'s packages — symmetric with attributed rows', async () => {
+      // Load-bearing per plans/implementation_strategy_conversation.md:
+      // growth-ranking's `scope=all` interleaves attributed + unattributed
+      // by the chosen delta, so unattributed rows MUST expose the same
+      // transactions field shape.
+      (service as any).updateTxCountForPackage = jest.fn(async (addr: string) => {
+        if (addr === '0xunknown1') return { total: 40, capped: false };
+        if (addr === '0xunknown2') return { total: 60, capped: true };
+        return { total: 0, capped: false };
+      });
+
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xunknown1', modules: ['genericNFT'], deployer: '0xunknownteam', storageRebate: '500000000' }),
+          pkg({ address: '0xunknown2', modules: ['genericNFT'], deployer: '0xunknownteam', storageRebate: '1500000000' }),
+        ],
+      });
+      const snap = await runCapture();
+      expect(snap.unattributed).toHaveLength(1);
+      const cluster = snap.unattributed[0];
+      expect(cluster.transactions).toBe(40 + 60);
+      expect(cluster.transactionsCapped).toBe(true);
     });
 
     it('falls back to TX-effects probe when the object probe finds nothing across all cluster packages', async () => {
@@ -2560,6 +2669,252 @@ describe('EcosystemService', () => {
       expect(snap.unattributed).toHaveLength(1);
       expect(snap.unattributed[0].deployer).toBe('unknown');
       expect(snap.totalUnattributedPackages).toBe(1);
+    });
+  });
+
+  // ---------- TX-count cursor + backfill ----------
+
+  describe('tx-count helpers', () => {
+    /**
+     * Builds a thin ProjectTxCounts-like record shape. Doesn't go through
+     * Mongoose; `save()` is a jest mock so assertions can verify the cursor
+     * watermark moves exactly once per pageForward call.
+     */
+    function mkTxRecord(packageAddress: string, init: Partial<{ cursor: string | null; total: number; txsScanned: number }> = {}) {
+      return {
+        packageAddress,
+        cursor: init.cursor ?? null,
+        total: init.total ?? 0,
+        txsScanned: init.txsScanned ?? 0,
+        save: jest.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    describe('pageForwardTxs', () => {
+      it('counts node lengths into record.total, advances cursor, breaks on hasNextPage=false (reachedEnd=true)', async () => {
+        const record = mkTxRecord('0xpkg');
+        let page = 0;
+        jest.spyOn(service as any, 'graphql').mockImplementation(async () => {
+          page += 1;
+          if (page === 1) return { transactionBlocks: { nodes: new Array(50).fill({ digest: 'd' }), pageInfo: { hasNextPage: true, endCursor: 'c1' } } };
+          if (page === 2) return { transactionBlocks: { nodes: new Array(50).fill({ digest: 'd' }), pageInfo: { hasNextPage: true, endCursor: 'c2' } } };
+          return { transactionBlocks: { nodes: new Array(7).fill({ digest: 'd' }), pageInfo: { hasNextPage: false, endCursor: 'c3' } } };
+        });
+        const result = await (service as any).pageForwardTxs(record, 100);
+        expect(result).toEqual({ scanned: 107, reachedEnd: true });
+        expect(record.total).toBe(107);
+        expect(record.txsScanned).toBe(107);
+        expect(record.cursor).toBe('c3');
+        expect(record.save).toHaveBeenCalledTimes(1);
+      });
+
+      it('returns reachedEnd=false when the page budget is exhausted with hasNextPage still true (floor; caller flags transactionsCapped)', async () => {
+        const record = mkTxRecord('0xpkg');
+        jest.spyOn(service as any, 'graphql').mockResolvedValue({
+          transactionBlocks: { nodes: new Array(50).fill({ digest: 'd' }), pageInfo: { hasNextPage: true, endCursor: 'c' } },
+        });
+        const result = await (service as any).pageForwardTxs(record, 3);
+        expect(result).toEqual({ scanned: 150, reachedEnd: false });
+        expect(record.total).toBe(150);
+      });
+
+      it('breaks cleanly on graphql error — commits any partial scan count + cursor so retries resume from a valid watermark', async () => {
+        const record = mkTxRecord('0xpkg');
+        let page = 0;
+        jest.spyOn(service as any, 'graphql').mockImplementation(async () => {
+          page += 1;
+          if (page === 1) return { transactionBlocks: { nodes: new Array(5).fill({ digest: 'd' }), pageInfo: { hasNextPage: true, endCursor: 'c1' } } };
+          throw new Error('graphql blew up');
+        });
+        const result = await (service as any).pageForwardTxs(record, 10);
+        expect(result).toEqual({ scanned: 5, reachedEnd: false });
+        expect(record.total).toBe(5);
+        expect(record.cursor).toBe('c1');
+      });
+
+      it('skips the save() call when scanned=0 — no cursor regression when graphql errors on the very first page', async () => {
+        const record = mkTxRecord('0xpkg', { cursor: 'preserved' });
+        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('network'));
+        const result = await (service as any).pageForwardTxs(record, 10);
+        expect(result).toEqual({ scanned: 0, reachedEnd: false });
+        expect(record.save).not.toHaveBeenCalled();
+        expect(record.cursor).toBe('preserved');
+      });
+    });
+
+    describe('updateTxCountForPackage', () => {
+      it('first-sight: anchors cursor at end-of-history via `last: 1`, creates the record with total=0, returns {0, false}', async () => {
+        txCountModel.findOne.mockResolvedValue(null);
+        txCountModel.create.mockResolvedValue({});
+        jest.spyOn(service as any, 'graphql').mockResolvedValue({
+          transactionBlocks: { pageInfo: { endCursor: 'anchor-cursor' } },
+        });
+        const result = await (service as any).updateTxCountForPackage('0xpkg');
+        expect(result).toEqual({ total: 0, capped: false });
+        expect(txCountModel.create).toHaveBeenCalledWith({
+          packageAddress: '0xpkg',
+          cursor: 'anchor-cursor',
+          total: 0,
+          txsScanned: 0,
+        });
+      });
+
+      it('first-sight graphql error: swallowed so the capture continues — no record created, returns {0, false}', async () => {
+        txCountModel.findOne.mockResolvedValue(null);
+        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('timeout'));
+        const result = await (service as any).updateTxCountForPackage('0xpkg');
+        expect(result).toEqual({ total: 0, capped: false });
+        expect(txCountModel.create).not.toHaveBeenCalled();
+      });
+
+      it('subsequent sight: pageForwardTxs runs against the saved cursor; {total, capped} mirrors its reachedEnd', async () => {
+        const record = mkTxRecord('0xpkg', { cursor: 'saved', total: 100 });
+        txCountModel.findOne.mockResolvedValue(record);
+        jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
+          r.total += 42;
+          return { scanned: 42, reachedEnd: true };
+        });
+        const result = await (service as any).updateTxCountForPackage('0xpkg');
+        expect(result).toEqual({ total: 142, capped: false });
+      });
+
+      it('subsequent sight with pagination cap hit: capped=true — transactions field is treated as a floor', async () => {
+        const record = mkTxRecord('0xpkg', { cursor: 'saved', total: 100 });
+        txCountModel.findOne.mockResolvedValue(record);
+        jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
+          r.total += 5000;
+          return { scanned: 5000, reachedEnd: false };
+        });
+        const result = await (service as any).updateTxCountForPackage('0xpkg');
+        expect(result).toEqual({ total: 5100, capped: true });
+      });
+    });
+
+    describe('backfillTxCountsForPackage', () => {
+      it('resets existing record (cursor=null, total=0, txsScanned=0) then drains until reachedEnd — matches backfill-senders cursor-reset precedent', async () => {
+        const record = mkTxRecord('0xpkg', { cursor: 'live-anchor', total: 999, txsScanned: 999 });
+        txCountModel.findOne.mockResolvedValue(record);
+        const pageSpy = jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
+          // First invocation after reset: scanned=50, hasNextPage
+          // Second invocation: scanned=0 (forcing end) — simulates graphql swallow at page boundary
+          r.total += 50;
+          return { scanned: 50, reachedEnd: true };
+        });
+        const result = await (service as any).backfillTxCountsForPackage('0xpkg');
+        // Cursor/total were reset to 0 before drain, then +50 from pageForward
+        expect(record.cursor).toBeNull();
+        expect(record.save).toHaveBeenCalled();
+        expect(pageSpy).toHaveBeenCalled();
+        expect(result).toEqual({ total: 50, capped: false });
+      });
+
+      it('creates a fresh record when none exists, then drains', async () => {
+        txCountModel.findOne.mockResolvedValue(null);
+        const fresh = mkTxRecord('0xpkg');
+        txCountModel.create.mockResolvedValue(fresh);
+        jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
+          r.total += 3;
+          return { scanned: 3, reachedEnd: true };
+        });
+        const result = await (service as any).backfillTxCountsForPackage('0xpkg');
+        expect(txCountModel.create).toHaveBeenCalled();
+        expect(result).toEqual({ total: 3, capped: false });
+      });
+
+      it('breaks the drain loop when pageForwardTxs returns scanned=0 — avoids infinite loop on persistent endpoint error', async () => {
+        const record = mkTxRecord('0xpkg');
+        txCountModel.findOne.mockResolvedValue(record);
+        jest.spyOn(service as any, 'pageForwardTxs').mockResolvedValue({ scanned: 0, reachedEnd: false });
+        const result = await (service as any).backfillTxCountsForPackage('0xpkg');
+        expect(result).toEqual({ total: 0, capped: true });
+      });
+
+      it('iterates the drain loop multiple times when pages keep coming — safety counter advances until reachedEnd', async () => {
+        const record = mkTxRecord('0xpkg');
+        txCountModel.findOne.mockResolvedValue(record);
+        let call = 0;
+        jest.spyOn(service as any, 'pageForwardTxs').mockImplementation(async (r: any) => {
+          call += 1;
+          r.total += 50;
+          if (call < 3) return { scanned: 50, reachedEnd: false };
+          return { scanned: 50, reachedEnd: true };
+        });
+        const result = await (service as any).backfillTxCountsForPackage('0xpkg');
+        expect(call).toBe(3);
+        expect(result).toEqual({ total: 150, capped: false });
+      });
+    });
+
+    describe('backfillAllTxCounts', () => {
+      it('throws when no snapshot exists — one-shot CLI precondition, matches backfillAllSenders', async () => {
+        ecoModel.findOne.mockReturnValue({ sort: () => ({ lean: () => ({ exec: async () => null }) }) });
+        await expect((service as any).backfillAllTxCounts()).rejects.toThrow(/No ecosystem snapshot/);
+      });
+
+      it('iterates every package in the latest snapshot; onProgress fires once per package; totals aggregate', async () => {
+        ecoModel.findOne.mockReturnValue({
+          sort: () => ({ lean: () => ({ exec: async () => ({ packages: [{ address: '0xa' }, { address: '0xb' }, { address: '0xc' }] }) }) }),
+        });
+        jest.spyOn(service as any, 'backfillTxCountsForPackage').mockImplementation(async (addr: any) => {
+          if (addr === '0xa') return { total: 10, capped: false };
+          if (addr === '0xb') return { total: 20, capped: true };
+          return { total: 30, capped: false };
+        });
+        const progress: any[] = [];
+        const result = await (service as any).backfillAllTxCounts((info: any) => progress.push(info), 2);
+        expect(result).toEqual({ totalPackages: 3, totalTxs: 60, cappedPackages: 1 });
+        expect(progress).toHaveLength(3);
+      });
+
+      it('isolates per-package failures — one throw does not abort the whole backfill', async () => {
+        ecoModel.findOne.mockReturnValue({
+          sort: () => ({ lean: () => ({ exec: async () => ({ packages: [{ address: '0xa' }, { address: '0xb' }] }) }) }),
+        });
+        jest.spyOn(service as any, 'backfillTxCountsForPackage').mockImplementation(async (addr: any) => {
+          if (addr === '0xa') throw new Error('one package failed');
+          return { total: 20, capped: false };
+        });
+        const result = await (service as any).backfillAllTxCounts(undefined, 1);
+        expect(result).toEqual({ totalPackages: 2, totalTxs: 20, cappedPackages: 0 });
+      });
+    });
+
+    describe('capture tier-log — CRITICAL branch (>=100min)', () => {
+      it('fires ERROR log + alerts.notifyCaptureAlarm("critical", …) when duration crosses 100min', async () => {
+        let t = 1_000_000_000;
+        const dateSpy = jest.spyOn(Date, 'now').mockImplementation(() => t);
+        const errorSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+        const notifySpy = (service as any).alerts.notifyCaptureAlarm as jest.Mock;
+        notifySpy.mockClear();
+        jest.spyOn(service as any, 'captureRaw').mockImplementation(async () => {
+          t += 105 * 60 * 1000; // 105 min
+          return { packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
+        });
+        await service.capture();
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('CRITICAL'));
+        expect(notifySpy).toHaveBeenCalledWith('critical', expect.stringContaining('CRITICAL'));
+        dateSpy.mockRestore();
+      });
+
+      it('Promise.race hard-timeout branch fires when captureRaw hangs past 125min — guard clears, next cron can start', async () => {
+        // Fake timers let us advance past 125min without real waiting. captureRaw
+        // hangs forever; the hard-timeout must reject the outer race and run the
+        // finally block that resets `capturing`.
+        jest.useFakeTimers();
+        const errorSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+        jest.spyOn(service as any, 'captureRaw').mockImplementation(() => new Promise(() => {}));
+
+        const capturePromise = service.capture();
+        await jest.advanceTimersByTimeAsync(126 * 60 * 1000);
+        await capturePromise;
+
+        expect(service.isCapturing()).toBe(false);
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Ecosystem capture failed'),
+          expect.objectContaining({ message: expect.stringContaining('hard timeout') }),
+        );
+        jest.useRealTimers();
+      });
     });
   });
 });

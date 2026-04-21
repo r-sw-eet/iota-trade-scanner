@@ -122,6 +122,22 @@ describe('EcosystemController', () => {
       await expect(controller.growthRanking('7d', 'unattributed')).resolves.toBe(result);
       expect(growthRanking.mock.calls[0][2]).toBe('unattributed');
     });
+
+    it('defaults sortBy=eventsDelta when omitted', async () => {
+      growthRanking.mockResolvedValue({ items: [] });
+      await controller.growthRanking('7d', 'all');
+      expect(growthRanking.mock.calls[0][3]).toBe('eventsDelta');
+    });
+
+    it('forwards sortBy=transactionsDelta to the service', async () => {
+      growthRanking.mockResolvedValue({ items: [] });
+      await controller.growthRanking('7d', 'all', 'transactionsDelta');
+      expect(growthRanking.mock.calls[0][3]).toBe('transactionsDelta');
+    });
+
+    it('400s on invalid sortBy', async () => {
+      await expect(controller.growthRanking('7d', 'all', 'bogusDelta')).rejects.toThrow(/sortBy/);
+    });
   });
 
   describe('GET /ecosystem/growth', () => {

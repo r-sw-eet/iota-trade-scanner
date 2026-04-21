@@ -142,6 +142,7 @@ function copyToClipboard(text: string) {
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         <MetricCard label="Category" :value="project.category" />
         <MetricCard label="Events" :value="`${formatCompact(project.events)}${project.eventsCapped ? '+' : ''}`" :subtitle="project.eventsCapped ? 'Capped at pagination limit' : 'Total on-chain events'" />
+        <MetricCard v-if="project.layer === 'L1'" label="TXs" :value="`${formatCompact(project.transactions ?? 0)}${project.transactionsCapped ? '+' : ''}`" :subtitle="project.transactionsCapped ? 'Capped at pagination limit' : 'MoveCall transactions (includes calls that don\'t emit events)'" />
         <MetricCard v-if="project.layer === 'L1'" label="Storage" :value="`${project.storageIota.toFixed(4)} IOTA`" subtitle="Package storage deposits" />
         <MetricCard v-if="project.tvl" label="TVL" :value="`$${formatCompact(project.tvl)}`" subtitle="From DefiLlama" />
         <MetricCard v-else-if="project.tvlShared" label="TVL" :value="`($${formatCompact(project.tvlShared)})`" :subtitle="`Shared with ${project.tvlSharedWith} — same DefiLlama protocol`" />

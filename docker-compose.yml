@@ -21,6 +21,13 @@ services:
     environment:
       MONGODB_URI: mongodb://scanner-mongodb:27017/scanner
       PORT: "3004"
+      # Capture-alarm emails (see api/src/alerts/alerts.service.ts). All
+      # three vars are optional; when BREVO_API_KEY is unset, the alerts
+      # service silently no-ops and the existing tier-logged WARN/ERROR
+      # lines are the only signal.
+      BREVO_API_KEY: "${BREVO_API_KEY:-}"
+      ALERT_EMAIL_TO: "${ALERT_EMAIL_TO:-}"
+      ALERT_EMAIL_FROM: "${ALERT_EMAIL_FROM:-}"
     depends_on:
       mongodb:
         condition: service_healthy

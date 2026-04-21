@@ -31,7 +31,7 @@ const hideCollectibles = ref(true)
  */
 type ActivityWindow = 'all' | '24h' | '7d' | '30d'
 const activityWindow = ref<ActivityWindow>('all')
-const ranking = ref<{ items: Array<{ scope: string; key: string; eventsDelta: number; uniqueSendersDelta: number; packagesDelta: number; eventsCapped: boolean }> } | null>(null)
+const ranking = ref<{ items: Array<{ scope: string; key: string; eventsDelta: number; transactionsDelta: number; uniqueSendersDelta: number; packagesDelta: number; eventsCapped: boolean; transactionsCapped: boolean }> } | null>(null)
 const rankingLoading = ref(false)
 
 /** Lookup: row key (project slug for attributed, deployer address for unattributed) → eventsDelta. Empty when window=all. */
@@ -39,6 +39,14 @@ const eventsDeltaByKey = computed<Map<string, number>>(() => {
   if (!ranking.value) return new Map()
   const m = new Map<string, number>()
   for (const item of ranking.value.items) m.set(item.key, item.eventsDelta)
+  return m
+})
+
+/** Lookup: row key → transactionsDelta. Empty when window=all. */
+const transactionsDeltaByKey = computed<Map<string, number>>(() => {
+  if (!ranking.value) return new Map()
+  const m = new Map<string, number>()
+  for (const item of ranking.value.items) m.set(item.key, item.transactionsDelta ?? 0)
   return m
 })
 
@@ -85,6 +93,15 @@ function rowUniqueSenders(row: any): number {
   if (activityWindow.value === 'all') return row.uniqueSenders ?? 0
   return uniqueSendersDeltaByKey.value.get(rowKey(row)) ?? 0
 }
+/**
+ * Displayed TX count — lifetime total on `window=all`, windowed delta otherwise.
+ * Rescues Salus-shape (object-mint) and TWIN-shape (anchoring) projects whose
+ * real activity under-reports as `events`. See `plans/plan_tx_count.md`.
+ */
+function rowTransactions(row: any): number {
+  if (activityWindow.value === 'all') return row.transactions ?? 0
+  return transactionsDeltaByKey.value.get(rowKey(row)) ?? 0
+}
 
 function isIotaFoundation(p: any): boolean {
   // Narrow "Hide IOTA Foundation" filter: hides only the team flagged as
@@ -105,10 +122,10 @@ const l1Filtered = computed(() => {
 
 // --- Sorting ---
 type SortDir = 'asc' | 'desc'
-type L1Key = 'name' | 'team' | 'category' | 'events' | 'uniqueSenders' | 'storageIota' | 'tvl' | 'packages'
+type L1Key = 'name' | 'team' | 'category' | 'events' | 'transactions' | 'uniqueSenders' | 'storageIota' | 'tvl' | 'packages'
 type L2Key = 'name' | 'category' | 'tvl'
 type TeamsKey = 'name' | 'categories' | 'projectCount' | 'events' | 'storageIota' | 'tvl'
-type UnattributedKey = 'deployer' | 'packages' | 'storageIota' | 'events'
+type UnattributedKey = 'deployer' | 'packages' | 'storageIota' | 'events' | 'transactions'
 
 const l1Sort = ref<{ key: L1Key | null; dir: SortDir }>({ key: 'events', dir: 'desc' })
 const l2Sort = ref<{ key: L2Key | null; dir: SortDir }>({ key: 'tvl', dir: 'desc' })
@@ -152,6 +169,7 @@ function sortValue(p: any, key: string): any {
   // operates on the delta, not the lifetime total — this is what turns the
   // existing tables into time-windowed leaderboards without any new views.
   if (key === 'events') return rowEvents(p)
+  if (key === 'transactions') return rowTransactions(p)
   if (key === 'uniqueSenders') return rowUniqueSenders(p)
   return p[key] ?? 0
 }
@@ -749,6 +767,7 @@ const projectTvlChartOptions = {
                         <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('team')">Team<span class="ml-1" :class="sortActive(l1Sort, 'team') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'team') }}</span></th>
                         <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('category')">Category<span class="ml-1" :class="sortActive(l1Sort, 'category') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'category') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('events')">Events{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'events') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'events') }}</span></th>
+                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" title="MoveCall transaction count across the project's packages — includes calls that don't emit events (rescues Salus / TWIN / Gamifly-shape activity)" @click="toggleL1Sort('transactions')">TXs{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'transactions') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'transactions') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" title="Unique sender addresses across all modules" @click="toggleL1Sort('uniqueSenders')">Wallets{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'uniqueSenders') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'uniqueSenders') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(l1Sort, 'storageIota') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'storageIota') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('tvl')">TVL<span class="ml-1" :class="sortActive(l1Sort, 'tvl') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'tvl') }}</span></th>
@@ -780,6 +799,7 @@ const projectTvlChartOptions = {
                         <td class="py-3 pr-4 text-sm" :class="p.team ? 'text-[#d4d4d8]' : 'text-[#52525b]'">{{ p.team?.name || '—' }}</td>
                         <td class="py-3 pr-4 text-sm text-scanner-accent">{{ p.category }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base" :class="rowEvents(p) > 0 ? 'text-[#f4f4f5]' : (rowEvents(p) < 0 ? 'text-[#ef4444]' : 'text-[#52525b]')">{{ activityWindow !== 'all' && rowEvents(p) > 0 ? '+' : '' }}{{ rowEvents(p).toLocaleString() }}{{ p.eventsCapped && activityWindow === 'all' ? '+' : '' }}</td>
+                        <td class="py-3 pr-4 text-right font-mono text-base" :class="rowTransactions(p) > 0 ? 'text-[#f4f4f5]' : (rowTransactions(p) < 0 ? 'text-[#ef4444]' : 'text-[#52525b]')">{{ activityWindow !== 'all' && rowTransactions(p) > 0 ? '+' : '' }}{{ rowTransactions(p).toLocaleString() }}{{ p.transactionsCapped && activityWindow === 'all' ? '+' : '' }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base" :class="rowUniqueSenders(p) > 0 ? 'text-[#f4f4f5]' : (rowUniqueSenders(p) < 0 ? 'text-[#ef4444]' : 'text-[#52525b]')">{{ activityWindow !== 'all' && rowUniqueSenders(p) > 0 ? '+' : '' }}{{ rowUniqueSenders(p).toLocaleString() }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#a1a1aa]">{{ p.storageIota.toFixed(4) }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base" :class="p.tvl != null ? 'text-[#a1a1aa]' : (p.tvlShared != null ? 'text-[#71717a]' : 'text-[#52525b]')">
@@ -877,6 +897,7 @@ const projectTvlChartOptions = {
                         <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('deployer')">Deployer<span class="ml-1" :class="sortActive(unattributedSort, 'deployer') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'deployer') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('packages')">Packages<span class="ml-1" :class="sortActive(unattributedSort, 'packages') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'packages') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('events')">Events{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(unattributedSort, 'events') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'events') }}</span></th>
+                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" title="MoveCall transaction count across the cluster's packages — rescues 0-events-but-real-activity deployers from the discovery queue bottom" @click="toggleUnattributedSort('transactions')">TXs{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(unattributedSort, 'transactions') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'transactions') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(unattributedSort, 'storageIota') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'storageIota') }}</span></th>
                         <th class="text-left pb-2 pr-4 whitespace-nowrap">Modules</th>
                         <th class="text-left pb-2 pr-4">Sample identifiers</th>
@@ -894,6 +915,7 @@ const projectTvlChartOptions = {
                         </td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#f4f4f5]">{{ c.packages }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base" :class="rowEvents(c) > 0 ? 'text-[#f4f4f5]' : (rowEvents(c) < 0 ? 'text-[#ef4444]' : 'text-[#52525b]')">{{ activityWindow !== 'all' && rowEvents(c) > 0 ? '+' : '' }}{{ rowEvents(c).toLocaleString() }}{{ c.eventsCapped && activityWindow === 'all' ? '+' : '' }}</td>
+                        <td class="py-3 pr-4 text-right font-mono text-base" :class="rowTransactions(c) > 0 ? 'text-[#f4f4f5]' : (rowTransactions(c) < 0 ? 'text-[#ef4444]' : 'text-[#52525b]')">{{ activityWindow !== 'all' && rowTransactions(c) > 0 ? '+' : '' }}{{ rowTransactions(c).toLocaleString() }}{{ c.transactionsCapped && activityWindow === 'all' ? '+' : '' }}</td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#f4f4f5]">{{ c.storageIota.toFixed(2) }}</td>
                         <td class="py-3 pr-4">
                           <div class="flex flex-wrap gap-1 max-w-xs">

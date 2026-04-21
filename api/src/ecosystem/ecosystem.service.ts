@@ -11,6 +11,8 @@ import {
 } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
 import { ProjectSender } from './schemas/project-sender.schema';
+import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
+import { AlertsService } from '../alerts/alerts.service';
 import { ALL_PROJECTS, ProjectDefinition } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
 
@@ -72,6 +74,10 @@ export interface UnattributedCluster {
   eventsCapped: boolean;
   /** Summed `uniqueSenders` per-module across the cluster. Over-counts senders that used multiple modules; acceptable as a floor for ranking. */
   uniqueSenders: number;
+  /** Summed cumulative TX count across every package in this cluster. Mirror of `Project.transactions` so the triage-leaderboard can rank attributed + unattributed rows side-by-side. */
+  transactions: number;
+  /** True if any package in this cluster had `transactionsCapped` — the `transactions` field is a floor. */
+  transactionsCapped: boolean;
   /** `key:value` pairs extracted from a sampled Move object (tag, name, url, …). */
   sampleIdentifiers: string[];
   /** Fully-qualified type of the object we probed, for provenance. */
@@ -93,6 +99,10 @@ export interface Project {
   storageIota: number;
   events: number;
   eventsCapped: boolean;
+  /** Cumulative MoveCall TX count summed across the project's matched packages. Rescues Salus-shape (object-mint) and TWIN-shape (anchoring) projects whose real activity under-reports in `events`. */
+  transactions: number;
+  /** True if any of the project's packages had per-scan TX pagination hit the page cap — `transactions` is a floor in that case. */
+  transactionsCapped: boolean;
   modules: string[];
   tvl: number | null;
   /** Set when this project shares a DefiLlama slug with another higher-ranked project. Same numeric value as the primary's `tvl`; rendered in parens on the UI to signal the overlap. Mutually exclusive with `tvl` (exactly one is non-null when the row participates in a shared-slug group). */
@@ -164,10 +174,27 @@ export class EcosystemService implements OnModuleInit {
   private static readonly CLASSIFY_CACHE_TTL_MS = 5 * 60 * 1000;
   private static readonly CLASSIFY_CACHE_MAX = 4;
 
+  /**
+   * Tier thresholds for post-capture wall-clock logging. Values match the
+   * ship-gate tiers in `plans/implementation_strategy_conversation.md`:
+   * 75 min = approaching alarm, 90 min = post-TX alarm (port events/senders
+   * per shared follow-up), 100 min = post-Obj alarm. The hard timeout
+   * (125 min) is a safety net for the rare "awaited promise literally hangs
+   * forever" case — try/finally can't protect against it, but Promise.race
+   * can. The 2h cron's in-flight guard handles the normal "long scan still
+   * running at next tick" case by skipping.
+   */
+  private static readonly CAPTURE_WARN_MS = 75 * 60 * 1000;
+  private static readonly CAPTURE_ALARM_MS = 90 * 60 * 1000;
+  private static readonly CAPTURE_CRITICAL_MS = 100 * 60 * 1000;
+  private static readonly CAPTURE_HARD_TIMEOUT_MS = 125 * 60 * 1000;
+
   constructor(
     @InjectModel(OnchainSnapshot.name) private ecoModel: Model<OnchainSnapshot>,
     @InjectModel(ProjectSenders.name) private senderModel: Model<ProjectSenders>,
     @InjectModel(ProjectSender.name) private senderDocModel: Model<ProjectSender>,
+    @InjectModel(ProjectTxCounts.name) private txCountModel: Model<ProjectTxCounts>,
+    private alerts: AlertsService,
   ) {}
 
   async onModuleInit() {
@@ -214,9 +241,11 @@ export class EcosystemService implements OnModuleInit {
    * with `createdAt <= to`.
    *
    * Output rows are uniform across scopes — attributed projects keyed by
-   * `slug`, unattributed clusters keyed by `deployer` — with the same three
-   * delta fields (`events`, `packages`, `uniqueSenders`). Sorted by
-   * `eventsDelta` desc so the loudest movers bubble up.
+   * `slug`, unattributed clusters keyed by `deployer` — with the same set
+   * of delta fields (`events`, `transactions`, `packages`, `uniqueSenders`).
+   * Sort key is controlled by `sortBy`; default `eventsDelta` preserves
+   * legacy behaviour. `transactionsDelta` surfaces the loudest movers that
+   * don't emit events (Salus-shape, TWIN-shape).
    *
    * Powers the triage dashboard: user sees which known projects grew fastest
    * this week (attributed leaderboard) and which unknown deployer clusters
@@ -226,10 +255,12 @@ export class EcosystemService implements OnModuleInit {
     from: Date,
     to: Date,
     scope: 'all' | 'attributed' | 'unattributed' = 'all',
+    sortBy: 'eventsDelta' | 'transactionsDelta' = 'eventsDelta',
   ): Promise<{
     window: { from: Date; to: Date };
     baseline: { snapshotId: string; createdAt: Date } | null;
     latest: { snapshotId: string; createdAt: Date };
+    sortBy: 'eventsDelta' | 'transactionsDelta';
     items: Array<{
       scope: 'attributed' | 'unattributed';
       key: string;
@@ -237,6 +268,9 @@ export class EcosystemService implements OnModuleInit {
       events: number;
       eventsDelta: number;
       eventsCapped: boolean;
+      transactions: number;
+      transactionsDelta: number;
+      transactionsCapped: boolean;
       packages: number;
       packagesDelta: number;
       uniqueSenders: number;
@@ -283,6 +317,9 @@ export class EcosystemService implements OnModuleInit {
           events: p.events,
           eventsDelta: p.events - (prev?.events ?? 0),
           eventsCapped: p.eventsCapped,
+          transactions: p.transactions ?? 0,
+          transactionsDelta: (p.transactions ?? 0) - (prev?.transactions ?? 0),
+          transactionsCapped: p.transactionsCapped ?? false,
           packages: p.packages,
           packagesDelta: p.packages - (prev?.packages ?? 0),
           uniqueSenders: p.uniqueSenders,
@@ -305,6 +342,9 @@ export class EcosystemService implements OnModuleInit {
           events: u.events,
           eventsDelta: u.events - (prev?.events ?? 0),
           eventsCapped: u.eventsCapped,
+          transactions: u.transactions ?? 0,
+          transactionsDelta: (u.transactions ?? 0) - (prev?.transactions ?? 0),
+          transactionsCapped: u.transactionsCapped ?? false,
           packages: u.packages,
           packagesDelta: u.packages - (prev?.packages ?? 0),
           uniqueSenders: u.uniqueSenders,
@@ -317,7 +357,8 @@ export class EcosystemService implements OnModuleInit {
       }
     }
 
-    items.sort((a, b) => b.eventsDelta - a.eventsDelta);
+    // Sort by the chosen delta, interleaving scopes when scope='all'.
+    items.sort((a, b) => (b as any)[sortBy] - (a as any)[sortBy]);
 
     return {
       window: { from, to },
@@ -325,6 +366,7 @@ export class EcosystemService implements OnModuleInit {
         ? { snapshotId: String(baselineSnap._id), createdAt: baselineSnap.createdAt! }
         : null,
       latest: { snapshotId: String(latestSnap._id), createdAt: latestSnap.createdAt! },
+      sortBy,
       items,
     };
   }
@@ -354,6 +396,7 @@ export class EcosystemService implements OnModuleInit {
     latest: { snapshotId: string; createdAt: Date };
     network: {
       totalEventsDelta: number;
+      totalTransactionsDelta: number;
       totalStorageRebateDelta: number;
       networkTxTotalDelta: number;
       newPackages: number;
@@ -363,6 +406,7 @@ export class EcosystemService implements OnModuleInit {
       isNew: boolean;
       eventsDelta: number;
       uniqueSendersDelta: number;
+      transactionsDelta: number;
       storageRebateDelta: number;
       modules: Array<{ module: string; eventsDelta: number; uniqueSendersDelta: number }>;
     }>;
@@ -389,6 +433,7 @@ export class EcosystemService implements OnModuleInit {
         latest: { snapshotId: String(latest._id), createdAt: latest.createdAt! },
         network: {
           totalEventsDelta: 0,
+          totalTransactionsDelta: 0,
           totalStorageRebateDelta: 0,
           networkTxTotalDelta: 0,
           newPackages: 0,
@@ -402,6 +447,7 @@ export class EcosystemService implements OnModuleInit {
     for (const p of baseline.packages) baselineByAddr.set(p.address, p);
 
     let totalEventsDelta = 0;
+    let totalTransactionsDelta = 0;
     let totalStorageRebateDelta = 0;
     let newPackages = 0;
     const packages: Array<{
@@ -409,6 +455,7 @@ export class EcosystemService implements OnModuleInit {
       isNew: boolean;
       eventsDelta: number;
       uniqueSendersDelta: number;
+      transactionsDelta: number;
       storageRebateDelta: number;
       modules: Array<{ module: string; eventsDelta: number; uniqueSendersDelta: number }>;
     }> = [];
@@ -434,15 +481,23 @@ export class EcosystemService implements OnModuleInit {
           moduleDeltas.push({ module: mm.module, eventsDelta, uniqueSendersDelta: sendersDelta });
         }
       }
+      // TX count lives on PackageFact, not ModuleMetrics. Old snapshots
+      // predating the tx-count schema addition decode with `transactions:
+      // undefined` on `prev`; `?? 0` yields "delta = full current count"
+      // against the first post-deploy snapshot — honest, that's when we
+      // started counting. The frontend can surface this in a tooltip.
+      const pkgTransactionsDelta = (pkg.transactions ?? 0) - (prev?.transactions ?? 0);
       const storageRebateDelta = pkg.storageRebateNanos - (prev?.storageRebateNanos ?? 0);
       totalEventsDelta += pkgEventsDelta;
+      totalTransactionsDelta += pkgTransactionsDelta;
       totalStorageRebateDelta += storageRebateDelta;
-      if (pkgEventsDelta !== 0 || pkgSendersDelta !== 0 || storageRebateDelta !== 0 || isNew) {
+      if (pkgEventsDelta !== 0 || pkgSendersDelta !== 0 || pkgTransactionsDelta !== 0 || storageRebateDelta !== 0 || isNew) {
         packages.push({
           address: pkg.address,
           isNew,
           eventsDelta: pkgEventsDelta,
           uniqueSendersDelta: pkgSendersDelta,
+          transactionsDelta: pkgTransactionsDelta,
           storageRebateDelta,
           modules: moduleDeltas,
         });
@@ -457,6 +512,7 @@ export class EcosystemService implements OnModuleInit {
       latest: { snapshotId: String(latest._id), createdAt: latest.createdAt! },
       network: {
         totalEventsDelta,
+        totalTransactionsDelta,
         totalStorageRebateDelta,
         networkTxTotalDelta: latest.networkTxTotal - baseline.networkTxTotal,
         newPackages,
@@ -503,22 +559,83 @@ export class EcosystemService implements OnModuleInit {
     // serving the previous snapshot throughout, so the dashboard never
     // goes blank during a refresh — the new snapshot appends on success
     // and `findOne().sort({createdAt:-1})` atomically picks it up.
+    //
+    // If a capture overruns the 2h cron window, the next cron tick reads
+    // `capturing: true` and skips. We miss one snapshot interval rather
+    // than overlap. No data corruption.
     if (this.capturing) {
       this.logger.log('Capture already in flight, skipping duplicate trigger');
       return;
     }
     this.capturing = true;
     this.logger.log('Capturing ecosystem snapshot...');
+    const startedAt = Date.now();
     try {
-      const raw = await this.captureRaw();
-      await this.ecoModel.create(raw);
-      this.invalidateClassifyCache();
-      this.logger.log(
-        `Ecosystem snapshot saved: ${raw.packages.length} packages, ` +
-          `${raw.packages.reduce((s, p) => s + p.moduleMetrics.reduce((ss, m) => ss + m.events, 0), 0)} events`,
-      );
+      // Hard timeout at 125 min: the only edge case `try/finally` can't
+      // protect against is an awaited promise that literally hangs forever
+      // (no resolve, no reject). Promise.race forces the finally to run,
+      // releasing the guard so the next cron tick can start. In-flight
+      // GraphQL requests become orphaned; harmless (no one awaits them).
+      // `.unref()` so the timer doesn't keep the Node process alive past
+      // its natural exit (important for tests + graceful shutdown).
+      const captureWork = (async () => {
+        const raw = await this.captureRaw();
+        const durationMs = Date.now() - startedAt;
+        await this.ecoModel.create({ ...raw, captureDurationMs: durationMs });
+        this.invalidateClassifyCache();
+        return { raw, durationMs };
+      })();
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const hardTimeout = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`Capture exceeded ${EcosystemService.CAPTURE_HARD_TIMEOUT_MS / 60000}min hard timeout — likely a hung await.`)),
+          EcosystemService.CAPTURE_HARD_TIMEOUT_MS,
+        );
+        timeoutHandle.unref();
+      });
+      let raw: Awaited<ReturnType<EcosystemService['captureRaw']>>;
+      let durationMs: number;
+      try {
+        ({ raw, durationMs } = await Promise.race([captureWork, hardTimeout]));
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+
+      const durationMin = Math.round(durationMs / 60000);
+      const summary =
+        `Ecosystem snapshot saved in ${durationMin}min (${Math.round(durationMs / 1000)}s): ` +
+        `${raw.packages.length} packages, ` +
+        `${raw.packages.reduce((s, p) => s + p.moduleMetrics.reduce((ss, m) => ss + m.events, 0), 0)} events, ` +
+        `${raw.packages.reduce((s, p) => s + (p.transactions ?? 0), 0)} txs`;
+
+      // Tiered alarm log. Thresholds match the ship-gate from
+      // `plans/implementation_strategy_conversation.md`: WARN at 75min
+      // (approaching), ERROR at 90min (post-TX alarm — port events/senders
+      // per shared follow-up before Obj schema work), and a louder ERROR
+      // at 100min (post-Obj alarm — Obj schema work must wait).
+      if (durationMs >= EcosystemService.CAPTURE_CRITICAL_MS) {
+        const msg =
+          `${summary} — CAPTURE DURATION ${durationMin}min ≥ 100min CRITICAL threshold. ` +
+          `Shared follow-up (port events + senders to inner-loop parallelism) is required before any further per-package scanning lands. ` +
+          `See plans/implementation_strategy_conversation.md § Cross-plan follow-up.`;
+        this.logger.error(msg);
+        this.alerts.notifyCaptureAlarm('critical', msg).catch(() => {});
+      } else if (durationMs >= EcosystemService.CAPTURE_ALARM_MS) {
+        const msg =
+          `${summary} — CAPTURE DURATION ${durationMin}min ≥ 90min ALARM threshold. ` +
+          `Post-TX ship-gate: hold Obj schema work. See plans/plan_tx_count.md § capture wall-clock alarm.`;
+        this.logger.error(msg);
+        this.alerts.notifyCaptureAlarm('alarm', msg).catch(() => {});
+      } else if (durationMs >= EcosystemService.CAPTURE_WARN_MS) {
+        this.logger.warn(
+          `${summary} — capture duration ${durationMin}min ≥ 75min; approaching the 90min alarm.`,
+        );
+      } else {
+        this.logger.log(summary);
+      }
     } catch (e) {
-      this.logger.error('Ecosystem capture failed', e);
+      const durationMin = Math.round((Date.now() - startedAt) / 60000);
+      this.logger.error(`Ecosystem capture failed after ${durationMin}min`, e);
     } finally {
       this.capturing = false;
     }
@@ -754,6 +871,179 @@ export class EcosystemService implements OnModuleInit {
       await record.save();
     }
     return scanned;
+  }
+
+  /**
+   * Pages forward from `record.cursor` through `transactionBlocks(filter: { function: <pkg> })`,
+   * counting nodes into `record.total`. Unlike senders, there's no per-item
+   * dedupe — every TX node is a +1 increment. Mutates + saves cursor + total
+   * + txsScanned on `record`. Returns `{ scanned, reachedEnd }` where
+   * `reachedEnd: true` means we exited via `hasNextPage: false` (fully caught
+   * up through the saved cursor); `false` means we exhausted the page budget
+   * with more history pending — the caller sets `transactionsCapped: true`
+   * in that case to keep the `transactions` field honest as a floor.
+   */
+  private async pageForwardTxs(record: ProjectTxCounts, maxPages: number): Promise<{ scanned: number; reachedEnd: boolean }> {
+    let cursor = record.cursor;
+    let scanned = 0;
+    let reachedEnd = false;
+
+    for (let i = 0; i < maxPages; i++) {
+      const after = cursor ? `, after: "${cursor}"` : '';
+      try {
+        const data: any = await this.graphql(`{
+          transactionBlocks(filter: { function: "${record.packageAddress}" }, first: 50${after}) {
+            nodes { digest }
+            pageInfo { hasNextPage endCursor }
+          }
+        }`);
+        const nodes = data.transactionBlocks?.nodes ?? [];
+        scanned += nodes.length;
+        cursor = data.transactionBlocks?.pageInfo?.endCursor ?? cursor;
+        if (!data.transactionBlocks?.pageInfo?.hasNextPage) {
+          reachedEnd = true;
+          break;
+        }
+      } catch {
+        break;
+      }
+    }
+
+    if (scanned > 0) {
+      record.cursor = cursor;
+      record.total += scanned;
+      record.txsScanned += scanned;
+      await record.save();
+    }
+    return { scanned, reachedEnd };
+  }
+
+  /**
+   * Incrementally update the running TX count for a package. One cursor-state
+   * record per `packageAddress` in `ProjectTxCounts`. On first sight, anchors
+   * the cursor at end-of-history via `last: 1` (so we don't pay a full-history
+   * backfill on every new package — that's the `backfillTxCountsForPackage`
+   * CLI's job). Subsequent scans page forward from the saved cursor.
+   *
+   * Returns `{ total, capped }`. `capped` is true when this scan exhausted
+   * its page budget without reaching `hasNextPage: false` — the `total`
+   * is a floor until the next scan catches up. Mirrors the `eventsCapped`
+   * / `countEvents` honesty convention.
+   */
+  private async updateTxCountForPackage(packageAddress: string): Promise<{ total: number; capped: boolean }> {
+    let record = await this.txCountModel.findOne({ packageAddress });
+
+    if (!record) {
+      try {
+        const latest: any = await this.graphql(`{
+          transactionBlocks(filter: { function: "${packageAddress}" }, last: 1) {
+            pageInfo { endCursor }
+          }
+        }`);
+        await this.txCountModel.create({
+          packageAddress,
+          cursor: latest.transactionBlocks?.pageInfo?.endCursor ?? null,
+          total: 0,
+          txsScanned: 0,
+        });
+      } catch {
+        // First-sight anchor failed; leave uncreated so next scan retries.
+      }
+      return { total: 0, capped: false };
+    }
+
+    const { reachedEnd } = await this.pageForwardTxs(record, 100);
+    return { total: record.total, capped: !reachedEnd };
+  }
+
+  /**
+   * Drain all historical TXs for a package starting from cursor=null.
+   * Designed to be invoked from a one-shot CLI; resumes if interrupted.
+   * Existing records are reset (cursor=null, total=0, txsScanned=0) before
+   * draining because the live cron anchors the cursor at end-of-history on
+   * first sight — without the reset, this method would just page forward
+   * from that anchor and find no history. Mirrors `backfillSendersForModule`.
+   * Returns `{ total, capped }`.
+   */
+  async backfillTxCountsForPackage(packageAddress: string): Promise<{ total: number; capped: boolean }> {
+    let record = await this.txCountModel.findOne({ packageAddress });
+
+    if (!record) {
+      record = await this.txCountModel.create({
+        packageAddress,
+        cursor: null,
+        total: 0,
+        txsScanned: 0,
+      });
+    } else {
+      record.cursor = null;
+      record.total = 0;
+      record.txsScanned = 0;
+      await record.save();
+    }
+
+    // Drain in 100-page batches (5000 TXs each) until hasNextPage:false.
+    // Safety cap at 1000 outer iterations ≈ 5M TXs — no mainnet package
+    // comes close today; bumps the ceiling if that ever changes.
+    let safety = 0;
+    let reachedEnd = false;
+    while (safety < 1000) {
+      const result = await this.pageForwardTxs(record, 100);
+      if (result.reachedEnd) {
+        reachedEnd = true;
+        break;
+      }
+      if (result.scanned === 0) break; // endpoint swallowed an error; stop rather than loop
+      safety += 1;
+    }
+
+    return { total: record.total, capped: !reachedEnd };
+  }
+
+  /**
+   * Parallel full-fleet TX-count backfill across every package in the latest
+   * snapshot. Worker-pool with `concurrency` parallel packages in flight;
+   * pagination inside each package stays serial (cursor chain). Default
+   * concurrency=20 validated against mainnet (see `plans/limits.md`).
+   *
+   * Classification-free — iterates `packages[].address` from the raw snapshot,
+   * so `ProjectTxCounts` repopulates for every package regardless of whether
+   * it matches a `ProjectDefinition` today. Same retroactivity guarantee
+   * `backfillAllSenders` has.
+   */
+  async backfillAllTxCounts(
+    onProgress?: (info: { packageAddress: string; total: number; capped: boolean }) => void,
+    concurrency: number = 20,
+  ): Promise<{ totalPackages: number; totalTxs: number; cappedPackages: number }> {
+    const snapshot = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    if (!snapshot) {
+      throw new Error('No ecosystem snapshot exists yet — run a scan first.');
+    }
+
+    const addresses = snapshot.packages.map((p) => p.address);
+    let totalTxs = 0;
+    let cappedPackages = 0;
+    let cursor = 0;
+
+    const worker = async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= addresses.length) return;
+        const addr = addresses[i];
+        try {
+          const { total, capped } = await this.backfillTxCountsForPackage(addr);
+          totalTxs += total;
+          if (capped) cappedPackages += 1;
+          onProgress?.({ packageAddress: addr, total, capped });
+        } catch (e) {
+          this.logger.warn(`backfillTxCounts: package ${addr} failed — ${(e as Error).message}`);
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.max(1, concurrency) }, () => worker()));
+
+    return { totalPackages: addresses.length, totalTxs, cappedPackages };
   }
 
   /**
@@ -1089,6 +1379,13 @@ export class EcosystemService implements OnModuleInit {
           ? { sampledObjectType: objectType, identifiers }
           : null;
 
+      // Per-package cumulative TX count. Sibling to the events/senders loop
+      // above; one GraphQL call per scan on the steady-state path (cursor-
+      // forward from the saved watermark). Full history drains happen via
+      // the `backfill:txcounts` CLI, not here.
+      const { total: transactions, capped: transactionsCapped } =
+        await this.updateTxCountForPackage(pkg.address);
+
       packages.push({
         address: pkg.address,
         deployer,
@@ -1096,6 +1393,8 @@ export class EcosystemService implements OnModuleInit {
         modules,
         moduleMetrics,
         objectCount: 0, // reserved for future — see schema doc-comment
+        transactions,
+        transactionsCapped,
         fingerprint,
       } as PackageFact);
     }
@@ -1108,6 +1407,7 @@ export class EcosystemService implements OnModuleInit {
     this.logger.log(
       `captureRaw: ${packages.length} packages, ` +
         `${packages.reduce((s, p) => s + p.moduleMetrics.reduce((ss, m) => ss + m.events, 0), 0)} events, ` +
+        `${packages.reduce((s, p) => s + (p.transactions ?? 0), 0)} txs, ` +
         `${packages.filter((p) => p.fingerprint).length} with identity fingerprint`,
     );
 
@@ -1240,6 +1540,8 @@ export class EcosystemService implements OnModuleInit {
       // lists across the wire (otterfly_1 alone can be ~210k addresses).
       let events = 0;
       let eventsCapped = false;
+      let transactions = 0;
+      let transactionsCapped = false;
       const pairs: Array<{ packageAddress: string; module: string }> = [];
       for (const pkg of facts) {
         for (const mm of pkg.moduleMetrics) {
@@ -1247,6 +1549,12 @@ export class EcosystemService implements OnModuleInit {
           if (mm.eventsCapped) eventsCapped = true;
           pairs.push({ packageAddress: pkg.address, module: mm.module });
         }
+        // TX count lives on PackageFact (package-level, not per-module).
+        // Old snapshots predating the tx-count schema addition decode with
+        // `transactions: undefined` — coerce to 0, treated as "unknown for
+        // that snapshot" by the growth endpoint via the same convention.
+        transactions += pkg.transactions ?? 0;
+        if (pkg.transactionsCapped) transactionsCapped = true;
       }
       let uniqueSendersCount = 0;
       if (pairs.length > 0) {
@@ -1292,7 +1600,9 @@ export class EcosystemService implements OnModuleInit {
         packageAddress: firstPkg.address,
         latestPackageAddress: latestPkg.address,
         storageIota: Math.round(totalStorage * 10000) / 10000,
-        events, eventsCapped, modules: mods,
+        events, eventsCapped,
+        transactions, transactionsCapped,
+        modules: mods,
         tvl: null,
         tvlShared: null,
         tvlSharedWith: null,
@@ -1410,6 +1720,8 @@ export class EcosystemService implements OnModuleInit {
           storageIota: 0,
           events: 0,
           eventsCapped: false,
+          transactions: 0,
+          transactionsCapped: false,
           modules: [],
           tvl: chainTvl,
           tvlShared: null,
@@ -1458,18 +1770,24 @@ export class EcosystemService implements OnModuleInit {
       const modulesUnion = new Set<string>();
       for (const pkg of facts) for (const m of pkg.modules) modulesUnion.add(m);
 
-      // Sum activity across the cluster's packages. `events` and `uniqueSenders`
-      // mirror the `Project` shape so the growth-ranking endpoint can present
-      // attributed + unattributed rows side-by-side with consistent columns.
+      // Sum activity across the cluster's packages. `events`, `uniqueSenders`,
+      // and `transactions` mirror the `Project` shape so the growth-ranking
+      // endpoint can present attributed + unattributed rows side-by-side
+      // with consistent columns. Load-bearing per
+      // `plans/implementation_strategy_conversation.md` (turns 2–4).
       let events = 0;
       let eventsCapped = false;
       let uniqueSenders = 0;
+      let transactions = 0;
+      let transactionsCapped = false;
       for (const pkg of facts) {
         for (const mm of pkg.moduleMetrics) {
           events += mm.events;
           if (mm.eventsCapped) eventsCapped = true;
           uniqueSenders += mm.uniqueSenders;
         }
+        transactions += pkg.transactions ?? 0;
+        if (pkg.transactionsCapped) transactionsCapped = true;
       }
 
       let identifiers: string[] = [];
@@ -1494,6 +1812,8 @@ export class EcosystemService implements OnModuleInit {
         events,
         eventsCapped,
         uniqueSenders,
+        transactions,
+        transactionsCapped,
         sampleIdentifiers: identifiers,
         sampledObjectType: objectType,
       });

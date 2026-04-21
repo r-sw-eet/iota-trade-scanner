@@ -3,8 +3,10 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { OnchainSnapshot, OnchainSnapshotSchema } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders, ProjectSendersSchema } from './schemas/project-senders.schema';
 import { ProjectSender, ProjectSenderSchema } from './schemas/project-sender.schema';
+import { ProjectTxCounts, ProjectTxCountsSchema } from './schemas/project-tx-counts.schema';
 import { EcosystemService } from './ecosystem.service';
 import { EcosystemController } from './ecosystem.controller';
+import { AlertsModule } from '../alerts/alerts.module';
 
 @Module({
   imports: [
@@ -12,7 +14,9 @@ import { EcosystemController } from './ecosystem.controller';
       { name: OnchainSnapshot.name, schema: OnchainSnapshotSchema },
       { name: ProjectSenders.name, schema: ProjectSendersSchema },
       { name: ProjectSender.name, schema: ProjectSenderSchema },
+      { name: ProjectTxCounts.name, schema: ProjectTxCountsSchema },
     ]),
+    AlertsModule,
   ],
   providers: [EcosystemService],
   controllers: [EcosystemController],

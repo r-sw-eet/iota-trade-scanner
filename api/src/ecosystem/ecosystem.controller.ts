@@ -37,20 +37,30 @@ export class EcosystemController {
    * Query params:
    *   - `window` — shorthand, one of `24h` | `7d` | `30d` | `all` (default `all`)
    *   - `scope`  — one of `all` | `attributed` | `unattributed` (default `all`)
+   *   - `sortBy` — one of `eventsDelta` | `transactionsDelta` (default `eventsDelta`)
    *
    * `window=all` resolves baseline to `1970-01-01` — since no snapshot
    * predates it, deltas collapse to absolute current values and the ranking
    * becomes an all-time leaderboard (useful as the dashboard's default).
+   *
+   * `sortBy=transactionsDelta` surfaces activity that doesn't emit events
+   * (Salus-shape object-mint packages, TWIN-shape anchoring) — those rank
+   * near the bottom under `eventsDelta` but near the top under TXs.
    */
   @Get('growth-ranking')
   async growthRanking(
     @Query('window') windowRaw?: string,
     @Query('scope') scopeRaw?: string,
+    @Query('sortBy') sortByRaw?: string,
   ) {
     const window = windowRaw ?? 'all';
     const scope = scopeRaw ?? 'all';
+    const sortBy = sortByRaw ?? 'eventsDelta';
     if (!['all', 'attributed', 'unattributed'].includes(scope)) {
       throw new BadRequestException('`scope` must be one of: all, attributed, unattributed.');
+    }
+    if (!['eventsDelta', 'transactionsDelta'].includes(sortBy)) {
+      throw new BadRequestException('`sortBy` must be one of: eventsDelta, transactionsDelta.');
     }
 
     // Shorthand → (from, to) resolution. `to` is always "now"; `from` is
@@ -74,6 +84,7 @@ export class EcosystemController {
       from,
       to,
       scope as 'all' | 'attributed' | 'unattributed',
+      sortBy as 'eventsDelta' | 'transactionsDelta',
     );
     if (!result) {
       throw new NotFoundException('No snapshots cover the requested window.');

@@ -18,12 +18,17 @@ import { Document } from 'mongoose';
  * Fields marked *reserved for future* have intentionally-empty slots today;
  * adding them is purely additive (old docs return `undefined`, which the
  * growth endpoint treats as "unknown for that interval", not zero):
- *   - `ModuleMetrics.transactions` — per-module MoveCall TX count
- *     (deferred pending benchmarking; see `TODO.md § Activity metric`)
  *   - `PackageFact.objectStorageBytes` / `.objectsLiveCount` — dynamic
- *     object-store growth (deferred; see `TODO.md § Object-store growth`)
+ *     object-store growth (deferred; see `plans/TODO.md § Object-store growth`)
  *   - `PackageFact.firstCheckpoint` / `.latestCheckpoint` — first/last
  *     checkpoint the package was touched (derivable; deferred)
+ *
+ * `PackageFact.transactions` lives at package level (single `function:` filter
+ * per package, cursor-model cumulative count). An earlier doc-comment reserved
+ * a `ModuleMetrics.transactions` slot for per-module counting; abandoned
+ * before use per `plans/plan_tx_count.md § Design decision` — every project
+ * the metric rescues is single-module, so per-package halves the query budget
+ * for the same data.
  */
 @Schema({ _id: false })
 export class ModuleMetrics {
@@ -78,6 +83,19 @@ export class PackageFact {
   @Prop({ required: true, default: 0 }) objectCount: number;
 
   /**
+   * Cumulative MoveCall TX count addressing this package since deploy.
+   * Derived at capture time from the maintained `ProjectTxCounts` collection
+   * (cursor-model pagination of `transactionBlocks(filter: { function: <pkg> })`).
+   * Stored here for point-in-time delta queries without rehydrating the
+   * cursor state. Package-level (not per-module) per
+   * `plans/plan_tx_count.md § Design decision`.
+   */
+  @Prop({ required: true, default: 0 }) transactions: number;
+
+  /** True if pagination hit its per-scan page cap — the `transactions` field is a floor. */
+  @Prop({ required: true, default: false }) transactionsCapped: boolean;
+
+  /**
    * Raw fingerprint probe output. Stored rather than matched so classification
    * can re-run at read time against the current registry — a new fingerprint
    * rule added today retroactively classifies old snapshots.
@@ -97,6 +115,20 @@ export class OnchainSnapshot extends Document {
 
   /** Per-epoch TX rate map (epoch → tx/s). Kept for continuity with the old schema. */
   @Prop({ type: Object, default: {} }) txRates: Record<string, number>;
+
+  /**
+   * Wall-clock milliseconds the `capture()` body took (from guard-acquire to
+   * just before the snapshot write). Persisted so post-deploy ship-gate
+   * decisions can be made from snapshot history rather than log tailing,
+   * and the dashboard can render a capture-duration trend. Null on old
+   * snapshots predating this field.
+   *
+   * Tiered log thresholds emitted around this value:
+   *   - >75 min → WARN (approaching 2h cron ceiling)
+   *   - >90 min → ERROR (post-TX alarm; port events/senders per shared follow-up)
+   *   - >100 min → ERROR (post-Obj alarm; Obj schema work must wait)
+   */
+  @Prop({ type: Number, default: null }) captureDurationMs: number | null;
 
   createdAt?: Date;
 }
