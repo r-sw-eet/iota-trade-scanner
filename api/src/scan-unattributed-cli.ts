@@ -309,6 +309,12 @@ async function main() {
       uniqueSenders: 0,
       transactions: 0,
       transactionsCapped: false,
+      // UnattributedCluster shape-parity with attributed `Project` — the CLI
+      // never computes these; zero / null keeps the shared type satisfied.
+      uniqueHolders: 0,
+      objectCount: 0,
+      marketplaceListedCount: 0,
+      uniqueWalletsReach: 0,
       sampleIdentifiers: identifiers,
       sampledObjectType: objectType,
     });

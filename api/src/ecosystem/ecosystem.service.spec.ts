@@ -5,6 +5,8 @@ import { OnchainSnapshot } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
 import { ProjectSender } from './schemas/project-sender.schema';
 import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
+import { ProjectHolders } from './schemas/project-holders.schema';
+import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ProjectDefinition } from './projects';
 
@@ -18,6 +20,7 @@ jest.mock('./projects', () => {
       urls: [],
       teamId: null,
       match: { packageAddresses: ['0xABCDEF'] },
+      countTypes: ['module_only::ObjectOnly'],
     },
     {
       name: 'Exact',
@@ -180,11 +183,12 @@ jest.mock('./projects', () => {
       name: 'Collectible',
       layer: 'L1',
       category: 'NFT',
-      description: 'Project flagged as a PFP / collectible — exercises the isCollectible propagation path.',
+      description: 'Project flagged as a PFP / collectible — exercises the isCollectible propagation path + the countTypes classify path.',
       urls: [],
       teamId: null,
       isCollectible: true,
       match: { all: ['pfp'] },
+      countTypes: ['pfp::PFPNFT'],
     },
   ];
   return { ALL_PROJECTS: projects, ProjectDefinition: undefined };
@@ -230,6 +234,8 @@ describe('EcosystemService', () => {
   let senderModel: any;
   let senderDocModel: any;
   let txCountModel: any;
+  let holdersStateModel: any;
+  let holderEntryModel: any;
   let fetchMock: FetchMock;
 
   beforeEach(async () => {
@@ -246,10 +252,21 @@ describe('EcosystemService', () => {
       insertMany: jest.fn().mockResolvedValue([]),
       countDocuments: jest.fn().mockResolvedValue(0),
       aggregate: jest.fn().mockResolvedValue([]),
+      collection: { name: 'project_sender_entries' },
     };
     txCountModel = {
       findOne: jest.fn(),
       create: jest.fn(),
+    };
+    holdersStateModel = {
+      findOne: jest.fn(),
+      create: jest.fn(),
+    };
+    holderEntryModel = {
+      insertMany: jest.fn().mockResolvedValue([]),
+      countDocuments: jest.fn().mockResolvedValue(0),
+      aggregate: jest.fn().mockResolvedValue([]),
+      collection: { name: 'project_holder_entries' },
     };
     const alertsMock = { notifyCaptureAlarm: jest.fn().mockResolvedValue(undefined) };
     const module = await Test.createTestingModule({
@@ -259,6 +276,8 @@ describe('EcosystemService', () => {
         { provide: getModelToken(ProjectSenders.name), useValue: senderModel },
         { provide: getModelToken(ProjectSender.name), useValue: senderDocModel },
         { provide: getModelToken(ProjectTxCounts.name), useValue: txCountModel },
+        { provide: getModelToken(ProjectHolders.name), useValue: holdersStateModel },
+        { provide: getModelToken(ProjectHolderEntry.name), useValue: holderEntryModel },
         { provide: AlertsService, useValue: alertsMock },
       ],
     }).compile();
@@ -1968,6 +1987,91 @@ describe('EcosystemService', () => {
       expect(snap.l1[0].name).toBe('Exact');
     });
 
+    it('classify: populates uniqueHolders + objectCount + marketplaceListedCount + uniqueWalletsReach for projects with countTypes', async () => {
+      // Collectible mock project declares `countTypes: ['pfp::PFPNFT']`. Stubbing
+      // captureObjectTypesForPackage to write a matching entry onto the
+      // PackageFact; classifyFromRaw's countTypes-filter branch should sum
+      // count + listedCount and query the holders collection. Reach uses the
+      // $unionWith pipeline.
+      (global as any).fetch = scriptFetch({
+        packages: [pkg({ address: '0xaa', modules: ['pfp'] })],
+      });
+      jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
+        { type: '0xaa::pfp::PFPNFT', count: 200, listedCount: 30, capped: false },
+      ]);
+      // First senderDocModel.aggregate call is `pairs.length>0` senders count;
+      // second call is the $unionWith reach aggregation. Return distinct counts.
+      senderDocModel.aggregate
+        .mockResolvedValueOnce([{ count: 50 }])
+        .mockResolvedValueOnce([{ count: 180 }]);
+      holderEntryModel.aggregate.mockResolvedValue([{ count: 150 }]);
+      const snap = await runCapture();
+      const proj = snap.l1.find((p: any) => p.name === 'Collectible');
+      expect(proj).toBeDefined();
+      expect(proj.uniqueSenders).toBe(50);
+      expect(proj.objectCount).toBe(200);
+      expect(proj.marketplaceListedCount).toBe(30);
+      expect(proj.uniqueHolders).toBe(150);
+      expect(proj.uniqueWalletsReach).toBe(180);
+      // Reach pipeline: $match(senders pairs) → $unionWith(holders collection) → $group → $count.
+      const reachPipeline = senderDocModel.aggregate.mock.calls[1][0];
+      expect(reachPipeline[1].$unionWith.coll).toBe('project_holder_entries');
+    });
+
+    it('classify: projects without countTypes leave holder fields null + reach falls through to uniqueSenders', async () => {
+      // "Exact" mock has no countTypes — holder-side fields should stay null.
+      (global as any).fetch = scriptFetch({
+        packages: [pkg({ address: '0xaa', modules: ['foo', 'bar'] })],
+      });
+      senderDocModel.aggregate.mockResolvedValue([{ count: 77 }]);
+      const snap = await runCapture();
+      const proj = snap.l1.find((p: any) => p.name === 'Exact');
+      expect(proj).toBeDefined();
+      expect(proj.uniqueSenders).toBe(77);
+      expect(proj.uniqueHolders).toBeNull();
+      expect(proj.objectCount).toBeNull();
+      expect(proj.marketplaceListedCount).toBeNull();
+      // Reach falls back to uniqueSenders when no countTypes contribute.
+      expect(proj.uniqueWalletsReach).toBe(77);
+    });
+
+    it('classify: project with countTypes + zero module activity falls through to reach=holders-only (object-owning package, no events)', async () => {
+      // AddrOnly matches by packageAddresses, accepts a module-less package.
+      // With zero moduleMetrics → no sender pairs → classify's 2032 edge
+      // case fires: reach = uniqueHolders (not senders-union-holders).
+      (global as any).fetch = scriptFetch({
+        packages: [pkg({ address: '0xabcdef', modules: [] })],
+      });
+      jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
+        { type: '0xabcdef::module_only::ObjectOnly', count: 42, listedCount: 0, capped: false },
+      ]);
+      holderEntryModel.aggregate.mockResolvedValue([{ count: 42 }]);
+      const snap = await runCapture();
+      const proj = snap.l1.find((p: any) => p.name === 'AddrOnly');
+      expect(proj).toBeDefined();
+      expect(proj.uniqueSenders).toBe(0);
+      expect(proj.uniqueHolders).toBe(42);
+      expect(proj.uniqueWalletsReach).toBe(42); // holders-only fallback
+    });
+
+    it('classify: project with countTypes but no matching objectTypeCounts entries → uniqueHolders=0, reach=senders only', async () => {
+      (global as any).fetch = scriptFetch({
+        packages: [pkg({ address: '0xaa', modules: ['pfp'] })],
+      });
+      // Capture returns objectTypeCounts with a non-matching type (AdminCap).
+      jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
+        { type: '0xaa::pfp::AdminCap', count: 1, listedCount: 0, capped: false },
+      ]);
+      senderDocModel.aggregate.mockResolvedValue([{ count: 12 }]);
+      const snap = await runCapture();
+      const proj = snap.l1.find((p: any) => p.name === 'Collectible');
+      expect(proj).toBeDefined();
+      // countTypes is non-empty but filter matched nothing → objectCount=0, holders=0, reach=senders.
+      expect(proj.objectCount).toBe(0);
+      expect(proj.uniqueHolders).toBe(0);
+      expect(proj.uniqueWalletsReach).toBe(12);
+    });
+
     it('surfaces the classify aggregate-based uniqueSenders count on the classified project', async () => {
       // Tests the `pairs.length > 0` → aggregate branch in classifyFromRaw:
       // union of senders across the project's (pkg, module) pairs, returned
@@ -2541,6 +2645,23 @@ describe('EcosystemService', () => {
       expect(dam.modules).toEqual(['gate', 'other']);
     });
 
+    it('orders unattributed clusters by facts.length desc, breaks ties by storageIota desc', async () => {
+      // Covers the sort tiebreaker branch in unattributedRanked. Two distinct
+      // deployers with the same pkg count (1 each) but different storage —
+      // the tiebreaker should order by storageIota descending.
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xsmall', modules: ['genericNFT'], deployer: '0xdeployerA', storageRebate: '100000000' }),   // 0.1 IOTA
+          pkg({ address: '0xlarge', modules: ['genericNFT'], deployer: '0xdeployerB', storageRebate: '5000000000' }),  // 5.0 IOTA
+        ],
+      });
+      const snap = await runCapture();
+      expect(snap.unattributed).toHaveLength(2);
+      // Tie on packages (both = 1), break by storageIota — 0xdeployerB (5 IOTA) > 0xdeployerA (0.1 IOTA).
+      expect(snap.unattributed[0].deployer).toBe('0xdeployerb');
+      expect(snap.unattributed[1].deployer).toBe('0xdeployera');
+    });
+
     it('collects unmatched packages into unattributed clusters, grouped by deployer, with probed identifiers', async () => {
       // Two packages, same unknown deployer, module `genericNFT` that matches
       // nothing in ALL_PROJECTS. Probe returns a usable `tag` and `name`.
@@ -2876,6 +2997,348 @@ describe('EcosystemService', () => {
         });
         const result = await (service as any).backfillAllTxCounts(undefined, 1);
         expect(result).toEqual({ totalPackages: 2, totalTxs: 20, cappedPackages: 0 });
+      });
+    });
+
+    // ---------- Holders (objects + reach) — parallel to the TX writer suite ----------
+
+    function mkHoldersRecord(packageAddress: string, type: string, init: Partial<{ cursor: string | null; nodesScanned: number; listedCount: number }> = {}) {
+      return {
+        packageAddress,
+        type,
+        cursor: init.cursor ?? null,
+        nodesScanned: init.nodesScanned ?? 0,
+        listedCount: init.listedCount ?? 0,
+        save: jest.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    describe('pageForwardHolders', () => {
+      it('buckets each node by owner.__typename — AddressOwner → insertMany doc, Parent → listed counter, Shared/Immutable/burn → skip', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: {
+            nodes: [
+              { owner: { __typename: 'AddressOwner', owner: { address: '0xAAA' } } },
+              { owner: { __typename: 'AddressOwner', owner: { address: '0xBBB' } } },
+              { owner: { __typename: 'Parent', parent: { address: '0xkiosk1' } } },
+              { owner: { __typename: 'Parent', parent: { address: '0xkiosk2' } } },
+              { owner: { __typename: 'Shared', initialSharedVersion: 42 } },
+              { owner: { __typename: 'Immutable' } },
+              { owner: { __typename: 'AddressOwner', owner: { address: '0x' + '0'.repeat(64) } } },  // burn
+            ],
+            pageInfo: { hasNextPage: false, endCursor: 'end' },
+          },
+        });
+        const result = await (service as any).pageForwardHolders(record, 100);
+        expect(result).toEqual({ scanned: 7, listed: 2, reachedEnd: true });
+        expect(record.cursor).toBe('end');
+        expect(record.nodesScanned).toBe(7);
+        expect(record.listedCount).toBe(2);
+        expect(record.save).toHaveBeenCalledTimes(1);
+        // 2 AddressOwner nodes, burn filtered — 2 docs inserted, addresses lowercased.
+        expect(holderEntryModel.insertMany).toHaveBeenCalledWith(
+          [
+            { packageAddress: '0xpkg', type: '0xpkg::m::T', address: '0xaaa' },
+            { packageAddress: '0xpkg', type: '0xpkg::m::T', address: '0xbbb' },
+          ],
+          { ordered: false },
+        );
+      });
+
+      it('returns reachedEnd=false when page budget is exhausted with more pages remaining (caller flags capped)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        jest.spyOn(service as any, 'graphql').mockResolvedValue({
+          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xA' } } }], pageInfo: { hasNextPage: true, endCursor: 'c' } },
+        });
+        const result = await (service as any).pageForwardHolders(record, 3);
+        expect(result.reachedEnd).toBe(false);
+        expect(result.scanned).toBe(3);
+      });
+
+      it('silently drops dup-key errors (11000) on insertMany — existing holders stay untouched', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }], pageInfo: { hasNextPage: false, endCursor: 'c' } },
+        });
+        holderEntryModel.insertMany.mockRejectedValueOnce(Object.assign(new Error('E11000 duplicate'), { code: 11000 }));
+        const result = await (service as any).pageForwardHolders(record, 10);
+        expect(result.scanned).toBe(1);
+        expect(record.save).toHaveBeenCalledTimes(1);
+      });
+
+      it('re-throws non-dup insertMany errors (11000-only writeErrors swallowed; mixed errors propagate)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }], pageInfo: { hasNextPage: false, endCursor: 'c' } },
+        });
+        holderEntryModel.insertMany.mockRejectedValueOnce(Object.assign(new Error('network'), { code: 12345 }));
+        await expect((service as any).pageForwardHolders(record, 10)).rejects.toThrow(/network/);
+      });
+
+      it('silently drops writeErrors-array-of-all-dup-keys form (bulk write error shape)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }], pageInfo: { hasNextPage: false, endCursor: 'c' } },
+        });
+        holderEntryModel.insertMany.mockRejectedValueOnce({
+          name: 'MongoBulkWriteError',
+          writeErrors: [{ code: 11000 }, { err: { code: 11000 } }],
+        });
+        const result = await (service as any).pageForwardHolders(record, 10);
+        expect(result.scanned).toBe(1);
+      });
+
+      it('skips nodes without a resolvable AddressOwner.owner.address (defensive null-check)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: null } }, { owner: null }], pageInfo: { hasNextPage: false, endCursor: 'c' } },
+        });
+        const result = await (service as any).pageForwardHolders(record, 10);
+        expect(result.scanned).toBe(2);
+        expect(holderEntryModel.insertMany).not.toHaveBeenCalled();
+      });
+
+      it('breaks cleanly on graphql error — partial scan count preserved + cursor advanced to last-successful watermark', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        let page = 0;
+        jest.spyOn(service as any, 'graphql').mockImplementation(async () => {
+          page += 1;
+          if (page === 1) return { objects: { nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }], pageInfo: { hasNextPage: true, endCursor: 'c1' } } };
+          throw new Error('gql down');
+        });
+        const result = await (service as any).pageForwardHolders(record, 10);
+        expect(result).toEqual({ scanned: 1, listed: 0, reachedEnd: false });
+        expect(record.cursor).toBe('c1');
+      });
+
+      it('skips save + insertMany when scanned=0 (no progress = no cursor regression)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'preserved' });
+        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('network'));
+        const result = await (service as any).pageForwardHolders(record, 5);
+        expect(result.scanned).toBe(0);
+        expect(record.save).not.toHaveBeenCalled();
+        expect(holderEntryModel.insertMany).not.toHaveBeenCalled();
+        expect(record.cursor).toBe('preserved');
+      });
+
+      it('preserves record.cursor when the endpoint returns endCursor:null on a non-final page (fallback branch: `endCursor ?? cursor`)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'prior' });
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          objects: {
+            nodes: [{ owner: { __typename: 'AddressOwner', owner: { address: '0xa' } } }],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        });
+        await (service as any).pageForwardHolders(record, 5);
+        // endCursor=null triggered `?? cursor` → record.cursor stays at 'prior' rather than regressing to null.
+        expect(record.cursor).toBe('prior');
+      });
+    });
+
+    describe('updateHoldersForType', () => {
+      it('first-sight: anchors cursor via `last: 1`, creates record with 0-counters, returns {0, 0, false}', async () => {
+        holdersStateModel.findOne.mockResolvedValue(null);
+        holdersStateModel.create.mockResolvedValue({});
+        jest.spyOn(service as any, 'graphql').mockResolvedValue({
+          objects: { pageInfo: { endCursor: 'anchor' } },
+        });
+        const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(result).toEqual({ count: 0, listedCount: 0, capped: false });
+        expect(holdersStateModel.create).toHaveBeenCalledWith({
+          packageAddress: '0xpkg',
+          type: '0xpkg::m::T',
+          cursor: 'anchor',
+          nodesScanned: 0,
+          listedCount: 0,
+        });
+      });
+
+      it('first-sight graphql error: swallowed (capture continues), no record created', async () => {
+        holdersStateModel.findOne.mockResolvedValue(null);
+        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('timeout'));
+        const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(result).toEqual({ count: 0, listedCount: 0, capped: false });
+        expect(holdersStateModel.create).not.toHaveBeenCalled();
+      });
+
+      it('subsequent sight: pageForwardHolders runs against saved cursor; count from countDocuments; capped = !reachedEnd', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'saved', listedCount: 5 });
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 10, listed: 0, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(42);
+        const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(result).toEqual({ count: 42, listedCount: 5, capped: false });
+        expect(holderEntryModel.countDocuments).toHaveBeenCalledWith({ packageAddress: '0xpkg', type: '0xpkg::m::T' });
+      });
+
+      it('page-budget cap: reachedEnd=false → capped=true (count is a floor)', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'saved' });
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 5000, listed: 0, reachedEnd: false });
+        holderEntryModel.countDocuments.mockResolvedValue(5000);
+        const result = await (service as any).updateHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(result.capped).toBe(true);
+      });
+    });
+
+    describe('backfillHoldersForType', () => {
+      it('resets existing record counters + cursor before drain — cursor-reset precedent matches backfillTxCountsForPackage', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T', { cursor: 'live-anchor', nodesScanned: 999, listedCount: 50 });
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 10, listed: 3, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(10);
+        const result = await (service as any).backfillHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(record.cursor).toBeNull();
+        expect(record.save).toHaveBeenCalled();
+        expect(result.count).toBe(10);
+        expect(result.capped).toBe(false);
+      });
+
+      it('creates a fresh record when none exists, then drains', async () => {
+        holdersStateModel.findOne.mockResolvedValue(null);
+        const fresh = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        holdersStateModel.create.mockResolvedValue(fresh);
+        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 3, listed: 0, reachedEnd: true });
+        holderEntryModel.countDocuments.mockResolvedValue(3);
+        const result = await (service as any).backfillHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(holdersStateModel.create).toHaveBeenCalled();
+        expect(result.count).toBe(3);
+      });
+
+      it('breaks drain loop on scanned=0 — avoids infinite loop on persistent endpoint error', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        holdersStateModel.findOne.mockResolvedValue(record);
+        jest.spyOn(service as any, 'pageForwardHolders').mockResolvedValue({ scanned: 0, listed: 0, reachedEnd: false });
+        holderEntryModel.countDocuments.mockResolvedValue(0);
+        const result = await (service as any).backfillHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(result).toEqual({ count: 0, listedCount: 0, capped: true });
+      });
+
+      it('iterates drain multi-times until reachedEnd', async () => {
+        const record = mkHoldersRecord('0xpkg', '0xpkg::m::T');
+        holdersStateModel.findOne.mockResolvedValue(record);
+        let call = 0;
+        jest.spyOn(service as any, 'pageForwardHolders').mockImplementation(async () => {
+          call += 1;
+          if (call < 3) return { scanned: 50, listed: 0, reachedEnd: false };
+          return { scanned: 50, listed: 0, reachedEnd: true };
+        });
+        holderEntryModel.countDocuments.mockResolvedValue(150);
+        const result = await (service as any).backfillHoldersForType('0xpkg', '0xpkg::m::T');
+        expect(call).toBe(3);
+        expect(result.count).toBe(150);
+      });
+    });
+
+    describe('backfillAllHolders', () => {
+      it('throws when no snapshot exists', async () => {
+        ecoModel.findOne.mockReturnValue({ sort: () => ({ lean: () => ({ exec: async () => null }) }) });
+        await expect((service as any).backfillAllHolders()).rejects.toThrow(/No ecosystem snapshot/);
+      });
+
+      it('iterates every (pkg, type) pair from the latest snapshot; aggregates totals; fires progress per pair', async () => {
+        ecoModel.findOne.mockReturnValue({
+          sort: () => ({ lean: () => ({ exec: async () => ({
+            packages: [
+              { address: '0xaa', objectTypeCounts: [{ type: '0xaa::m::T1' }, { type: '0xaa::m::T2' }] },
+              { address: '0xbb', objectTypeCounts: [{ type: '0xbb::m::T3' }] },
+              { address: '0xcc', objectTypeCounts: [] },  // empty
+            ],
+          }) }) }),
+        });
+        jest.spyOn(service as any, 'backfillHoldersForType').mockImplementation(async (pkg: any, type: any) => {
+          if (type === '0xaa::m::T1') return { count: 10, listedCount: 1, capped: false };
+          if (type === '0xaa::m::T2') return { count: 20, listedCount: 2, capped: true };
+          return { count: 30, listedCount: 0, capped: false };
+        });
+        const progress: any[] = [];
+        const result = await (service as any).backfillAllHolders((info: any) => progress.push(info), 2);
+        expect(result).toEqual({ totalPairs: 3, totalHolders: 60, cappedPairs: 1 });
+        expect(progress).toHaveLength(3);
+      });
+
+      it('isolates per-pair failures — one throw does not abort the whole backfill', async () => {
+        ecoModel.findOne.mockReturnValue({
+          sort: () => ({ lean: () => ({ exec: async () => ({
+            packages: [{ address: '0xaa', objectTypeCounts: [{ type: '0xaa::m::T1' }, { type: '0xaa::m::T2' }] }],
+          }) }) }),
+        });
+        jest.spyOn(service as any, 'backfillHoldersForType').mockImplementation(async (_: any, type: any) => {
+          if (type === '0xaa::m::T1') throw new Error('one pair failed');
+          return { count: 5, listedCount: 0, capped: false };
+        });
+        const result = await (service as any).backfillAllHolders(undefined, 1);
+        expect(result).toEqual({ totalPairs: 2, totalHolders: 5, cappedPairs: 0 });
+      });
+    });
+
+    describe('captureObjectTypesForPackage', () => {
+      it('enumerates key-able struct types from MovePackage.modules.datatypes, skips non-key abilities, drains each via updateHoldersForType', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          object: {
+            asMovePackage: {
+              modules: {
+                nodes: [
+                  {
+                    name: 'otterfly_1',
+                    datatypes: {
+                      nodes: [
+                        { name: 'OtterFly1NFT', abilities: ['KEY', 'STORE'] },
+                        { name: 'NFTMinted', abilities: [] },  // event struct, no key
+                        { name: 'AdminCap', abilities: ['KEY'] },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        });
+        const drainSpy = jest.spyOn(service as any, 'updateHoldersForType').mockImplementation(async (_pkg: any, type: any) => {
+          if (String(type).endsWith('::OtterFly1NFT')) return { count: 200, listedCount: 10, capped: false };
+          if (String(type).endsWith('::AdminCap')) return { count: 1, listedCount: 0, capped: false };
+          return { count: 0, listedCount: 0, capped: false };
+        });
+        const result = await (service as any).captureObjectTypesForPackage('0xpkg');
+        expect(drainSpy).toHaveBeenCalledTimes(2);  // key-able only; NFTMinted skipped
+        const byType: any = Object.fromEntries(result.map((r: any) => [r.type, r]));
+        expect(byType['0xpkg::otterfly_1::OtterFly1NFT']).toEqual({
+          type: '0xpkg::otterfly_1::OtterFly1NFT', count: 200, listedCount: 10, capped: false,
+        });
+        expect(byType['0xpkg::otterfly_1::AdminCap'].count).toBe(1);
+      });
+
+      it('returns [] when struct enumeration fails (graphql error) — capture stays resilient', async () => {
+        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('module query blew up'));
+        const result = await (service as any).captureObjectTypesForPackage('0xpkg');
+        expect(result).toEqual([]);
+      });
+
+      it('returns [] when the package has no key-able structs', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          object: { asMovePackage: { modules: { nodes: [{ name: 'm', datatypes: { nodes: [{ name: 'NoKey', abilities: [] }] } }] } } },
+        });
+        const result = await (service as any).captureObjectTypesForPackage('0xpkg');
+        expect(result).toEqual([]);
+      });
+
+      it('per-type drain failures fill a zero entry rather than aborting the package — partial data is better than no data', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          object: {
+            asMovePackage: {
+              modules: { nodes: [{ name: 'm', datatypes: { nodes: [{ name: 'T1', abilities: ['KEY'] }, { name: 'T2', abilities: ['KEY'] }] } }] },
+            },
+          },
+        });
+        jest.spyOn(service as any, 'updateHoldersForType').mockImplementation(async (_: any, type: any) => {
+          if (String(type).endsWith('::T1')) throw new Error('drain failed');
+          return { count: 7, listedCount: 0, capped: false };
+        });
+        const result = await (service as any).captureObjectTypesForPackage('0xpkg');
+        const byType: any = Object.fromEntries(result.map((r: any) => [r.type, r]));
+        expect(byType['0xpkg::m::T1']).toEqual({ type: '0xpkg::m::T1', count: 0, listedCount: 0, capped: false });
+        expect(byType['0xpkg::m::T2'].count).toBe(7);
       });
     });
 

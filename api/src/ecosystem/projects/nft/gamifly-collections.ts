@@ -36,6 +36,7 @@ export const gamiflyAylab: ProjectDefinition = {
     deployerAddresses: [GAMIFLY_DEPLOYER],
     any: ['aylab_1', 'aylab_2', 'aylab_3'],
   },
+  countTypes: ['aylab_1::Aylab1NFT', 'aylab_2::Aylab2NFT', 'aylab_3::Aylab3NFT'],
   attribution: `
 Matches any package from Gamifly's deployer \`0xfe407119…\` whose module set contains one of \`aylab_1\` / \`aylab_2\` / \`aylab_3\` — three separate packages, one per numbered variant. Each package ships a single module with struct \`Aylab1NFT\` / \`Aylab2NFT\` / \`Aylab3NFT\` (all \`{store, key}\`) plus an \`NFTMinted\` event struct. Sampled NFTs carry \`name: "Aylab 1"\` / \`"Aylab 2"\` / \`"Aylab 3"\`, \`description: "Aylab NFT <N>"\`, and \`url.url: https://storage.googleapis.com/gamifly-nft/aylab_nft_<N>.png\` — the \`gamifly-nft\` GCS bucket is the identity-smoking-gun for the whole deployer (see team attribution).
 
@@ -55,6 +56,7 @@ export const gamiflyIsla: ProjectDefinition = {
     deployerAddresses: [GAMIFLY_DEPLOYER],
     any: ['isla_silver', 'isla_gold'],
   },
+  countTypes: ['isla_silver::IslaSilverNFT', 'isla_gold::IslaGoldNFT'],
   attribution: `
 Matches any package from Gamifly's deployer \`0xfe407119…\` whose module set contains one of \`isla_silver\` / \`isla_gold\` — two separate packages, one per tier. Each ships a single module with struct \`IslaSilverNFT\` / \`IslaGoldNFT\` (\`{store, key}\`) + an \`NFTMinted\` event struct. Sampled NFTs: \`name: "Isla Silver"\` / \`"Isla Gold"\`, art URLs \`…/gamifly-nft/islamabad_silver.png\` and \`…/gamifly-nft/islamabad_gold.png\` — the filename reveals "Isla" = Islamabad (Pakistan's capital), matching Gamifly's Pakistani cricket-fans positioning.
 
@@ -74,6 +76,7 @@ export const gamiflyOtterfly: ProjectDefinition = {
     deployerAddresses: [GAMIFLY_DEPLOYER],
     any: ['otterfly_1', 'otterfly_2', 'otterfly_3'],
   },
+  countTypes: ['otterfly_1::OtterFly1NFT', 'otterfly_2::OtterFly2NFT', 'otterfly_3::OtterFly3NFT'],
   attribution: `
 Matches any package from Gamifly's deployer \`0xfe407119…\` whose module set contains one of \`otterfly_1\` / \`otterfly_2\` / \`otterfly_3\` — three separate packages, one per numbered variant. Each ships a single module with struct \`OtterFly1NFT\` / \`OtterFly2NFT\` / \`OtterFly3NFT\` (\`{store, key}\`) + an \`NFTMinted\` event struct. Sampled NFTs: \`name: "Otterfly <N>"\`, \`description: "Otterfly NFT <N>"\`, art URLs \`…/gamifly-nft/otter_fly_nft_<N>.png\`.
 
@@ -93,6 +96,7 @@ export const gamiflyChamillion: ProjectDefinition = {
     deployerAddresses: [GAMIFLY_DEPLOYER],
     all: ['chamillion'],
   },
+  countTypes: ['chamillion::ChamillionNFT'],
   attribution: `
 Matches the single package from Gamifly's deployer \`0xfe407119…\` whose module is named \`chamillion\`. Ships struct \`ChamillionNFT\` (\`{store, key}\`) + \`NFTMinted\` event. Sampled NFT: \`name: "Chamillion"\`, \`description: "Chamillion NFT"\`, art URL \`…/gamifly-nft/chamillion_nft.png\`.
 

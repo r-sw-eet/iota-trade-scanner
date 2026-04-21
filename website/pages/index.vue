@@ -31,7 +31,7 @@ const hideCollectibles = ref(true)
  */
 type ActivityWindow = 'all' | '24h' | '7d' | '30d'
 const activityWindow = ref<ActivityWindow>('all')
-const ranking = ref<{ items: Array<{ scope: string; key: string; eventsDelta: number; transactionsDelta: number; uniqueSendersDelta: number; packagesDelta: number; eventsCapped: boolean; transactionsCapped: boolean }> } | null>(null)
+const ranking = ref<{ items: Array<{ scope: string; key: string; eventsDelta: number; transactionsDelta: number; uniqueSendersDelta: number; uniqueWalletsReachDelta: number; packagesDelta: number; eventsCapped: boolean; transactionsCapped: boolean }> } | null>(null)
 const rankingLoading = ref(false)
 
 /** Lookup: row key (project slug for attributed, deployer address for unattributed) → eventsDelta. Empty when window=all. */
@@ -67,6 +67,19 @@ const uniqueSendersDeltaByKey = computed<Map<string, number>>(() => {
   for (const item of ranking.value.items) m.set(item.key, item.uniqueSendersDelta)
   return m
 })
+/**
+ * Lookup: row key → `uniqueWalletsReachDelta`. Powers the `Wallets*` column's
+ * windowed delta. Reach = |senders ∪ holders|; falls back to
+ * `uniqueSendersDelta` when the project has no `countTypes` (absent field).
+ */
+const uniqueWalletsReachDeltaByKey = computed<Map<string, number>>(() => {
+  if (!ranking.value) return new Map()
+  const m = new Map<string, number>()
+  for (const item of ranking.value.items) {
+    m.set(item.key, item.uniqueWalletsReachDelta ?? item.uniqueSendersDelta ?? 0)
+  }
+  return m
+})
 
 watch(activityWindow, async (w) => {
   if (w === 'all') { ranking.value = null; return }
@@ -89,9 +102,15 @@ function rowEvents(row: any): number {
   if (activityWindow.value === 'all') return row.events ?? 0
   return eventsDeltaByKey.value.get(rowKey(row)) ?? 0
 }
+/**
+ * Displayed `Wallets*` reach count — `|senders ∪ holders|` deduped at classify
+ * time (`plans/plan_object_count.md`). Falls back to `uniqueSenders` for
+ * projects without `countTypes` declared. Window delta uses
+ * `uniqueWalletsReachDelta`; API always populates both fields.
+ */
 function rowUniqueSenders(row: any): number {
-  if (activityWindow.value === 'all') return row.uniqueSenders ?? 0
-  return uniqueSendersDeltaByKey.value.get(rowKey(row)) ?? 0
+  if (activityWindow.value === 'all') return row.uniqueWalletsReach ?? row.uniqueSenders ?? 0
+  return uniqueWalletsReachDeltaByKey.value.get(rowKey(row)) ?? 0
 }
 /**
  * Displayed TX count — lifetime total on `window=all`, windowed delta otherwise.
@@ -768,7 +787,7 @@ const projectTvlChartOptions = {
                         <th class="text-left pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('category')">Category<span class="ml-1" :class="sortActive(l1Sort, 'category') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'category') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('events')">Events{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'events') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'events') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" title="MoveCall transaction count across the project's packages — includes calls that don't emit events (rescues Salus / TWIN / Gamifly-shape activity)" @click="toggleL1Sort('transactions')">TXs{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'transactions') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'transactions') }}</span></th>
-                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" title="Unique sender addresses across all modules" @click="toggleL1Sort('uniqueSenders')">Wallets{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'uniqueSenders') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'uniqueSenders') }}</span></th>
+                        <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" title="Wallets* — reach indicator combining senders (distinct TX signers) and holders (distinct NFT owners), deduped. For DeFi / trade projects this is essentially senders; for NFT collections it's mostly holders. See detail page for the breakdown." @click="toggleL1Sort('uniqueSenders')">Wallets*{{ activityWindow !== 'all' ? ` (${activityWindow} Δ)` : '' }}<span class="ml-1" :class="sortActive(l1Sort, 'uniqueSenders') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'uniqueSenders') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(l1Sort, 'storageIota') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'storageIota') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('tvl')">TVL<span class="ml-1" :class="sortActive(l1Sort, 'tvl') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'tvl') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('packages')">Packages<span class="ml-1" :class="sortActive(l1Sort, 'packages') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'packages') }}</span></th>
@@ -819,6 +838,9 @@ const projectTvlChartOptions = {
                     Show more ({{ l1Sorted.length - l1Visible }} remaining)
                   </button>
                 </div>
+                <p class="mt-3 text-xs text-[#52525b] italic">
+                  * <strong>Wallets</strong> combines distinct transaction signers and NFT holders into a deduplicated reach number. Meanings vary by project category — DeFi / trade rows are dominated by signers; NFT collections are dominated by holders. See each project's detail page for the breakdown.
+                </p>
               </div>
 
               <!-- L2 EVM Projects -->

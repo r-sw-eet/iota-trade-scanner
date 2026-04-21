@@ -13,6 +13,7 @@ export const iotaPunks: ProjectDefinition = {
   match: {
     deployerAddresses: ['0x8bfa0f4ba8ab9b2849e8fb99bcd4d43b9fdab2cf84f20e5d7a117ad74ab165ea'],
   },
+  countTypes: ['iotapunks::IotaPunk'],
   attribution: `
 On-chain evidence: single package at deployer \`0x8bfa0f4ba8ab9b2849e8fb99bcd4d43b9fdab2cf84f20e5d7a117ad74ab165ea\`, package address \`0x65034c5392fbc59cc5b6d20a4e5980a0dc4cd65fe6c5762d8f5b4fe0c9e2cd31\`, single module \`iotapunks\`. Struct set matches a production PFP collection: \`IOTAPUNKS\` (OTW), \`IotaPunk\` (NFT), \`Collection\`, \`AdminCap\`, \`RelayerCap\`, \`Traits\`, plus the usual mint / config-change events.
 

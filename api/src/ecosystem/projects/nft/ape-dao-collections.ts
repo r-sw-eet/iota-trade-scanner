@@ -30,6 +30,7 @@ export const ogApe: ProjectDefinition = {
     deployerAddresses: [APEDAO_DEPLOYER],
     all: ['ogape_nft'],
   },
+  countTypes: ['ogape_nft::OGApeNFT'],
   attribution: `
 Matches the one package at ApeDAO's deployer \`0x03ce67aa…3419b\` whose module is \`ogape_nft\` — \`0x2b148b762c93eabea3e1feeca52fc32e2cc9dce359054a9d7a7977230b5b75b6\`. Struct set: \`OGApeNFT\` (NFT, \`store, key\`), \`OGAPE_NFT\` (OTW, \`drop\`), \`NFTCollection\` (shared collection object), \`MintCap\` (admin), \`Traits\` (helper, \`store\`), plus \`NFTMinted\` / \`MintingComplete\` events.
 
@@ -51,6 +52,7 @@ export const lilApe: ProjectDefinition = {
     deployerAddresses: [APEDAO_DEPLOYER],
     all: ['lilape_nft'],
   },
+  countTypes: ['lilape_nft::LilApeNFT'],
   attribution: `
 Matches the one package at ApeDAO's deployer \`0x03ce67aa…3419b\` whose module is \`lilape_nft\` — \`0x809a8f9da21b396de77ba4d5a71217404036dd3de067442441b95a3548d5ea7b\`. Struct set mirrors OG Ape's (\`LilApeNFT\`, \`LILAPE_NFT\` OTW, \`NFTCollection\`, \`MintCap\`, \`Traits\`, events).
 

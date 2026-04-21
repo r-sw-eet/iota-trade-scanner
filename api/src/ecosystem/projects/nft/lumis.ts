@@ -15,6 +15,7 @@ export const lumis: ProjectDefinition = {
     deployerAddresses: ['0xddcfad87825d172c5810da3989d687d860142ca007f5d64264068c6bd4267af4'],
     all: ['lumi_nft'],
   },
+  countTypes: ['lumi_nft::LumiNFT'],
   attribution: `
 Matches the single package at MagicSea's deployer \`0xddcfad87825d172c5810da3989d687d860142ca007f5d64264068c6bd4267af4\` whose module is \`lumi_nft\` — \`0x6a1e3e9cac9e24442bdf7f6b53919e72b134f7931cbd850a13451f346d3987a0\`. Struct set mirrors other production PFP collections on Rebased (OG Ape, Lil' Ape, IOTAPUNKS): \`LumiNFT\` (the NFT, \`store, key\`), \`LUMI_NFT\` (OTW witness, \`drop\`), shared \`NFTCollection\` object, \`MintCap\`, \`Traits\` (\`store\`), plus \`MintingComplete\` and \`NFTMinted\` events.
 

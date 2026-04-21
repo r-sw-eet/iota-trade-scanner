@@ -49,6 +49,42 @@ export class ModuleMetrics {
   @Prop({ required: true, default: 0 }) uniqueSenders: number;
 }
 
+/**
+ * Cumulative per-struct-type object counts for a package. One entry per
+ * `key`-able struct declared by any of the package's modules. Capture is
+ * type-agnostic — *every* such struct gets an entry, not just ones a
+ * `ProjectDefinition` has opted in via `countTypes`. This preserves the
+ * classification-free invariant (`plan_tx_count.md` invariant 2) — adding
+ * a new NFT project to the registry tomorrow retroactively populates its
+ * `objectCount` / `uniqueHolders` / `marketplaceListedCount` from the
+ * history already captured.
+ *
+ * Not all entries are user-facing: MintCaps, AdminCaps, Registries, Bag-
+ * typed objects, dynamic_field wrappers will all appear here by construction.
+ * `classifyFromRaw` filters to project-declared `countTypes` at read time,
+ * so the UI never sees the raw dump. See `plans/plan_object_count.md`.
+ */
+@Schema({ _id: false })
+export class ObjectTypeCount {
+  /** Fully-qualified Move struct type — e.g. `0x35fa…::otterfly_1::OtterFly1NFT`. */
+  @Prop({ required: true }) type: string;
+
+  /** Total live objects of this type as of capture. Point-in-time, not cumulative. */
+  @Prop({ required: true, default: 0 }) count: number;
+
+  /**
+   * Subset of `count` whose `owner.__typename === 'Parent'` — objects sitting
+   * inside another object (marketplace listing dynamic_field wrapper, Kiosk-like
+   * wrapper, etc.). Not held by a wallet directly; surfaced on the detail page
+   * as "Listed on marketplace" so the gap between `count` and `uniqueHolders`
+   * is visible rather than silent.
+   */
+  @Prop({ required: true, default: 0 }) listedCount: number;
+
+  /** True if `countObjects` hit its per-scan page cap — `count` is then a floor. */
+  @Prop({ required: true, default: false }) capped: boolean;
+}
+
 @Schema({ _id: false })
 export class FingerprintSampleDoc {
   /** Fully-qualified Move type of the probed object, for provenance. */
@@ -94,6 +130,17 @@ export class PackageFact {
 
   /** True if pagination hit its per-scan page cap — the `transactions` field is a floor. */
   @Prop({ required: true, default: false }) transactionsCapped: boolean;
+
+  /**
+   * Raw count of every `key`-able struct type declared by this package.
+   * One entry per struct. Populated by the Option C capture pass
+   * (`plans/plan_object_count.md`). Classify-time filter against
+   * `ProjectDefinition.fingerprint.countTypes` selects which are summed
+   * into a project's `objectCount` / `uniqueHolders` / `marketplaceListedCount`.
+   * Empty array on old snapshots predating this field — treated as "unknown
+   * for that interval" by the growth endpoint.
+   */
+  @Prop({ type: [ObjectTypeCount], default: [] }) objectTypeCounts: ObjectTypeCount[];
 
   /**
    * Raw fingerprint probe output. Stored rather than matched so classification

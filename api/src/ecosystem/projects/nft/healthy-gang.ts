@@ -16,6 +16,7 @@ export const healthyGang: ProjectDefinition = {
       },
     },
   },
+  countTypes: ['iota_healthy_gang_::Nft'],
   attribution: `
 On-chain evidence: Move package from deployer \`0xcb6956e9f7f2515054241b74a1c0b545b4e813d0e5e15f9bb827870b3d63724c\` containing a module named \`iota_healthy_gang_\` (note the trailing underscore — atypical, suggests a test-deploy module name that stuck) whose \`Nft\` struct is minted with a \`name\` field prefixed \`Healthy Gang #\`.
 

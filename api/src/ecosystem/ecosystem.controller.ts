@@ -37,7 +37,9 @@ export class EcosystemController {
    * Query params:
    *   - `window` — shorthand, one of `24h` | `7d` | `30d` | `all` (default `all`)
    *   - `scope`  — one of `all` | `attributed` | `unattributed` (default `all`)
-   *   - `sortBy` — one of `eventsDelta` | `transactionsDelta` (default `eventsDelta`)
+   *   - `sortBy` — one of `eventsDelta` | `transactionsDelta` |
+   *     `uniqueSendersDelta` | `uniqueHoldersDelta` | `uniqueWalletsReachDelta` |
+   *     `objectCountDelta` | `marketplaceListedCountDelta` (default `eventsDelta`)
    *
    * `window=all` resolves baseline to `1970-01-01` — since no snapshot
    * predates it, deltas collapse to absolute current values and the ranking
@@ -46,6 +48,9 @@ export class EcosystemController {
    * `sortBy=transactionsDelta` surfaces activity that doesn't emit events
    * (Salus-shape object-mint packages, TWIN-shape anchoring) — those rank
    * near the bottom under `eventsDelta` but near the top under TXs.
+   * `sortBy=uniqueHoldersDelta` / `uniqueWalletsReachDelta` surface PFP/NFT
+   * collection growth in wallet-count terms — rescue for projects whose
+   * activity is mint-only with few distinct senders.
    */
   @Get('growth-ranking')
   async growthRanking(
@@ -56,11 +61,20 @@ export class EcosystemController {
     const window = windowRaw ?? 'all';
     const scope = scopeRaw ?? 'all';
     const sortBy = sortByRaw ?? 'eventsDelta';
+    const validSortBy = [
+      'eventsDelta',
+      'transactionsDelta',
+      'uniqueSendersDelta',
+      'uniqueHoldersDelta',
+      'uniqueWalletsReachDelta',
+      'objectCountDelta',
+      'marketplaceListedCountDelta',
+    ];
     if (!['all', 'attributed', 'unattributed'].includes(scope)) {
       throw new BadRequestException('`scope` must be one of: all, attributed, unattributed.');
     }
-    if (!['eventsDelta', 'transactionsDelta'].includes(sortBy)) {
-      throw new BadRequestException('`sortBy` must be one of: eventsDelta, transactionsDelta.');
+    if (!validSortBy.includes(sortBy)) {
+      throw new BadRequestException('`sortBy` must be one of: ' + validSortBy.join(', ') + '.');
     }
 
     // Shorthand → (from, to) resolution. `to` is always "now"; `from` is
@@ -84,7 +98,7 @@ export class EcosystemController {
       from,
       to,
       scope as 'all' | 'attributed' | 'unattributed',
-      sortBy as 'eventsDelta' | 'transactionsDelta',
+      sortBy as any,
     );
     if (!result) {
       throw new NotFoundException('No snapshots cover the requested window.');

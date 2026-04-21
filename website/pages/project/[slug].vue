@@ -143,6 +143,10 @@ function copyToClipboard(text: string) {
         <MetricCard label="Category" :value="project.category" />
         <MetricCard label="Events" :value="`${formatCompact(project.events)}${project.eventsCapped ? '+' : ''}`" :subtitle="project.eventsCapped ? 'Capped at pagination limit' : 'Total on-chain events'" />
         <MetricCard v-if="project.layer === 'L1'" label="TXs" :value="`${formatCompact(project.transactions ?? 0)}${project.transactionsCapped ? '+' : ''}`" :subtitle="project.transactionsCapped ? 'Capped at pagination limit' : 'MoveCall transactions (includes calls that don\'t emit events)'" />
+        <MetricCard v-if="project.layer === 'L1'" label="Senders" :value="formatCompact(project.uniqueSenders ?? 0)" subtitle="Distinct wallets that signed a transaction emitting events from this project's modules" />
+        <MetricCard v-if="project.layer === 'L1' && project.uniqueHolders !== null" label="Holders" :value="formatCompact(project.uniqueHolders)" subtitle="Distinct wallets that currently hold an NFT / object of this project's declared types (marketplace-listed objects excluded — see Listed)" />
+        <MetricCard v-if="project.layer === 'L1' && project.objectCount !== null" label="Items" :value="formatCompact(project.objectCount)" subtitle="Total live Move objects across this project's declared types (NFTs minted, RWA certificates, etc.)" />
+        <MetricCard v-if="project.layer === 'L1' && project.marketplaceListedCount !== null && project.marketplaceListedCount > 0" label="Listed" :value="formatCompact(project.marketplaceListedCount)" subtitle="Objects currently wrapped by a marketplace contract (seller not directly reachable)" />
         <MetricCard v-if="project.layer === 'L1'" label="Storage" :value="`${project.storageIota.toFixed(4)} IOTA`" subtitle="Package storage deposits" />
         <MetricCard v-if="project.tvl" label="TVL" :value="`$${formatCompact(project.tvl)}`" subtitle="From DefiLlama" />
         <MetricCard v-else-if="project.tvlShared" label="TVL" :value="`($${formatCompact(project.tvlShared)})`" :subtitle="`Shared with ${project.tvlSharedWith} — same DefiLlama protocol`" />

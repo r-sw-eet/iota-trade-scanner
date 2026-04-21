@@ -95,4 +95,27 @@ export interface ProjectDefinition {
       >;
     };
   };
+  /**
+   * Declared Move struct types this project wants counted as Items + Holders
+   * (`plans/plan_object_count.md`). Entries are fully-qualified module paths
+   * — `<module>::<StructName>` (e.g. `'otterfly_1::OtterFly1NFT'`). The
+   * scanner enumerates every package in the project's set and resolves the
+   * `<mod>::<T>` form against each package's modules at classify time —
+   * config stays simple across multi-version (same-module, different
+   * package address) deployments.
+   *
+   * Consumed **only at classify time**, not capture. Capture writes the raw
+   * `objectTypeCounts` array for every `key`-able struct of every package;
+   * `classifyFromRaw` filters to the project's `countTypes` and sums
+   * `count` + `listedCount` across matched facts. Adding a new project
+   * tomorrow retroactively picks up history from every past snapshot.
+   *
+   * Absent / empty → project doesn't participate in Items / Holders. On
+   * the detail page those fields render `—`; the overview `Wallets*` reach
+   * column falls back to `uniqueSenders` only (no holder union contribution).
+   * Opt-in is by design — DeFi / infra rows whose activity is TX-shaped
+   * shouldn't surface misleading zero-holder numbers just because the
+   * scanner can theoretically count their `Pool` or `Admin` structs.
+   */
+  countTypes?: string[];
 }

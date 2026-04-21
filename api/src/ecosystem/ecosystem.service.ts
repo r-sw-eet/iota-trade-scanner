@@ -8,10 +8,13 @@ import {
   PackageFact,
   ModuleMetrics,
   FingerprintSampleDoc,
+  ObjectTypeCount,
 } from './schemas/onchain-snapshot.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
 import { ProjectSender } from './schemas/project-sender.schema';
 import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
+import { ProjectHolders } from './schemas/project-holders.schema';
+import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ALL_PROJECTS, ProjectDefinition } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
@@ -78,6 +81,22 @@ export interface UnattributedCluster {
   transactions: number;
   /** True if any package in this cluster had `transactionsCapped` — the `transactions` field is a floor. */
   transactionsCapped: boolean;
+  /**
+   * Shape-parity fallback with `Project` — unattributed clusters have no
+   * `countTypes` by definition (they aren't registered as a project), so
+   * these all pin to zero / senders-fallback and never reflect real
+   * holder/object data. Present so `growthRanking`'s `scope === 'all'`
+   * interleave doesn't have to branch on row kind. Matches the
+   * `transactions: 0` / `transactionsCapped: false` precedent from
+   * `plans/plan_tx_count.md`.
+   */
+  uniqueHolders: number;
+  /** Always 0 on unattributed clusters — see `uniqueHolders` doc. */
+  objectCount: number;
+  /** Always 0 on unattributed clusters — see `uniqueHolders` doc. */
+  marketplaceListedCount: number;
+  /** Equals `uniqueSenders` on unattributed clusters (no holder union to contribute). */
+  uniqueWalletsReach: number;
   /** `key:value` pairs extracted from a sampled Move object (tag, name, url, …). */
   sampleIdentifiers: string[];
   /** Fully-qualified type of the object we probed, for provenance. */
@@ -125,6 +144,36 @@ export interface Project {
   anomalousDeployers: string[];
   /** Unique sender addresses seen across this project's modules since first scan. */
   uniqueSenders: number;
+  /**
+   * Distinct owner wallets holding Move objects of the project's declared
+   * `countTypes`, summed across its packages. `null` when `countTypes` is
+   * absent/empty on the ProjectDefinition — detail page renders `—`.
+   * Parent-owned objects (marketplace listings) are **not** counted here;
+   * their count lives on `marketplaceListedCount` separately.
+   */
+  uniqueHolders: number | null;
+  /**
+   * Total live Move objects of the project's declared `countTypes`, summed
+   * across its packages. `null` when `countTypes` is absent/empty.
+   * Includes both wallet-held and marketplace-listed objects.
+   */
+  objectCount: number | null;
+  /**
+   * Count of the project's objects currently owned by another object
+   * (marketplace listings via dynamic_field wrappers, Kiosk-like wrappers,
+   * etc.). Surfaced on the detail page so the gap between `objectCount`
+   * and `uniqueHolders` is visible. `null` when `countTypes` absent.
+   */
+  marketplaceListedCount: number | null;
+  /**
+   * Deduped union of this project's senders ∪ holders — the "reach" metric.
+   * Computed at classify time via `$unionWith` across `project_sender_entries`
+   * (by project's (pkg, module) pairs) and `project_holder_entries` (by
+   * project's (pkg, type) pairs), then `$group { _id: '$address' } + $count`.
+   * For projects without `countTypes`: falls through to `uniqueSenders`.
+   * This is what the dashboard overview's `Wallets*` column displays.
+   */
+  uniqueWalletsReach: number;
   /** Prose explaining how this project's display name was derived (shown only on the details page). */
   attribution: string | null;
   /** ISO-8601 date the project was first added to the registry (from `ProjectDefinition.addedAt`). `null` for defs that predate the field or for DefiLlama-synthesized L2 rows. */
@@ -194,6 +243,8 @@ export class EcosystemService implements OnModuleInit {
     @InjectModel(ProjectSenders.name) private senderModel: Model<ProjectSenders>,
     @InjectModel(ProjectSender.name) private senderDocModel: Model<ProjectSender>,
     @InjectModel(ProjectTxCounts.name) private txCountModel: Model<ProjectTxCounts>,
+    @InjectModel(ProjectHolders.name) private holdersStateModel: Model<ProjectHolders>,
+    @InjectModel(ProjectHolderEntry.name) private holderEntryModel: Model<ProjectHolderEntry>,
     private alerts: AlertsService,
   ) {}
 
@@ -255,12 +306,19 @@ export class EcosystemService implements OnModuleInit {
     from: Date,
     to: Date,
     scope: 'all' | 'attributed' | 'unattributed' = 'all',
-    sortBy: 'eventsDelta' | 'transactionsDelta' = 'eventsDelta',
+    sortBy:
+      | 'eventsDelta'
+      | 'transactionsDelta'
+      | 'uniqueSendersDelta'
+      | 'uniqueHoldersDelta'
+      | 'uniqueWalletsReachDelta'
+      | 'objectCountDelta'
+      | 'marketplaceListedCountDelta' = 'eventsDelta',
   ): Promise<{
     window: { from: Date; to: Date };
     baseline: { snapshotId: string; createdAt: Date } | null;
     latest: { snapshotId: string; createdAt: Date };
-    sortBy: 'eventsDelta' | 'transactionsDelta';
+    sortBy: string;
     items: Array<{
       scope: 'attributed' | 'unattributed';
       key: string;
@@ -275,6 +333,18 @@ export class EcosystemService implements OnModuleInit {
       packagesDelta: number;
       uniqueSenders: number;
       uniqueSendersDelta: number;
+      /** Distinct wallets holding project objects. `null` on attributed rows without `countTypes`; always `0` on unattributed. */
+      uniqueHolders: number | null;
+      uniqueHoldersDelta: number;
+      /** Total live objects of project `countTypes`. Null semantics mirror `uniqueHolders`. */
+      objectCount: number | null;
+      objectCountDelta: number;
+      /** Subset of `objectCount` sitting inside marketplace listing wrappers (Parent-owned). Null semantics mirror. */
+      marketplaceListedCount: number | null;
+      marketplaceListedCountDelta: number;
+      /** Deduped senders ∪ holders. Always populated (falls back to uniqueSenders when no countTypes). This is what the overview `Wallets*` column shows. */
+      uniqueWalletsReach: number;
+      uniqueWalletsReachDelta: number;
       team: Team | null;
       logo: string | null;
       category: string | null;
@@ -324,6 +394,14 @@ export class EcosystemService implements OnModuleInit {
           packagesDelta: p.packages - (prev?.packages ?? 0),
           uniqueSenders: p.uniqueSenders,
           uniqueSendersDelta: p.uniqueSenders - (prev?.uniqueSenders ?? 0),
+          uniqueHolders: p.uniqueHolders ?? null,
+          uniqueHoldersDelta: (p.uniqueHolders ?? 0) - (prev?.uniqueHolders ?? 0),
+          objectCount: p.objectCount ?? null,
+          objectCountDelta: (p.objectCount ?? 0) - (prev?.objectCount ?? 0),
+          marketplaceListedCount: p.marketplaceListedCount ?? null,
+          marketplaceListedCountDelta: (p.marketplaceListedCount ?? 0) - (prev?.marketplaceListedCount ?? 0),
+          uniqueWalletsReach: p.uniqueWalletsReach ?? p.uniqueSenders,
+          uniqueWalletsReachDelta: (p.uniqueWalletsReach ?? p.uniqueSenders) - (prev?.uniqueWalletsReach ?? prev?.uniqueSenders ?? 0),
           team: p.team,
           logo: p.logo,
           category: p.category,
@@ -349,6 +427,15 @@ export class EcosystemService implements OnModuleInit {
           packagesDelta: u.packages - (prev?.packages ?? 0),
           uniqueSenders: u.uniqueSenders,
           uniqueSendersDelta: u.uniqueSenders - (prev?.uniqueSenders ?? 0),
+          // Unattributed shape-parity: literal fallbacks (see UnattributedCluster doc).
+          uniqueHolders: u.uniqueHolders ?? 0,
+          uniqueHoldersDelta: (u.uniqueHolders ?? 0) - (prev?.uniqueHolders ?? 0),
+          objectCount: u.objectCount ?? 0,
+          objectCountDelta: (u.objectCount ?? 0) - (prev?.objectCount ?? 0),
+          marketplaceListedCount: u.marketplaceListedCount ?? 0,
+          marketplaceListedCountDelta: (u.marketplaceListedCount ?? 0) - (prev?.marketplaceListedCount ?? 0),
+          uniqueWalletsReach: u.uniqueWalletsReach ?? u.uniqueSenders,
+          uniqueWalletsReachDelta: (u.uniqueWalletsReach ?? u.uniqueSenders) - (prev?.uniqueWalletsReach ?? prev?.uniqueSenders ?? 0),
           team: null,
           logo: null,
           category: null,
@@ -1046,6 +1133,313 @@ export class EcosystemService implements OnModuleInit {
     return { totalPackages: addresses.length, totalTxs, cappedPackages };
   }
 
+  // ======================= Holders / Object counts =======================
+  // Paginates `objects(filter: { type: <pkg>::<mod>::<T> })`, buckets each
+  // node's owner into AddressOwner → holder, Parent → listed, Shared /
+  // Immutable / burn → ignored. Cursor-model per `(packageAddress, type)`
+  // mirrors the senders/TX patterns. Writes per-holder docs into
+  // `project_holder_entries` (no 16 MB BSON ceiling — see commit c49a5cf).
+  //
+  // Capture is classification-free: every `key`-able struct type gets a
+  // cursor record regardless of whether any `ProjectDefinition.countTypes`
+  // claims it. Classify filters raw → user-facing at read time (Option C,
+  // `plans/plan_object_count.md`).
+
+  /**
+   * Single forward-page pass for a `(packageAddress, type)` pair. Collects
+   * new AddressOwner wallets into `insertMany` (dup-key silenced by the
+   * unique compound index — same pattern as `pageForwardSenders`). Counts
+   * Parent-owned nodes as `listed` (tracked on the cursor record so we can
+   * compute the snapshot's `listedCount` without requerying).
+   *
+   * Returns `{ scanned, listed, reachedEnd }`. `reachedEnd: true` means
+   * `hasNextPage: false` — caller treats `capped: false`. Early break on
+   * GraphQL error (swallowed, like the other `pageForward*` writers).
+   */
+  private async pageForwardHolders(
+    record: ProjectHolders,
+    maxPages: number,
+  ): Promise<{ scanned: number; listed: number; reachedEnd: boolean }> {
+    let cursor = record.cursor;
+    let scanned = 0;
+    let listed = 0;
+    let reachedEnd = false;
+    const newAddresses = new Set<string>();
+
+    for (let i = 0; i < maxPages; i++) {
+      const after = cursor ? `, after: "${cursor}"` : '';
+      try {
+        const data: any = await this.graphql(`{
+          objects(filter: { type: "${record.type}" }, first: 50${after}) {
+            nodes {
+              owner {
+                __typename
+                ... on AddressOwner { owner { address } }
+                ... on Parent { parent { address } }
+                ... on Shared { initialSharedVersion }
+                ... on Immutable { __typename }
+              }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }`);
+        const nodes = data.objects?.nodes ?? [];
+        scanned += nodes.length;
+        for (const n of nodes) {
+          const owner = n?.owner;
+          if (!owner) continue;
+          if (owner.__typename === 'AddressOwner') {
+            const addr = owner.owner?.address?.toLowerCase();
+            if (!addr) continue;
+            // Skip burn: all-zero address. 66 chars = "0x" + 64 zeros.
+            if (/^0x0+$/.test(addr)) continue;
+            newAddresses.add(addr);
+          } else if (owner.__typename === 'Parent') {
+            listed += 1;
+          }
+          // Shared / Immutable: ignored (not a wallet).
+        }
+        cursor = data.objects?.pageInfo?.endCursor ?? cursor;
+        if (!data.objects?.pageInfo?.hasNextPage) {
+          reachedEnd = true;
+          break;
+        }
+      } catch {
+        break;
+      }
+    }
+
+    if (newAddresses.size > 0) {
+      const docs = Array.from(newAddresses).map((address) => ({
+        packageAddress: record.packageAddress,
+        type: record.type,
+        address,
+      }));
+      try {
+        await this.holderEntryModel.insertMany(docs, { ordered: false });
+      } catch (e: any) {
+        const allDupKey =
+          e?.code === 11000 ||
+          (Array.isArray(e?.writeErrors) && e.writeErrors.every((we: any) => (we?.code ?? we?.err?.code) === 11000));
+        if (!allDupKey) throw e;
+      }
+    }
+
+    if (scanned > 0) {
+      record.cursor = cursor;
+      record.nodesScanned += scanned;
+      record.listedCount += listed;
+      await record.save();
+    }
+    return { scanned, listed, reachedEnd };
+  }
+
+  /**
+   * Incrementally scan a `(packageAddress, type)` for new holders. First
+   * sight anchors cursor at end-of-history via `last: 1` (so captures stay
+   * cheap; full history is drained by `backfill:holders` CLI). Subsequent
+   * scans page forward from the saved cursor. Returns `{ count, listedCount,
+   * capped }` — `count` is the current total holder-address count (distinct
+   * addresses in `project_holder_entries` for this pair), `listedCount` is
+   * the cumulative Parent-owned observations tracked on the cursor record.
+   */
+  private async updateHoldersForType(
+    packageAddress: string,
+    type: string,
+  ): Promise<{ count: number; listedCount: number; capped: boolean }> {
+    let record = await this.holdersStateModel.findOne({ packageAddress, type });
+
+    if (!record) {
+      try {
+        const latest: any = await this.graphql(`{
+          objects(filter: { type: "${type}" }, last: 1) {
+            pageInfo { endCursor }
+          }
+        }`);
+        await this.holdersStateModel.create({
+          packageAddress,
+          type,
+          cursor: latest.objects?.pageInfo?.endCursor ?? null,
+          nodesScanned: 0,
+          listedCount: 0,
+        });
+      } catch {
+        // First-sight anchor failed; leave uncreated so next scan retries.
+      }
+      return { count: 0, listedCount: 0, capped: false };
+    }
+
+    const { reachedEnd } = await this.pageForwardHolders(record, 100);
+    const count = await this.holderEntryModel.countDocuments({ packageAddress, type });
+    return { count, listedCount: record.listedCount, capped: !reachedEnd };
+  }
+
+  /**
+   * Drain all historical objects for a `(packageAddress, type)` starting
+   * from cursor=null. One-shot CLI path; resumable via saved cursor.
+   * Existing records reset (cursor=null, nodesScanned=0, listedCount=0)
+   * before draining — otherwise the end-of-history anchor set by the live
+   * cron would make this a no-op. Mirrors `backfillTxCountsForPackage`.
+   */
+  async backfillHoldersForType(
+    packageAddress: string,
+    type: string,
+  ): Promise<{ count: number; listedCount: number; capped: boolean }> {
+    let record = await this.holdersStateModel.findOne({ packageAddress, type });
+
+    if (!record) {
+      record = await this.holdersStateModel.create({
+        packageAddress,
+        type,
+        cursor: null,
+        nodesScanned: 0,
+        listedCount: 0,
+      });
+    } else {
+      record.cursor = null;
+      record.nodesScanned = 0;
+      record.listedCount = 0;
+      await record.save();
+    }
+
+    let safety = 0;
+    let reachedEnd = false;
+    while (safety < 1000) {
+      const result = await this.pageForwardHolders(record, 100);
+      if (result.reachedEnd) {
+        reachedEnd = true;
+        break;
+      }
+      if (result.scanned === 0) break;
+      safety += 1;
+    }
+
+    const count = await this.holderEntryModel.countDocuments({ packageAddress, type });
+    return { count, listedCount: record.listedCount, capped: !reachedEnd };
+  }
+
+  /**
+   * Parallel full-fleet holders backfill. Enumerates `(package, type)`
+   * pairs from the latest snapshot's `packages[].objectTypeCounts[].type` —
+   * the type set already populated by a prior capture. Classification-free:
+   * drains every type of every package, regardless of whether a
+   * `ProjectDefinition.countTypes` claims it. Default `concurrency=20`
+   * mirrors `backfillAllTxCounts` (validated against mainnet, see
+   * `plans/limits.md`).
+   */
+  async backfillAllHolders(
+    onProgress?: (info: { packageAddress: string; type: string; count: number; listedCount: number; capped: boolean }) => void,
+    concurrency: number = 20,
+  ): Promise<{ totalPairs: number; totalHolders: number; cappedPairs: number }> {
+    const snapshot = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    if (!snapshot) {
+      throw new Error('No ecosystem snapshot exists yet — run a scan first.');
+    }
+
+    const pairs: Array<{ packageAddress: string; type: string }> = [];
+    for (const p of snapshot.packages) {
+      for (const entry of p.objectTypeCounts ?? []) {
+        pairs.push({ packageAddress: p.address, type: entry.type });
+      }
+    }
+
+    let totalHolders = 0;
+    let cappedPairs = 0;
+    let cursor = 0;
+
+    const worker = async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= pairs.length) return;
+        const { packageAddress, type } = pairs[i];
+        try {
+          const { count, listedCount, capped } = await this.backfillHoldersForType(packageAddress, type);
+          totalHolders += count;
+          if (capped) cappedPairs += 1;
+          onProgress?.({ packageAddress, type, count, listedCount, capped });
+        } catch (e) {
+          this.logger.warn(`backfillHolders: ${packageAddress}::${type} failed — ${(e as Error).message}`);
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.max(1, concurrency) }, () => worker()));
+
+    return { totalPairs: pairs.length, totalHolders, cappedPairs };
+  }
+
+  /**
+   * Enumerates every `key`-able struct type declared by this package, then
+   * calls `updateHoldersForType` on each with inner concurrency=3 (types
+   * are independent — each writes to its own `(pkg, type)` cursor + a
+   * disjoint subset of `project_holder_entries`). Mitigates the
+   * serial-inner-loop wall-clock cost (see `plans/plan_object_count.md
+   * § Step 3.5`). Returns the array of `ObjectTypeCount` entries to
+   * persist on `PackageFact`.
+   *
+   * Uses `MovePackage.modules.nodes.datatypes.nodes { name abilities }`
+   * to enumerate. Skips structs without the `key` ability — they can't be
+   * on-chain objects. Failure to enumerate (GraphQL error) logs + returns
+   * `[]`, keeping the broader capture pass resilient.
+   */
+  private async captureObjectTypesForPackage(
+    packageAddress: string,
+    concurrency: number = 3,
+  ): Promise<ObjectTypeCount[]> {
+    let keyableTypes: string[];
+    try {
+      const data: any = await this.graphql(`{
+        object(address: "${packageAddress}") {
+          asMovePackage {
+            modules(first: 50) {
+              nodes {
+                name
+                datatypes(first: 50) {
+                  nodes { name abilities }
+                }
+              }
+            }
+          }
+        }
+      }`);
+      const mods = data?.object?.asMovePackage?.modules?.nodes ?? [];
+      keyableTypes = [];
+      for (const mod of mods) {
+        const dts = mod?.datatypes?.nodes ?? [];
+        for (const dt of dts) {
+          const abilities: string[] = (dt?.abilities ?? []).map((a: string) => String(a).toUpperCase());
+          if (!abilities.includes('KEY')) continue;
+          keyableTypes.push(`${packageAddress}::${mod.name}::${dt.name}`);
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`captureObjectTypes: ${packageAddress} struct enumeration failed — ${(e as Error).message}`);
+      return [];
+    }
+
+    if (keyableTypes.length === 0) return [];
+
+    const results: ObjectTypeCount[] = [];
+    let idx = 0;
+    const worker = async () => {
+      while (true) {
+        const i = idx++;
+        if (i >= keyableTypes.length) return;
+        const type = keyableTypes[i];
+        try {
+          const { count, listedCount, capped } = await this.updateHoldersForType(packageAddress, type);
+          results.push({ type, count, listedCount, capped });
+        } catch (e) {
+          this.logger.warn(`captureObjectTypes: ${type} drain failed — ${(e as Error).message}`);
+          results.push({ type, count: 0, listedCount: 0, capped: false });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, keyableTypes.length)) }, () => worker()));
+
+    return results;
+  }
+
   /**
    * Classify a package against `ALL_PROJECTS` by AND-combining every
    * specified criterion in the first def that passes. Priority is the
@@ -1386,15 +1780,24 @@ export class EcosystemService implements OnModuleInit {
       const { total: transactions, capped: transactionsCapped } =
         await this.updateTxCountForPackage(pkg.address);
 
+      // Per-package object counts + holder cursor advance. Option C: every
+      // `key`-able struct type gets captured, not just project-configured
+      // ones. Inner-loop type-level concurrency=3 keeps this off the 2h
+      // cron's critical path. Classify filters to project `countTypes` at
+      // read time. See `plans/plan_object_count.md § Option C + Step 3.5`.
+      const objectTypeCounts = await this.captureObjectTypesForPackage(pkg.address);
+      const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.count, 0);
+
       packages.push({
         address: pkg.address,
         deployer,
         storageRebateNanos,
         modules,
         moduleMetrics,
-        objectCount: 0, // reserved for future — see schema doc-comment
+        objectCount: summedObjectCount,
         transactions,
         transactionsCapped,
+        objectTypeCounts,
         fingerprint,
       } as PackageFact);
     }
@@ -1565,6 +1968,70 @@ export class EcosystemService implements OnModuleInit {
         ]);
         uniqueSendersCount = agg[0]?.count ?? 0;
       }
+
+      // Object + holder metrics. Scope: project-declared `countTypes`. The
+      // capture pass writes every `key`-able struct to `objectTypeCounts`
+      // (Option C — classification-free), so filtering here is safe regardless
+      // of when the project def was added. A `countTypes` entry is a module-
+      // local path like `'otterfly_1::OtterFly1NFT'`; we match it against
+      // each fact's fully-qualified types via suffix compare (since the
+      // `<pkg>::` prefix varies between upgraded package versions).
+      //
+      // `uniqueHolders` / `uniqueWalletsReach` pull from `project_holder_entries`
+      // via a single $group+$count aggregation per project. `uniqueWalletsReach`
+      // additionally `$unionWith`es `project_sender_entries` to produce the
+      // deduped senders ∪ holders reach number — see `plans/plan_object_count.md`.
+      const countTypes = def.countTypes ?? [];
+      let objectCount: number | null = null;
+      let marketplaceListedCount: number | null = null;
+      let uniqueHolders: number | null = null;
+      const typePairs: Array<{ packageAddress: string; type: string }> = [];
+      if (countTypes.length > 0) {
+        objectCount = 0;
+        marketplaceListedCount = 0;
+        for (const pkg of facts) {
+          for (const entry of (pkg.objectTypeCounts ?? [])) {
+            if (countTypes.some((ct) => entry.type.endsWith(`::${ct}`))) {
+              objectCount += entry.count;
+              marketplaceListedCount += entry.listedCount;
+              typePairs.push({ packageAddress: pkg.address, type: entry.type });
+            }
+          }
+        }
+        if (typePairs.length > 0) {
+          const agg = await this.holderEntryModel.aggregate([
+            { $match: { $or: typePairs } },
+            { $group: { _id: '$address' } },
+            { $count: 'count' },
+          ]);
+          uniqueHolders = agg[0]?.count ?? 0;
+        } else {
+          uniqueHolders = 0;
+        }
+      }
+
+      // Reach = |senders ∪ holders| deduped. Scalar return, no address list
+      // over the wire. When the project has no `countTypes` (no holder
+      // contribution), this collapses to `uniqueSendersCount`.
+      let uniqueWalletsReach = uniqueSendersCount;
+      if (typePairs.length > 0 && pairs.length > 0) {
+        const agg = await this.senderDocModel.aggregate([
+          { $match: { $or: pairs } },
+          {
+            $unionWith: {
+              coll: this.holderEntryModel.collection.name,
+              pipeline: [{ $match: { $or: typePairs } }],
+            },
+          },
+          { $group: { _id: '$address' } },
+          { $count: 'count' },
+        ]);
+        uniqueWalletsReach = agg[0]?.count ?? 0;
+      } else if (typePairs.length > 0) {
+        // Edge case: project has countTypes but no module activity (all-zero senders). Reach = holders only.
+        uniqueWalletsReach = uniqueHolders ?? 0;
+      }
+
       // The `modules` snapshot field stays as the latest package's module
       // set — that's the current API surface, not a union across versions.
       const mods = latestMods;
@@ -1614,6 +2081,10 @@ export class EcosystemService implements OnModuleInit {
         detectedDeployers,
         anomalousDeployers,
         uniqueSenders: uniqueSendersCount,
+        uniqueHolders,
+        objectCount,
+        marketplaceListedCount,
+        uniqueWalletsReach,
         attribution: def.attribution ?? null,
         addedAt: def.addedAt ?? null,
       });
@@ -1734,6 +2205,10 @@ export class EcosystemService implements OnModuleInit {
           detectedDeployers: [],
           anomalousDeployers: [],
           uniqueSenders: 0,
+          uniqueHolders: null,
+          objectCount: null,
+          marketplaceListedCount: null,
+          uniqueWalletsReach: 0,
           attribution: null,
           addedAt: null,
         });
@@ -1814,6 +2289,14 @@ export class EcosystemService implements OnModuleInit {
         uniqueSenders,
         transactions,
         transactionsCapped,
+        // Shape-parity with `Project` (see UnattributedCluster interface doc).
+        // Unattributed clusters have no `countTypes` by definition, so these
+        // always pin to zero / senders-fallback. `growthRanking` can
+        // interleave attributed + unattributed rows without branching on kind.
+        uniqueHolders: 0,
+        objectCount: 0,
+        marketplaceListedCount: 0,
+        uniqueWalletsReach: uniqueSenders,
         sampleIdentifiers: identifiers,
         sampledObjectType: objectType,
       });
