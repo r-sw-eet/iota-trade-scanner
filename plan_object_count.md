@@ -31,16 +31,42 @@ First-pass opt-in: Gamifly family, Healthy Gang, Iota Punks, Lumis, Ape DAO, stu
 - **Exclusions** — burn address (`0x0…0`), `Shared` owners (not a wallet), `Immutable` owners (rare, exclude for consistency).
 - **Multi-type packages** (Carbon Credits: manager + token + minter_pass_nft + certificate_nft; TLIP: multiple modules) — `countTypes` lists only user-facing struct types. MintCap, admin caps, registries excluded.
 
-## Pre-work — one-off GraphQL probe
+## Pre-work — GraphQL probe (resolved 2026-04-21)
 
-Before any code, resolve these with a single session of ad-hoc queries against `graphql.mainnet.iota.cafe`:
+Session of ad-hoc queries against `graphql.mainnet.iota.cafe`:
 
-1. **`ObjectConnection.totalCount`** — does the schema expose it? If yes, objectCount is 1 scalar query per type/package. If no, derive from `nodes.length` during the holders pagination (free byproduct).
-2. **Owner-field shape** — schema for `owner { ... on AddressOwner { owner } ... on ObjectOwner { owner } ... on Shared { initialSharedVersion } ... on Immutable { ... } }`. Confirm fragment names.
-3. **Kiosk detection** — is the indicator `owner.__typename === 'ObjectOwner'` + the owned object's `type === '0x2::kiosk::Kiosk'`? Or does IOTA use a different kiosk primitive? Same question for the `IotaObjectOwner` case on IOTA-specific marketplaces.
-4. **Burn convention** — which address(es) does IOTA mainnet use for burns? `0x0…0` is one; check for ecosystem conventions.
+1. **`ObjectConnection.totalCount`** — **does not exist.** Fields are exactly `{ pageInfo, edges, nodes }`. Same shape as `TransactionBlockConnection`. objectCount must come from pagination — either `nodes.length` summed page-by-page or a dedicated `countObjects(type)` helper mirroring `countEvents` (10k-page × 50 safety cap + `capped` flag).
 
-Findings get committed to this file before any schema changes land.
+2. **Owner union shape** — the union is called **`ObjectOwner`** (confusingly — that's the top-level union, not a member type). Members are:
+   - `AddressOwner { owner: Owner }` → `owner.address` gives the wallet (type `IotaAddress`). Direct case.
+   - `Parent { parent: Object }` → wrapped/owned by another object. Parent's `address`, `owner` (recursive `ObjectOwner`), and `asMoveObject.contents.type.repr` (for type-based disambiguation) are all reachable.
+   - `Shared { initialSharedVersion }` → not a wallet. Exclude.
+   - `Immutable` → not a wallet. Exclude.
+
+3. **Kiosk detection — there IS no first-class Kiosk in IOTA's schema.** Grep for `Kiosk` in `__schema.types` returns nothing. The actual wrapper pattern observed on-chain is **marketplace listings via `dynamic_field::Field<dynamic_object_field::Wrapper<NftDfKey>, ID>`** pointing into a marketplace contract like `0xc03304c6…::listings`. Discovered by sampling IotaPunks NFTs — **35/50 (70%) of IotaPunks objects are Parent-owned by a dynamic-field wrapper tied to this listings contract**, not by any wallet. Otterfly's game-NFT sample by contrast was 50/50 AddressOwner (no marketplace listings). So Parent-owned frequency is **highly category-dependent** — PFP collections see heavy marketplace activity, gaming NFTs stay with players.
+
+4. **Parent unwrap strategy** — the real seller of a marketplace-listed NFT lives *inside* the dynamic_field's Wrapper (one more lookup) or in a sibling listing object. **There is no clean one-hop Parent → wallet traversal** for the marketplace case. Walking `Parent.parent.owner` up the chain lands on the marketplace contract's shared admin, which is not the seller.
+
+5. **Burn convention** — IOTA's zero-address `0x0…0` (32 zero bytes) is the conventional burn sink. Not explicitly probed but consistent with Sui heritage; confirm empirically during backfill when we see owner addresses.
+
+6. **Latency** — 50-node page with owner-union breakdown: **~230 ms** (3-run average, Otterfly 297k-object type). Consistent with TX-count probe findings.
+
+### Implications for the implementation plan
+
+- **`countObjects` helper** must paginate (no totalCount). 10k-page × 50 safety cap.
+- **`uniqueHolders` unwrap policy**: simple pragmatic rule. For each object node:
+  - `owner.__typename === 'AddressOwner'` → count `owner.owner.address`.
+  - `owner.__typename === 'Parent'` → **skip** (undercount of marketplace-listed NFTs is known and accepted, see below).
+  - `Shared` / `Immutable` → skip.
+  - `address === 0x0…0` → skip (burn).
+- **Why skipping Parent is acceptable**: a wallet that listed an NFT on a marketplace has already generated *sender* events for the listing transaction (and earlier for the mint/buy). Those senders are captured in `project_sender_entries` — the reach column's `$unionWith` picks them up on the sender side. The marketplace-listed NFT's current holder stays uncountable via holders, but the *wallet* who listed it is still reachable via senders. For reach semantics this is a wash: same wallet, different collection.
+- **Separately report** a `marketplaceListedCount` per project on the detail page (count of `Parent`-owned nodes) so the UI can render "184 000 holders + 45 000 marketplace-listed" instead of hiding the gap. Future work could integrate per-marketplace adapters (resolve listings contract's internal seller field) to convert these into real holders.
+- **No first-class Kiosk on IOTA** simplifies detection (no special-case) and complicates semantics (marketplace contracts each have their own wrapping pattern). The plan's earlier "Kiosk unwrap" framing is retired — replaced with "Parent skip + marketplace counter".
+
+### Package internals confirmed
+
+- `MovePackage.modules.nodes.datatypes.nodes.name` — the query path to enumerate struct names per module. `datatypes`, not `structs`. Important for `countTypes` resolution.
+- Confirmed otterfly_1's real struct is `OtterFly1NFT` (camelCase, not `Otterfly1NFT`). `countTypes` entries must match exactly.
 
 ## Steps (one feature, incremental commits)
 
