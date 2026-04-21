@@ -54,14 +54,17 @@ Session of ad-hoc queries against `graphql.mainnet.iota.cafe`:
 ### Implications for the implementation plan
 
 - **`countObjects` helper** must paginate (no totalCount). 10k-page × 50 safety cap.
-- **`uniqueHolders` unwrap policy**: simple pragmatic rule. For each object node:
-  - `owner.__typename === 'AddressOwner'` → count `owner.owner.address`.
-  - `owner.__typename === 'Parent'` → **skip** (undercount of marketplace-listed NFTs is known and accepted, see below).
-  - `Shared` / `Immutable` → skip.
-  - `address === 0x0…0` → skip (burn).
-- **Why skipping Parent is acceptable**: a wallet that listed an NFT on a marketplace has already generated *sender* events for the listing transaction (and earlier for the mint/buy). Those senders are captured in `project_sender_entries` — the reach column's `$unionWith` picks them up on the sender side. The marketplace-listed NFT's current holder stays uncountable via holders, but the *wallet* who listed it is still reachable via senders. For reach semantics this is a wash: same wallet, different collection.
-- **Separately report** a `marketplaceListedCount` per project on the detail page (count of `Parent`-owned nodes) so the UI can render "184 000 holders + 45 000 marketplace-listed" instead of hiding the gap. Future work could integrate per-marketplace adapters (resolve listings contract's internal seller field) to convert these into real holders.
-- **No first-class Kiosk on IOTA** simplifies detection (no special-case) and complicates semantics (marketplace contracts each have their own wrapping pattern). The plan's earlier "Kiosk unwrap" framing is retired — replaced with "Parent skip + marketplace counter".
+- **Per-node bucketing** — classify each object into exactly one of three buckets by inspecting `owner.__typename`:
+  - `AddressOwner` → holder. Record `owner.owner.address` into `project_holder_entries`.
+  - `Parent` → listed. Increment `marketplaceListedCount` for this (pkg, type). Do not record an address.
+  - `Shared` / `Immutable` / `0x0…0` → ignore (not held in any meaningful sense).
+- **Three numbers per project, each an exact count of a named thing:**
+  - `uniqueHolders` = distinct wallet addresses in `project_holder_entries` for the project's (pkg, type) pairs.
+  - `marketplaceListedCount` = count of objects currently Parent-owned (i.e. sitting inside a marketplace listing contract) across those same (pkg, type) pairs.
+  - `objectCount` = total objects = holders' object share + listed + (ignored shared/burn). Derived from pagination node count.
+- **Known gap, reported honestly**: we do not attempt to resolve the distinct human wallets behind `Parent`-owned listings. A marketplace contract wraps N NFTs in dynamic-field listings; the number of distinct sellers behind those N listings is anywhere from 1 to N and requires per-marketplace integration to recover. Rather than guess, we surface `marketplaceListedCount` on the detail page alongside `uniqueHolders`. UI wording: *"Holders: 27 · Listed on marketplace: 62"*. Future per-marketplace adapters (e.g. reading `0xc03304c6…::listings`'s seller field) can close this gap if/when it matters.
+- **Reach column stays honest** even with the Parent skip: a wallet that listed an NFT signed the listing transaction, so it's already in `project_sender_entries`. The `$unionWith` in the reach aggregation picks it up from the sender side. Holders and Senders are disjoint measurements (of custody and signing, respectively) and the dedup union is the correct "humans touching this project" count.
+- **No first-class Kiosk on IOTA** simplifies detection — no special-case. Parent covers the entire "object-owned-by-object" space (Kiosks, marketplace listings, dynamic-field wrappers all share the same union member). The plan's earlier "Kiosk unwrap" framing is retired — replaced with the three-bucket partition above.
 
 ### Package internals confirmed
 
@@ -78,13 +81,12 @@ Session of ad-hoc queries against `graphql.mainnet.iota.cafe`:
 2. **Extend `ProjectDefinition`** — `projects/project.interface.ts`. Add `fingerprint.countTypes?: string[]`.
 
 3. **Writer — `pageForwardHolders(record, pkgAddr, typeStr, maxPages)`**
-   - Mirrors `pageForwardSenders` shape exactly: paginate forward from cursor, collect addresses in a Set, `insertMany({ordered: false})` with dup-key silencing on (pkg, type, address) unique index.
-   - Per node: resolve `owner` to a single address string.
-     - `AddressOwner` → `owner.owner`.
-     - `ObjectOwner { owner: <id> }` → fetch that object's type + top-level owner; if the wrapping object is a Kiosk, use its owner. Cache per kiosk-id within the scan to dedupe requests.
-     - `Shared` / `Immutable` → skip.
-     - `0x0…0` → skip (burn).
-   - Update `record.nodesScanned += scanned`, advance cursor, save.
+   - Mirrors `pageForwardSenders` shape: paginate forward from cursor, `insertMany({ordered: false})` with dup-key silencing on the (pkg, type, address) unique index.
+   - Per node, bucket by `owner.__typename`:
+     - `AddressOwner` → collect `owner.owner.address` for the insertMany batch.
+     - `Parent` → increment a local `listed` counter; no address recorded.
+     - `Shared` / `Immutable` / burn → ignored.
+   - Update `record.nodesScanned += scanned`, `record.listedCount += listed`, advance cursor, save.
 
 4. **Capture hookup** — `fetchFull` inner per-package loop. For each module's declared countType (union the project's `countTypes` against which modules own types of that name — need to resolve `<mod>::<T>` to a concrete `<pkg>::<mod>::<T>` per package version):
    - Count objects. If `totalCount` works: one scalar query. Else: derive from pagination nodes.
