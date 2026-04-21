@@ -15,6 +15,7 @@ import { ProjectSender } from './schemas/project-sender.schema';
 import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
 import { ProjectHolders } from './schemas/project-holders.schema';
 import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
+import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ALL_PROJECTS, ProjectDefinition } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
@@ -224,6 +225,38 @@ export class EcosystemService implements OnModuleInit {
   private static readonly CLASSIFY_CACHE_MAX = 4;
 
   /**
+   * Bump this constant in the same commit as any `classifyFromRaw` behavior
+   * change that isn't already reflected in `ALL_PROJECTS` / `ALL_TEAMS`.
+   * `computeRegistryHash()` folds it into the hash stored on each
+   * `ClassifiedSnapshot`; a mismatch triggers re-classify on next read, so
+   * the fleet converges to the new shape within one request after deploy
+   * without an operator action.
+   *
+   * Registry-only edits (adding a project, renaming a team) do NOT need a
+   * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
+   */
+  private static readonly CLASSIFIER_VERSION = 1;
+
+  /**
+   * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
+   * DefiLlama fetch used to live inside `classifyFromRaw` and gated every
+   * cache miss on a network round-trip; extracting it to `enrichWithTvl`
+   * means we run it once per 10-min window instead of once per classify
+   * pass. The persisted classified view is deliberately TVL-free so the
+   * enrichment can refresh faster than the 2h capture cadence.
+   */
+  private static readonly DEFILLAMA_CACHE_TTL_MS = 10 * 60 * 1000;
+  private defillamaCache: { expiresAt: number; value: any[] } | null = null;
+
+  /**
+   * Memoized result of `computeRegistryHash()`. Registry is static over
+   * process lifetime so we hash once per boot. Cleared by tests that mutate
+   * `ALL_PROJECTS`/`ALL_TEAMS` at runtime (none today, but cheap to keep
+   * swappable via `recomputeRegistryHash()`).
+   */
+  private cachedRegistryHash: string | null = null;
+
+  /**
    * Tier thresholds for post-capture wall-clock logging. Values match the
    * ship-gate tiers in `plans/implementation_strategy_conversation.md`:
    * 75 min = approaching alarm, 90 min = post-TX alarm (port events/senders
@@ -245,6 +278,7 @@ export class EcosystemService implements OnModuleInit {
     @InjectModel(ProjectTxCounts.name) private txCountModel: Model<ProjectTxCounts>,
     @InjectModel(ProjectHolders.name) private holdersStateModel: Model<ProjectHolders>,
     @InjectModel(ProjectHolderEntry.name) private holderEntryModel: Model<ProjectHolderEntry>,
+    @InjectModel(ClassifiedSnapshot.name) private classifiedModel: Model<ClassifiedSnapshot>,
     private alerts: AlertsService,
   ) {}
 
@@ -254,20 +288,71 @@ export class EcosystemService implements OnModuleInit {
     if (count === 0) {
       this.logger.log('No ecosystem snapshot found, capturing in background...');
       this.capture().catch((e) => this.logger.error('Initial ecosystem capture failed', e));
+      return;
     }
+    // Self-heal: if the latest snapshot has no classified doc, or its
+    // persisted view was computed against a stale registry (registry edit or
+    // CLASSIFIER_VERSION bump since last capture), re-classify in the
+    // background. Fire-and-forget — first read during the gap falls through
+    // to `classifyOrLoad`, which runs the same work synchronously on the
+    // request path. Self-heal just removes that user-visible cost.
+    this.selfHealLatestClassified().catch((e) =>
+      this.logger.error('Boot self-heal of classified view failed', e),
+    );
+  }
+
+  /**
+   * Ensure the latest `OnchainSnapshot` has a fresh-hash `ClassifiedSnapshot`.
+   * Runs in the background from `onModuleInit` so boot doesn't stall on the
+   * 1–2 s classify cost. Safe to call multiple times — the persist step
+   * upserts and `classifyOrLoad` short-circuits when the hash already matches.
+   */
+  private async selfHealLatestClassified(): Promise<void> {
+    const latest = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    if (!latest) return;
+    const cached = await this.classifiedModel
+      .findOne({ snapshotId: latest._id })
+      .lean()
+      .exec();
+    const currentHash = this.computeRegistryHash();
+    if (cached && cached.registryHash === currentHash) return;
+    this.logger.log(
+      cached
+        ? 'Latest classified view registry-hash stale, re-classifying in background...'
+        : 'Latest snapshot has no classified view, computing in background...',
+    );
+    const t0 = Date.now();
+    const view = await this.classifyFromRaw(latest);
+    await this.persistClassified(latest._id, view, Date.now() - t0);
+    this.logger.log(`Boot self-heal classified view persisted in ${Date.now() - t0}ms`);
   }
 
   /**
    * Classified ecosystem view for the most recent `OnchainSnapshot`. Returns
    * the same JSON shape the Nuxt frontend already consumes (`l1`, `l2`,
    * `unattributed`, totals, `networkTxTotal`, `txRates`) — no API contract
-   * change. Classification runs every call but is cached in-process per
-   * snapshot id, so repeat requests are O(1).
+   * change. Reads go through the persisted `ClassifiedSnapshot` doc (written
+   * at capture time) so the hot path is a single indexed `findOne` plus
+   * `enrichWithTvl` (DefiLlama-backed, own 10-min cache). First request
+   * after a registry/classifier edit pays one classify cost, persists the
+   * new view, and subsequent reads are fast again.
+   *
+   * The returned view's `l1` / `l2` / totals reflect the live DefiLlama
+   * state; `unattributed`, `networkTxTotal`, `txRates` come from the
+   * deterministic persisted doc (or a fresh classify on miss). Deep-copied
+   * before enrichment so repeated reads don't mutate the cached value.
    */
   async getLatest() {
     const snap = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
     if (!snap) return null;
-    return this.classifyCached(snap);
+    const view = await this.classifyCached(snap);
+    // `enrichWithTvl` mutates in place. The classified view comes from either
+    // the in-process LRU, the persisted doc (fresh lean read), or a fresh
+    // classify. For the LRU case repeated reads would double-apply TVL
+    // (idempotent — tvl just gets re-set to the same number) but also carry
+    // stale TVL forward across the 10-min cache boundary. Safer to clone.
+    const cloned = JSON.parse(JSON.stringify(view)) as typeof view;
+    return this.enrichWithTvl(cloned);
   }
 
   /** Fetch the raw latest snapshot without classification. Used by the growth endpoint. */
@@ -608,6 +693,17 @@ export class EcosystemService implements OnModuleInit {
     };
   }
 
+  /**
+   * Three-tier read path:
+   *   1. In-process LRU (below) — sub-ms hit for repeat reads within a process.
+   *   2. `classifyOrLoad` (persisted `ClassifiedSnapshot`) — survives restarts,
+   *      hash-invalidates on registry/classifier edits.
+   *   3. `classifyFromRaw` — recompute, persist, fill tier 1.
+   *
+   * DefiLlama enrichment is NOT applied here. `getLatest` runs
+   * `enrichWithTvl` on top of this for the public response. `growthRanking`
+   * skips enrichment — TVL isn't in its output shape.
+   */
   private async classifyCached(snap: any) {
     const key = String(snap._id);
     const now = Date.now();
@@ -619,7 +715,7 @@ export class EcosystemService implements OnModuleInit {
       this.classifyCache.set(key, hit);
       return hit.value;
     }
-    const value = await this.classifyFromRaw(snap);
+    const value = await this.classifyOrLoad(snap);
     this.classifyCache.set(key, { expiresAt: now + EcosystemService.CLASSIFY_CACHE_TTL_MS, value });
     while (this.classifyCache.size > EcosystemService.CLASSIFY_CACHE_MAX) {
       // Map preserves insertion order — first key is least-recently-used.
@@ -668,7 +764,18 @@ export class EcosystemService implements OnModuleInit {
       const captureWork = (async () => {
         const raw = await this.captureRaw();
         const durationMs = Date.now() - startedAt;
-        await this.ecoModel.create({ ...raw, captureDurationMs: durationMs });
+        const created = await this.ecoModel.create({ ...raw, captureDurationMs: durationMs });
+        // Precompute + persist the classified view so the first read after
+        // this capture is O(1). Failures here are non-fatal — readers fall
+        // back to classify-on-demand via `classifyOrLoad`. Keeps the
+        // capture cron resilient to a transient Mongo error on write.
+        try {
+          const t0 = Date.now();
+          const view = await this.classifyFromRaw(created);
+          await this.persistClassified(created._id, view, Date.now() - t0);
+        } catch (err) {
+          this.logger.warn('Post-capture classify/persist failed; readers will classify on demand', err);
+        }
         this.invalidateClassifyCache();
         return { raw, durationMs };
       })();
@@ -2090,133 +2197,12 @@ export class EcosystemService implements OnModuleInit {
       });
     }
 
-    // Enrich with DefiLlama TVL + add L2 EVM projects
-    try {
-      const llamaRes = await fetch('https://api.llama.fi/protocols');
-      const llamaData: any[] = await llamaRes.json();
-
-      const iotaProtocols = llamaData.filter((p) =>
-        (p.chains || []).some((c: string) => c === 'IOTA' || c === 'IOTA EVM'),
-      );
-
-      // Match TVL to existing L1 projects — IOTA-chain slice only, not
-      // cross-chain total. When multiple project rows share one DefiLlama
-      // slug (e.g. Swirl V1 + V2, Virtue + Virtue Stability Pool, or any of
-      // the TokenLabs products), pick a single *primary* by activity (event
-      // count desc, name asc tiebreak); primary carries `tvl`, the others
-      // carry the same number as `tvlShared` + `tvlSharedWith: <primary>`.
-      // The dashboard sums only `tvl` into totals so the shared value is
-      // never double-counted; siblings render `(TVL)` in parentheses with
-      // a "shared with <primary>" tooltip.
-      type LlamaMatch = { project: (typeof projects)[number]; proto: any; tvl: number };
-      const matches: LlamaMatch[] = [];
-      for (const project of projects) {
-        for (const proto of iotaProtocols) {
-          const nameMatch =
-            proto.name.toLowerCase().includes(project.name.toLowerCase()) ||
-            project.name.toLowerCase().includes(proto.name.toLowerCase());
-          if (!nameMatch) continue;
-          const tvl = proto.chainTvls?.['IOTA'];
-          if (tvl == null) continue;
-          matches.push({ project, proto, tvl });
-          break; // first matching proto wins per project (consistent with prior `.find()` behavior)
-        }
-      }
-
-      const claimedLlamaSlugs = new Set<string>();
-      const byProto = new Map<string, LlamaMatch[]>();
-      for (const m of matches) {
-        const slug = m.proto.slug || m.proto.name;
-        claimedLlamaSlugs.add(slug);
-        if (!byProto.has(slug)) byProto.set(slug, []);
-        byProto.get(slug)!.push(m);
-      }
-      for (const group of byProto.values()) {
-        group.sort((a, b) => {
-          if (b.project.events !== a.project.events) return b.project.events - a.project.events;
-          return a.project.name.localeCompare(b.project.name);
-        });
-        const [primary, ...siblings] = group;
-        primary.project.tvl = primary.tvl;
-        for (const sib of siblings) {
-          sib.project.tvlShared = sib.tvl;
-          sib.project.tvlSharedWith = primary.project.name;
-        }
-      }
-
-      // Add L2 EVM projects that aren't already in the L1 list.
-      // L2 name → team-id map: lets us attribute DefiLlama-synthesized L2 rows
-      // to the same `Team` that owns the project's L1 work (when there is
-      // any), so the Teams view aggregates L1 + L2 activity per team and the
-      // per-project page shows the team row consistently. Keep the keys in
-      // lowercase to match the name-normalization below.
-      const L2_TEAM_MAP: Record<string, string> = {
-        'magicsea amm': 'magicsea',
-        'magicsea lb': 'magicsea',
-      };
-      const existingNames = new Set(projects.map((p) => p.name.toLowerCase()));
-      for (const proto of iotaProtocols) {
-        const slug = proto.slug || proto.name;
-        // Skip protocols already claimed by an L1 project via substring
-        // name-match above — guards against duplicating e.g. DefiLlama's
-        // "Swirl" as a fresh L1 row when L1 already carries "Swirl V2" +
-        // "Swirl V1" (neither an exact-lowercase match for "swirl").
-        if (claimedLlamaSlugs.has(slug)) continue;
-
-        const isEvm = (proto.chains || []).includes('IOTA EVM');
-
-        // Skip if already matched to an L1 project by exact-lowercase name.
-        // Complements the `claimedLlamaSlugs` check above: the claimed-slug
-        // guard catches substring name-matches (primary/sibling projects);
-        // this catches protos whose IOTA slice was null (so step-1 didn't
-        // claim them) but whose name still exactly matches an L1 row.
-        if (existingNames.has(proto.name.toLowerCase())) continue;
-        // Only count the IOTA EVM slice, not the protocol's cross-chain total
-        const chainTvl = proto.chainTvls?.['IOTA EVM'] ?? 0;
-        // Skip protocols where the IOTA EVM slice is below the $100 floor
-        if (chainTvl < 100) continue;
-
-        const llamaSlug = (proto.slug || proto.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-        const l2Team = getTeam(L2_TEAM_MAP[proto.name.toLowerCase()]) ?? null;
-        projects.push({
-          slug: `evm-${llamaSlug}`,
-          name: proto.name,
-          layer: isEvm ? 'L2' : 'L1',
-          category: proto.category || 'Unknown',
-          description: `${proto.category || ''} on IOTA${isEvm ? ' EVM' : ''}`.trim(),
-          urls: proto.url ? [{ label: 'Website', href: proto.url }] : [],
-          packages: 0,
-          packageAddress: null,
-          latestPackageAddress: null,
-          storageIota: 0,
-          events: 0,
-          eventsCapped: false,
-          transactions: 0,
-          transactionsCapped: false,
-          modules: [],
-          tvl: chainTvl,
-          tvlShared: null,
-          tvlSharedWith: null,
-          isCollectible: false,
-          logo: l2Team?.logo ?? null,
-          logoWordmark: l2Team?.logoWordmark ?? null,
-          team: l2Team,
-          disclaimer: null,
-          detectedDeployers: [],
-          anomalousDeployers: [],
-          uniqueSenders: 0,
-          uniqueHolders: null,
-          objectCount: null,
-          marketplaceListedCount: null,
-          uniqueWalletsReach: 0,
-          attribution: null,
-          addedAt: null,
-        });
-      }
-    } catch (e) {
-      this.logger.warn('DefiLlama fetch failed, L2 data unavailable', e);
-    }
-
+    // DefiLlama TVL enrichment + L2 EVM synthesis used to live here. Extracted
+    // into `enrichWithTvl` so this method stays deterministic for a given
+    // `(raw snapshot, registry code)` — a precondition for persisting the
+    // classified view via `ClassifiedSnapshot`. Enrichment runs downstream on
+    // the read path (see `getLatest`), cached separately on its own 10-min
+    // TTL so TVL updates arrive faster than the 2h capture cadence.
     projects.sort((a, b) => b.events - a.events);
 
     // Build unattributed clusters from the snapshot's stored fingerprint
@@ -2307,9 +2293,14 @@ export class EcosystemService implements OnModuleInit {
         `${unattributed.length} unattributed cluster(s) / ${totalUnattributedPackages} package(s)`,
     );
 
+    // L1-only return. L2 projects are synthesized in `enrichWithTvl` from
+    // DefiLlama; `l2: []` here is a placeholder so consumers that read from
+    // the persisted (pre-enrichment) view see a stable shape even if they
+    // never get enriched. `totalProjects` / `totalEvents` / `totalStorageIota`
+    // get recomputed in `enrichWithTvl` after L2 rows are appended.
     return {
-      l1: projects.filter((p) => p.layer === 'L1'),
-      l2: projects.filter((p) => p.layer === 'L2'),
+      l1: projects,
+      l2: [] as Project[],
       unattributed,
       totalProjects: projects.length,
       totalEvents: projects.reduce((sum, p) => sum + p.events, 0),
@@ -2318,5 +2309,249 @@ export class EcosystemService implements OnModuleInit {
       networkTxTotal: raw.networkTxTotal,
       txRates: raw.txRates,
     };
+  }
+
+  /**
+   * Attach DefiLlama TVL to L1 projects and synthesize L2 EVM rows on top of
+   * a classified view. Non-deterministic (network round-trip + time-varying
+   * TVL), so kept out of `classifyFromRaw` — that method's output is what we
+   * persist in `ClassifiedSnapshot`. This enrichment runs on the read path
+   * instead, gated by a 10-min `defillamaCache` so dashboard reads stay
+   * sub-10ms in the common case.
+   *
+   * Mutates the provided `view` in place (adds `tvl`/`tvlShared`/`tvlSharedWith`
+   * to L1 project objects, replaces `l2`, recomputes totals) and returns it.
+   * Failure mode: DefiLlama fetch error → log a warn, leave L1 TVL at null,
+   * skip L2 synthesis. Matches the prior in-classify behavior exactly.
+   */
+  async enrichWithTvl<V extends {
+    l1: Project[];
+    l2: Project[];
+    totalProjects: number;
+    totalEvents: number;
+    totalStorageIota: number;
+  }>(view: V): Promise<V> {
+    try {
+      const now = Date.now();
+      const cached = this.defillamaCache;
+      let llamaData: any[];
+      if (cached && cached.expiresAt > now) {
+        llamaData = cached.value;
+      } else {
+        const llamaRes = await fetch('https://api.llama.fi/protocols');
+        llamaData = await llamaRes.json();
+        this.defillamaCache = {
+          expiresAt: now + EcosystemService.DEFILLAMA_CACHE_TTL_MS,
+          value: llamaData,
+        };
+      }
+
+      const iotaProtocols = llamaData.filter((p) =>
+        (p.chains || []).some((c: string) => c === 'IOTA' || c === 'IOTA EVM'),
+      );
+
+      const l1Projects = view.l1;
+
+      // Match TVL to existing L1 projects — IOTA-chain slice only, not
+      // cross-chain total. When multiple project rows share one DefiLlama
+      // slug (e.g. Swirl V1 + V2, Virtue + Virtue Stability Pool, or any of
+      // the TokenLabs products), pick a single *primary* by activity (event
+      // count desc, name asc tiebreak); primary carries `tvl`, the others
+      // carry the same number as `tvlShared` + `tvlSharedWith: <primary>`.
+      // The dashboard sums only `tvl` into totals so the shared value is
+      // never double-counted; siblings render `(TVL)` in parentheses with
+      // a "shared with <primary>" tooltip.
+      type LlamaMatch = { project: Project; proto: any; tvl: number };
+      const matches: LlamaMatch[] = [];
+      for (const project of l1Projects) {
+        for (const proto of iotaProtocols) {
+          const nameMatch =
+            proto.name.toLowerCase().includes(project.name.toLowerCase()) ||
+            project.name.toLowerCase().includes(proto.name.toLowerCase());
+          if (!nameMatch) continue;
+          const tvl = proto.chainTvls?.['IOTA'];
+          if (tvl == null) continue;
+          matches.push({ project, proto, tvl });
+          break; // first matching proto wins per project (consistent with prior `.find()` behavior)
+        }
+      }
+
+      const claimedLlamaSlugs = new Set<string>();
+      const byProto = new Map<string, LlamaMatch[]>();
+      for (const m of matches) {
+        const slug = m.proto.slug || m.proto.name;
+        claimedLlamaSlugs.add(slug);
+        if (!byProto.has(slug)) byProto.set(slug, []);
+        byProto.get(slug)!.push(m);
+      }
+      for (const group of byProto.values()) {
+        group.sort((a, b) => {
+          if (b.project.events !== a.project.events) return b.project.events - a.project.events;
+          return a.project.name.localeCompare(b.project.name);
+        });
+        const [primary, ...siblings] = group;
+        primary.project.tvl = primary.tvl;
+        for (const sib of siblings) {
+          sib.project.tvlShared = sib.tvl;
+          sib.project.tvlSharedWith = primary.project.name;
+        }
+      }
+
+      // Add L2 EVM projects that aren't already in the L1 list.
+      // L2 name → team-id map: lets us attribute DefiLlama-synthesized L2 rows
+      // to the same `Team` that owns the project's L1 work (when there is
+      // any), so the Teams view aggregates L1 + L2 activity per team and the
+      // per-project page shows the team row consistently. Keep the keys in
+      // lowercase to match the name-normalization below.
+      const L2_TEAM_MAP: Record<string, string> = {
+        'magicsea amm': 'magicsea',
+        'magicsea lb': 'magicsea',
+      };
+      const existingNames = new Set(l1Projects.map((p) => p.name.toLowerCase()));
+      const l2Projects: Project[] = [];
+      for (const proto of iotaProtocols) {
+        const slug = proto.slug || proto.name;
+        // Skip protocols already claimed by an L1 project via substring
+        // name-match above — guards against duplicating e.g. DefiLlama's
+        // "Swirl" as a fresh L1 row when L1 already carries "Swirl V2" +
+        // "Swirl V1" (neither an exact-lowercase match for "swirl").
+        if (claimedLlamaSlugs.has(slug)) continue;
+
+        const isEvm = (proto.chains || []).includes('IOTA EVM');
+
+        // Skip if already matched to an L1 project by exact-lowercase name.
+        // Complements the `claimedLlamaSlugs` check above: the claimed-slug
+        // guard catches substring name-matches (primary/sibling projects);
+        // this catches protos whose IOTA slice was null (so step-1 didn't
+        // claim them) but whose name still exactly matches an L1 row.
+        if (existingNames.has(proto.name.toLowerCase())) continue;
+        // Only count the IOTA EVM slice, not the protocol's cross-chain total
+        const chainTvl = proto.chainTvls?.['IOTA EVM'] ?? 0;
+        // Skip protocols where the IOTA EVM slice is below the $100 floor
+        if (chainTvl < 100) continue;
+
+        const llamaSlug = (proto.slug || proto.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        const l2Team = getTeam(L2_TEAM_MAP[proto.name.toLowerCase()]) ?? null;
+        l2Projects.push({
+          slug: `evm-${llamaSlug}`,
+          name: proto.name,
+          layer: isEvm ? 'L2' : 'L1',
+          category: proto.category || 'Unknown',
+          description: `${proto.category || ''} on IOTA${isEvm ? ' EVM' : ''}`.trim(),
+          urls: proto.url ? [{ label: 'Website', href: proto.url }] : [],
+          packages: 0,
+          packageAddress: null,
+          latestPackageAddress: null,
+          storageIota: 0,
+          events: 0,
+          eventsCapped: false,
+          transactions: 0,
+          transactionsCapped: false,
+          modules: [],
+          tvl: chainTvl,
+          tvlShared: null,
+          tvlSharedWith: null,
+          isCollectible: false,
+          logo: l2Team?.logo ?? null,
+          logoWordmark: l2Team?.logoWordmark ?? null,
+          team: l2Team,
+          disclaimer: null,
+          detectedDeployers: [],
+          anomalousDeployers: [],
+          uniqueSenders: 0,
+          uniqueHolders: null,
+          objectCount: null,
+          marketplaceListedCount: null,
+          uniqueWalletsReach: 0,
+          attribution: null,
+          addedAt: null,
+        });
+      }
+      view.l2 = l2Projects;
+      // Recompute totals across L1 + L2 (L2 rows have events=0 / storageIota=0
+      // so `totalEvents` / `totalStorageIota` are unchanged; `totalProjects`
+      // picks up the new L2 rows).
+      view.totalProjects = l1Projects.length + l2Projects.length;
+    } catch (e) {
+      this.logger.warn('DefiLlama fetch failed, L2 data unavailable', e);
+    }
+    return view;
+  }
+
+  /**
+   * sha256 hash of the registry inputs that drive `classifyFromRaw`'s output.
+   * Stored on each `ClassifiedSnapshot` so a registry edit or classifier
+   * version bump invalidates stale persisted views on first read, without
+   * an operator action. Memoized per process — registry is static over
+   * lifetime of the service instance.
+   *
+   * `JSON.stringify` drops function-valued fields silently
+   * (`ProjectDefinition.fingerprint.probe`, etc.), so a change to a function
+   * body does NOT bump the hash. Bump `CLASSIFIER_VERSION` in the same
+   * commit for logic changes that aren't reflected in structured data.
+   */
+  private computeRegistryHash(): string {
+    if (this.cachedRegistryHash !== null) return this.cachedRegistryHash;
+    const payload = JSON.stringify({
+      projects: ALL_PROJECTS,
+      teams: ALL_TEAMS,
+      version: EcosystemService.CLASSIFIER_VERSION,
+    });
+    this.cachedRegistryHash = createHash('sha256').update(payload).digest('hex');
+    return this.cachedRegistryHash;
+  }
+
+  /**
+   * Upsert a classified view for the given snapshot. Called at capture time
+   * and on read-path cache misses (stale-hash or missing doc). Keyed by
+   * `snapshotId` (unique); overwrites in place — no version history.
+   */
+  private async persistClassified(
+    snapshotId: unknown,
+    view: Awaited<ReturnType<EcosystemService['classifyFromRaw']>>,
+    classifyDurationMs: number,
+  ): Promise<void> {
+    await this.classifiedModel
+      .updateOne(
+        { snapshotId },
+        {
+          $set: {
+            snapshotId,
+            registryHash: this.computeRegistryHash(),
+            classifiedAt: new Date(),
+            classifyDurationMs,
+            view,
+          },
+        },
+        { upsert: true },
+      )
+      .exec();
+  }
+
+  /**
+   * Return a classified view for `snap`, hitting the persisted
+   * `ClassifiedSnapshot` collection on hot path and falling back to
+   * `classifyFromRaw` on miss / stale-hash. The classify-and-persist
+   * fallback is shared by cron (`capture`), boot self-heal
+   * (`onModuleInit`), and read paths (`getLatest`, `growthRanking`).
+   *
+   * Does NOT run `enrichWithTvl` — the persisted view is deterministic by
+   * design. Callers that need TVL (currently just `getLatest`) wrap the
+   * result in `enrichWithTvl`.
+   */
+  private async classifyOrLoad(snap: any): Promise<Awaited<ReturnType<EcosystemService['classifyFromRaw']>>> {
+    const cached = await this.classifiedModel
+      .findOne({ snapshotId: snap._id })
+      .lean()
+      .exec();
+    const currentHash = this.computeRegistryHash();
+    if (cached && cached.registryHash === currentHash) {
+      return cached.view as Awaited<ReturnType<EcosystemService['classifyFromRaw']>>;
+    }
+    const t0 = Date.now();
+    const view = await this.classifyFromRaw(snap);
+    const durationMs = Date.now() - t0;
+    await this.persistClassified(snap._id, view, durationMs);
+    return view;
   }
 }

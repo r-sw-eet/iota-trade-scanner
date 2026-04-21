@@ -7,6 +7,7 @@ import { ProjectSender } from './schemas/project-sender.schema';
 import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
 import { ProjectHolders } from './schemas/project-holders.schema';
 import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
+import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ProjectDefinition } from './projects';
 
@@ -236,6 +237,7 @@ describe('EcosystemService', () => {
   let txCountModel: any;
   let holdersStateModel: any;
   let holderEntryModel: any;
+  let classifiedModel: any;
   let fetchMock: FetchMock;
 
   beforeEach(async () => {
@@ -268,6 +270,13 @@ describe('EcosystemService', () => {
       aggregate: jest.fn().mockResolvedValue([]),
       collection: { name: 'project_holder_entries' },
     };
+    classifiedModel = {
+      // Default: no persisted classified view → readers fall through to
+      // classifyFromRaw. Individual tests override `findOne` when they need
+      // to exercise the hit path.
+      findOne: jest.fn(() => chain(null)),
+      updateOne: jest.fn(() => ({ exec: jest.fn().mockResolvedValue({}) })),
+    };
     const alertsMock = { notifyCaptureAlarm: jest.fn().mockResolvedValue(undefined) };
     const module = await Test.createTestingModule({
       providers: [
@@ -278,6 +287,7 @@ describe('EcosystemService', () => {
         { provide: getModelToken(ProjectTxCounts.name), useValue: txCountModel },
         { provide: getModelToken(ProjectHolders.name), useValue: holdersStateModel },
         { provide: getModelToken(ProjectHolderEntry.name), useValue: holderEntryModel },
+        { provide: getModelToken(ClassifiedSnapshot.name), useValue: classifiedModel },
         { provide: AlertsService, useValue: alertsMock },
       ],
     }).compile();
@@ -392,8 +402,14 @@ describe('EcosystemService', () => {
       const first = await service.getLatest();
       const second = await service.getLatest();
 
+      // `enrichWithTvl` fetch is unmocked → swallowed by the try/catch; view
+      // stays L1-only with empty L2 and untouched totals. Clone-before-enrich
+      // means first and second are distinct objects with equal content.
       expect(first).toEqual({ l1: [], l2: [], totalProjects: 0, totalEvents: 0 });
-      expect(first).toBe(second); // same cached reference on repeat calls
+      expect(second).toEqual(first);
+      expect(first).not.toBe(second); // cloned before enrichment
+      // Persisted doc missed (default chain(null)) → classify runs once, then
+      // cached in-process LRU for the second call.
       expect(classifySpy).toHaveBeenCalledTimes(1);
     });
 
@@ -419,13 +435,58 @@ describe('EcosystemService', () => {
       ecoModel.findOne.mockReturnValue(chain(raw));
       const classifySpy = jest
         .spyOn(service as any, 'classifyFromRaw')
-        .mockResolvedValue({ totalProjects: 0 });
+        .mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
 
       await service.getLatest();
       service.invalidateClassifyCache();
       await service.getLatest();
 
       expect(classifySpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('serves from the persisted ClassifiedSnapshot when registryHash matches — skips classifyFromRaw', async () => {
+      const raw = { _id: 'abc', packages: [] };
+      ecoModel.findOne.mockReturnValue(chain(raw));
+      const currentHash = (service as any).computeRegistryHash();
+      classifiedModel.findOne.mockReturnValue(
+        chain({
+          snapshotId: 'abc',
+          registryHash: currentHash,
+          view: { l1: [{ name: 'Persisted', tvl: null, tvlShared: null, tvlSharedWith: null, events: 0 } as any], l2: [], totalProjects: 1, totalEvents: 0 },
+        }),
+      );
+      const classifySpy = jest.spyOn(service as any, 'classifyFromRaw');
+
+      const out = await service.getLatest();
+
+      expect(classifySpy).not.toHaveBeenCalled();
+      expect((out as any).l1[0].name).toBe('Persisted');
+    });
+
+    it('re-classifies + upserts when the persisted registryHash is stale', async () => {
+      const raw = { _id: 'abc', packages: [] };
+      ecoModel.findOne.mockReturnValue(chain(raw));
+      classifiedModel.findOne.mockReturnValue(
+        chain({
+          snapshotId: 'abc',
+          registryHash: 'stale-hash-0000',
+          view: { l1: [], l2: [], totalProjects: 0 },
+        }),
+      );
+      const classifySpy = jest
+        .spyOn(service as any, 'classifyFromRaw')
+        .mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
+
+      await service.getLatest();
+
+      expect(classifySpy).toHaveBeenCalledTimes(1);
+      expect(classifiedModel.updateOne).toHaveBeenCalledWith(
+        { snapshotId: 'abc' },
+        expect.objectContaining({
+          $set: expect.objectContaining({ registryHash: (service as any).computeRegistryHash() }),
+        }),
+        { upsert: true },
+      );
     });
   });
 
@@ -792,6 +853,144 @@ describe('EcosystemService', () => {
       jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
       await service.capture();
       expect((service as any).classifyCache.size).toBe(0);
+    });
+
+    it('persists the classified view for the newly-captured snapshot', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      ecoModel.create.mockResolvedValue({ _id: 'new-snap', ...rawStub });
+      const view = { l1: [], l2: [], totalProjects: 0 };
+      jest.spyOn(service as any, 'classifyFromRaw').mockResolvedValue(view);
+      await service.capture();
+      expect(classifiedModel.updateOne).toHaveBeenCalledWith(
+        { snapshotId: 'new-snap' },
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            registryHash: expect.any(String),
+            view,
+          }),
+        }),
+        { upsert: true },
+      );
+    });
+
+    it('does not fail capture when classified persistence throws', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      ecoModel.create.mockResolvedValue({ _id: 'new-snap', ...rawStub });
+      jest.spyOn(service as any, 'classifyFromRaw').mockRejectedValue(new Error('boom'));
+      await expect(service.capture()).resolves.toBeUndefined();
+      expect(ecoModel.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ---------- enrichWithTvl ----------
+
+  describe('enrichWithTvl', () => {
+    const l1Project = (overrides: any = {}) => ({
+      slug: 'p', name: 'Proto', layer: 'L1' as const, category: 'DeFi', description: '',
+      urls: [], packages: 1, packageAddress: '0x1', latestPackageAddress: '0x1',
+      storageIota: 0, events: 100, eventsCapped: false, transactions: 0, transactionsCapped: false,
+      modules: [], tvl: null, tvlShared: null, tvlSharedWith: null, isCollectible: false,
+      logo: null, logoWordmark: null, team: null, disclaimer: null, detectedDeployers: [],
+      anomalousDeployers: [], uniqueSenders: 0, uniqueHolders: null, objectCount: null,
+      marketplaceListedCount: null, uniqueWalletsReach: 0, attribution: null, addedAt: null,
+      ...overrides,
+    });
+
+    it('matches DefiLlama TVL onto an L1 project and synthesizes an L2 row, caches the fetch for 10 min', async () => {
+      const view = {
+        l1: [l1Project({ name: 'Proto' })],
+        l2: [] as any[],
+        unattributed: [],
+        totalProjects: 1,
+        totalEvents: 100,
+        totalStorageIota: 0,
+        totalUnattributedPackages: 0,
+        networkTxTotal: 0,
+        txRates: {},
+      };
+      const llamaResponse = [
+        { name: 'Proto', slug: 'proto', chains: ['IOTA'], chainTvls: { IOTA: 12345 }, category: 'Dex' },
+        { name: 'EvmOnly', slug: 'evmonly', chains: ['IOTA EVM'], chainTvls: { 'IOTA EVM': 5000 }, category: 'Dex', url: 'https://x' },
+      ];
+      fetchMock.mockResolvedValue({ json: async () => llamaResponse });
+
+      const out = await (service as any).enrichWithTvl(view);
+
+      expect(out.l1[0].tvl).toBe(12345);
+      expect(out.l2).toHaveLength(1);
+      expect(out.l2[0].name).toBe('EvmOnly');
+      expect(out.l2[0].tvl).toBe(5000);
+      expect(out.totalProjects).toBe(2);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Second call hits the 10-min cache — no new fetch.
+      await (service as any).enrichWithTvl({
+        l1: [l1Project({ name: 'Proto' })], l2: [], unattributed: [],
+        totalProjects: 1, totalEvents: 100, totalStorageIota: 0,
+        totalUnattributedPackages: 0, networkTxTotal: 0, txRates: {},
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('swallows DefiLlama fetch errors — view stays L1-only, totals unchanged', async () => {
+      const view = {
+        l1: [l1Project()], l2: [] as any[], unattributed: [],
+        totalProjects: 1, totalEvents: 100, totalStorageIota: 0,
+        totalUnattributedPackages: 0, networkTxTotal: 0, txRates: {},
+      };
+      fetchMock.mockRejectedValue(new Error('offline'));
+
+      const out = await (service as any).enrichWithTvl(view);
+
+      expect(out.l1[0].tvl).toBeNull();
+      expect(out.l2).toEqual([]);
+      expect(out.totalProjects).toBe(1);
+    });
+  });
+
+  // ---------- selfHealLatestClassified ----------
+
+  describe('selfHealLatestClassified', () => {
+    it('does nothing when there are no snapshots', async () => {
+      ecoModel.findOne.mockReturnValue(chain(null));
+      const classifySpy = jest.spyOn(service as any, 'classifyFromRaw');
+      await (service as any).selfHealLatestClassified();
+      expect(classifySpy).not.toHaveBeenCalled();
+    });
+
+    it('skips when the persisted hash already matches current', async () => {
+      ecoModel.findOne.mockReturnValue(chain({ _id: 'abc' }));
+      const currentHash = (service as any).computeRegistryHash();
+      classifiedModel.findOne.mockReturnValue(chain({ registryHash: currentHash }));
+      const classifySpy = jest.spyOn(service as any, 'classifyFromRaw');
+      await (service as any).selfHealLatestClassified();
+      expect(classifySpy).not.toHaveBeenCalled();
+    });
+
+    it('re-classifies + persists when latest has no classified doc', async () => {
+      ecoModel.findOne.mockReturnValue(chain({ _id: 'abc', packages: [] }));
+      classifiedModel.findOne.mockReturnValue(chain(null));
+      const view = { l1: [], l2: [], totalProjects: 0 };
+      jest.spyOn(service as any, 'classifyFromRaw').mockResolvedValue(view);
+      await (service as any).selfHealLatestClassified();
+      expect(classifiedModel.updateOne).toHaveBeenCalledWith(
+        { snapshotId: 'abc' },
+        expect.objectContaining({
+          $set: expect.objectContaining({ view, registryHash: (service as any).computeRegistryHash() }),
+        }),
+        { upsert: true },
+      );
+    });
+
+    it('re-classifies when persisted hash is stale', async () => {
+      ecoModel.findOne.mockReturnValue(chain({ _id: 'abc', packages: [] }));
+      classifiedModel.findOne.mockReturnValue(chain({ registryHash: 'stale' }));
+      const classifySpy = jest
+        .spyOn(service as any, 'classifyFromRaw')
+        .mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
+      await (service as any).selfHealLatestClassified();
+      expect(classifySpy).toHaveBeenCalledTimes(1);
+      expect(classifiedModel.updateOne).toHaveBeenCalled();
     });
   });
 

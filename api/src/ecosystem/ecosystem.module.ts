@@ -6,6 +6,7 @@ import { ProjectSender, ProjectSenderSchema } from './schemas/project-sender.sch
 import { ProjectTxCounts, ProjectTxCountsSchema } from './schemas/project-tx-counts.schema';
 import { ProjectHolders, ProjectHoldersSchema } from './schemas/project-holders.schema';
 import { ProjectHolderEntry, ProjectHolderEntrySchema } from './schemas/project-holder-entry.schema';
+import { ClassifiedSnapshot, ClassifiedSnapshotSchema } from './schemas/classified-snapshot.schema';
 import { EcosystemService } from './ecosystem.service';
 import { EcosystemController } from './ecosystem.controller';
 import { AlertsModule } from '../alerts/alerts.module';
@@ -19,6 +20,7 @@ import { AlertsModule } from '../alerts/alerts.module';
       { name: ProjectTxCounts.name, schema: ProjectTxCountsSchema },
       { name: ProjectHolders.name, schema: ProjectHoldersSchema },
       { name: ProjectHolderEntry.name, schema: ProjectHolderEntrySchema },
+      { name: ClassifiedSnapshot.name, schema: ClassifiedSnapshotSchema },
     ]),
     AlertsModule,
   ],
