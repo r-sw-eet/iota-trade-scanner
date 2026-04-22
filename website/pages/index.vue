@@ -14,7 +14,7 @@ const l1Visible = ref(10)
 const l2Visible = ref(10)
 const teamsVisible = ref(10)
 const unattributedVisible = ref(20)
-const l1EventsChartVisible = ref(10)
+const l1TxsChartVisible = ref(10)
 const l1StorageChartVisible = ref(10)
 const l2TvlChartVisible = ref(10)
 const shadeTeamless = ref(true)
@@ -71,7 +71,7 @@ type L2Key = 'name' | 'category' | 'tvl'
 type TeamsKey = 'name' | 'categories' | 'projectCount' | 'events' | 'storageIota' | 'tvl'
 type UnattributedKey = 'deployer' | 'packages' | 'storageIota' | 'events' | 'transactions'
 
-const l1Sort = ref<{ key: L1Key | null; dir: SortDir }>({ key: 'events', dir: 'desc' })
+const l1Sort = ref<{ key: L1Key | null; dir: SortDir }>({ key: 'transactions', dir: 'desc' })
 const l2Sort = ref<{ key: L2Key | null; dir: SortDir }>({ key: 'tvl', dir: 'desc' })
 const teamsSort = ref<{ key: TeamsKey | null; dir: SortDir }>({ key: 'events', dir: 'desc' })
 const unattributedSort = ref<{ key: UnattributedKey | null; dir: SortDir }>({ key: 'packages', dir: 'desc' })
@@ -393,8 +393,8 @@ const inflationChartOptions = {
 
 const colors = ['#14b8a6', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1']
 
-const l1EventProjects = computed(() =>
-  l1Filtered.value.filter((p: any) => p.events > 0).sort((a: any, b: any) => b.events - a.events),
+const l1TxProjects = computed(() =>
+  l1Filtered.value.filter((p: any) => rowTransactions(p) > 0).sort((a: any, b: any) => rowTransactions(b) - rowTransactions(a)),
 )
 const l1StorageProjects = computed(() =>
   l1Filtered.value.filter((p: any) => p.storageIota > 0.01).sort((a: any, b: any) => b.storageIota - a.storageIota),
@@ -454,19 +454,19 @@ const teamsAggregated = computed(() => {
 })
 const teamsSorted = computed(() => sortRows(teamsAggregated.value, teamsSort.value))
 
-const projectEventsChartData = computed(() => {
-  const sliced = l1EventProjects.value.slice(0, l1EventsChartVisible.value)
+const projectTxsChartData = computed(() => {
+  const sliced = l1TxProjects.value.slice(0, l1TxsChartVisible.value)
   if (!sliced.length) return null
   return {
     labels: sliced.map((p: any) => p.name),
-    datasets: [{ data: sliced.map((p: any) => p.events), backgroundColor: sliced.map((_: any, i: number) => colors[i % colors.length] + '80'), borderColor: sliced.map((_: any, i: number) => colors[i % colors.length]), borderWidth: 1 }],
+    datasets: [{ data: sliced.map((p: any) => rowTransactions(p)), backgroundColor: sliced.map((_: any, i: number) => colors[i % colors.length] + '80'), borderColor: sliced.map((_: any, i: number) => colors[i % colors.length]), borderWidth: 1 }],
   }
 })
-const projectEventsChartOptions = {
+const projectTxsChartOptions = {
   responsive: true, maintainAspectRatio: false,
   plugins: {
     legend: { position: 'right' as const, labels: { color: '#a1a1aa', padding: 8, font: { size: 10 } } },
-    tooltip: { callbacks: { label: (ctx: any) => `${ctx.label}: ${ctx.raw.toLocaleString()} events` } },
+    tooltip: { callbacks: { label: (ctx: any) => `${ctx.label}: ${ctx.raw.toLocaleString()} TXs` } },
   },
 }
 
@@ -664,14 +664,14 @@ const projectTvlChartOptions = {
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                   <div class="bg-scanner-card border border-scanner-border rounded p-5">
-                    <h4 class="text-sm font-semibold text-[#a1a1aa] mb-4">Events by Project (top {{ Math.min(l1EventsChartVisible, l1EventProjects.length) }})</h4>
-                    <div :style="{ height: `${Math.max(288, (projectEventsChartData?.labels?.length || 0) * 22 + 40)}px` }">
-                      <Doughnut v-if="projectEventsChartData" :data="projectEventsChartData" :options="projectEventsChartOptions" />
-                      <p v-else class="text-[#52525b] text-sm">No event data yet.</p>
+                    <h4 class="text-sm font-semibold text-[#a1a1aa] mb-4">TXs by Project (top {{ Math.min(l1TxsChartVisible, l1TxProjects.length) }})</h4>
+                    <div :style="{ height: `${Math.max(288, (projectTxsChartData?.labels?.length || 0) * 22 + 40)}px` }">
+                      <Doughnut v-if="projectTxsChartData" :data="projectTxsChartData" :options="projectTxsChartOptions" />
+                      <p v-else class="text-[#52525b] text-sm">No transaction data yet.</p>
                     </div>
-                    <div v-if="l1EventsChartVisible < l1EventProjects.length" class="mt-4 text-center">
-                      <button @click="l1EventsChartVisible += 10" class="px-3 py-1.5 text-xs text-scanner-accent border border-scanner-border rounded-xs hover:bg-scanner-elevated transition-colors">
-                        Show more ({{ l1EventProjects.length - l1EventsChartVisible }} remaining)
+                    <div v-if="l1TxsChartVisible < l1TxProjects.length" class="mt-4 text-center">
+                      <button @click="l1TxsChartVisible += 10" class="px-3 py-1.5 text-xs text-scanner-accent border border-scanner-border rounded-xs hover:bg-scanner-elevated transition-colors">
+                        Show more ({{ l1TxProjects.length - l1TxsChartVisible }} remaining)
                       </button>
                     </div>
                   </div>
