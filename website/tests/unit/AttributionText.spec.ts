@@ -59,4 +59,45 @@ describe('AttributionText', () => {
     expect(wrapper.get('a').text()).toBe(ADDR)
     expect(wrapper.text()).toContain('is the deployer')
   })
+
+  it('renders **bold** as <strong>', async () => {
+    const wrapper = await mountSuspended(AttributionText, { props: { text: 'this is **important** evidence' } })
+    expect(wrapper.get('strong').text()).toBe('important')
+  })
+
+  it('linkifies addresses inside bold runs', async () => {
+    const wrapper = await mountSuspended(AttributionText, { props: { text: `**deployer ${ADDR} matters**` } })
+    const a = wrapper.get('strong a')
+    expect(a.attributes('href')).toContain(ADDR)
+    expect(a.text()).toBe(ADDR)
+  })
+
+  it('renders dash-prefixed lines as a bullet list', async () => {
+    const wrapper = await mountSuspended(AttributionText, { props: { text: '- first item\n- second item' } })
+    const items = wrapper.findAll('ul li')
+    expect(items.length).toBe(2)
+    expect(items[0].text()).toContain('first item')
+    expect(items[1].text()).toContain('second item')
+  })
+
+  it('renders fenced code blocks as <pre><code> and linkifies addresses inside', async () => {
+    const wrapper = await mountSuspended(AttributionText, { props: { text: `\`\`\`\nissuer: ${ADDR}\n\`\`\`` } })
+    const pre = wrapper.get('pre')
+    expect(pre.find('a').attributes('href')).toContain(ADDR)
+    expect(pre.find('a').text()).toBe(ADDR)
+  })
+
+  it('renders markdown links with target=_blank', async () => {
+    const wrapper = await mountSuspended(AttributionText, { props: { text: 'see [the showcase](https://iota.org/learn/showcases/salus) for details' } })
+    const a = wrapper.get('a')
+    expect(a.attributes('href')).toBe('https://iota.org/learn/showcases/salus')
+    expect(a.attributes('target')).toBe('_blank')
+    expect(a.text()).toBe('the showcase')
+  })
+
+  it('propagates the title attribute from a titled markdown link', async () => {
+    const wrapper = await mountSuspended(AttributionText, { props: { text: 'see [the showcase](https://iota.org/x "IOTA Showcase") now' } })
+    const a = wrapper.get('a')
+    expect(a.attributes('title')).toBe('IOTA Showcase')
+  })
 })
