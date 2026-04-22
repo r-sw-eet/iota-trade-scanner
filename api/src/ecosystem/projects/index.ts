@@ -3,7 +3,7 @@ import { ProjectDefinition } from './project.interface';
 import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale, clawSwapGateway, virtuePoints, multiAssetBank } from './defi/_index';
 import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus, truvid, seedlotLakeToba } from './trade/_index';
 import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft, turingcerts } from './identity/_index';
-import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft, wormhole } from './bridges/_index';
+import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft, layerZeroCounterExample, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle, kamuiVrf } from './oracles/_index';
 import { nftLaunchpad, tradeport, tradeportEarlyMover, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents, numberOneFreeNft } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip, lostCrusaderArcaneDust, lostCrusaderReviveSpells } from './games/_index';
@@ -63,9 +63,12 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   // Bridges
   echoProtocolBridge,
   // LayerZero rows: protocol, Workers (DVNs + Executor), Price Feed (Executor
-  // pricing oracle, deployer-pinned), OFT (aggregate bucket for third-party
-  // tokens, splitByDeployer → routes to known teams where possible).
-  layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft,
+  // pricing oracle, deployer-pinned), Counter-example OApp (tutorial deploy,
+  // package-pinned — must come BEFORE the OFT aggregate so its single
+  // `0x980f55…` package can't get swallowed by any fallthrough), OFT
+  // (aggregate bucket for third-party tokens, splitByDeployer → routes to
+  // known teams where possible).
+  layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroCounterExample, layerZeroOft,
   wormhole,
 
   // Oracles

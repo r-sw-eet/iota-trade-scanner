@@ -27,6 +27,14 @@ export const layerzero: Team = {
     // `price_feed_witness`) feeding the off-chain Executor's cross-chain
     // fee quotes — see `layerZeroPriceFeed` project for on-chain evidence.
     '0x6bf30187819863e878e9be862161941b07658012130f5519e34d728c03f143be',
+    // Counter-example OApp deployer — ships the canonical LayerZero V2
+    // tutorial OApp (modules `counter` / `counter_ptb_builder` / `msg_codec`
+    // / `options_builder`). Dev/test scale (21 TXs, 2 senders). Co-created
+    // objects in its txs create instances at the protocol deployer's
+    // EndpointV2 (`0xb8e0cd…`) + OApp (`0x2b14fe…`) + Worker (`0xd33a7a…`)
+    // + Bytes32 (`0x56a262…`) packages — this is exactly the composition
+    // LayerZero's tutorial-OApp deploy script produces. Added 2026-04-22.
+    '0xbd261819c7c6fb67593a96769072bf98b1fc048ccb342208da926f69f28a8724',
   ],
   logo: '/logos/layerzero.png',
   attribution: `
