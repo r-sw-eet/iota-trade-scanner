@@ -57,6 +57,48 @@ function isRoutingOnly(def: ProjectDefinition): boolean {
 const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
 
 /**
+ * Chain-primitive framework packages — `0x1` (move-stdlib), `0x2` (iota system
+ * framework), `0x3` (iota system state). These are touched by essentially
+ * every transaction on IOTA (gas payment, coin ops, transfers, epoch + staking
+ * events) so their TX counts are 100M-scale rather than project-scale. A full
+ * drain of `0x2` alone is estimated at ~40 GB of digest storage and surfaces
+ * no project-level activity signal — see `iotaFramework` project disclaimer.
+ *
+ * Backfill keeps these capped at the legacy page budget; every other package
+ * gets the larger `MAX_BACKFILL_PAGES_DEFAULT` so realistic project-scale
+ * totals (Spam Club at ~4M TXs, Turing Certs at 362k, etc.) land accurately.
+ */
+const FRAMEWORK_PACKAGE_ADDRESSES = new Set<string>([
+  '0x0000000000000000000000000000000000000000000000000000000000000001',
+  '0x0000000000000000000000000000000000000000000000000000000000000002',
+  '0x0000000000000000000000000000000000000000000000000000000000000003',
+]);
+
+/** Legacy 10k-page cap (= 500k TXs) retained for `0x1`/`0x2`/`0x3` framework packages. */
+const MAX_BACKFILL_PAGES_FRAMEWORK = 10_000;
+
+/**
+ * Default cap for all non-framework packages: 200k pages × 50 TXs/page = 10M
+ * TXs per package. Covers every realistic project-scale package on mainnet
+ * with large headroom (biggest known non-framework package is Spam Club at
+ * ~4M TXs as of 2026-04-22). Raising from the prior 10k-page floor to uncap
+ * the 13 packages that were hitting the ceiling; see TODO.md § "Add storage
+ * + full TX capture" for the storage-scenario trade-off (scenario B = +2.5 GB
+ * across all non-`0x2` packages).
+ */
+const MAX_BACKFILL_PAGES_DEFAULT = 200_000;
+
+/**
+ * Per-address page cap for `backfillTxCountsForPackage`. Framework packages
+ * stay on the legacy 10k-page cap; everything else gets the 200k-page cap.
+ */
+function maxBackfillPagesFor(packageAddress: string): number {
+  return FRAMEWORK_PACKAGE_ADDRESSES.has(packageAddress.toLowerCase())
+    ? MAX_BACKFILL_PAGES_FRAMEWORK
+    : MAX_BACKFILL_PAGES_DEFAULT;
+}
+
+/**
  * A bucket of on-chain packages whose deployer doesn't match any known team
  * and whose modules/objects don't match any ProjectDefinition. Produced by
  * `fetchFull` to surface unlabeled activity that a human should investigate
@@ -1190,11 +1232,15 @@ export class EcosystemService implements OnModuleInit {
    * Returns `{ total, capped }`.
    */
   async backfillTxCountsForPackage(packageAddress: string): Promise<{ total: number; capped: boolean }> {
-    // Drain backwards with a generous page budget. Dup-key silencing in
-    // `pageBackwardTxs` dedups re-inserts on re-runs, so this is
-    // idempotent. The caught-up heuristic short-circuits quickly on
-    // already-drained packages.
-    const { reachedEnd } = await this.pageBackwardTxs(packageAddress, 10000);
+    // Drain backwards with a per-address page budget (`maxBackfillPagesFor`).
+    // Framework packages (`0x1`/`0x2`/`0x3`) stay at the legacy 10k-page cap
+    // — full drain of `0x2` alone is ~40 GB of digest storage with no
+    // project-level activity signal. Every other package gets the larger
+    // 200k-page cap so project-scale totals land accurately. Dup-key
+    // silencing in `pageBackwardTxs` dedups re-inserts on re-runs so this
+    // is idempotent — a re-run after raising the cap picks up where the
+    // previous run left off and fills in the missing tail.
+    const { reachedEnd } = await this.pageBackwardTxs(packageAddress, maxBackfillPagesFor(packageAddress));
     const total = await this.txDigestModel.countDocuments({ packageAddress });
     return { total, capped: !reachedEnd };
   }

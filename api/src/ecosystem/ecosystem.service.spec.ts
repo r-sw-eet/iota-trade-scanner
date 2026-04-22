@@ -3059,18 +3059,29 @@ describe('EcosystemService', () => {
     });
 
     describe('backfillTxCountsForPackage', () => {
-      it('delegates to pageBackwardTxs with 10000-page budget and returns {total, capped}', async () => {
+      it('delegates to pageBackwardTxs with the default 200000-page budget for non-framework packages', async () => {
         const spy = jest
           .spyOn(service as any, 'pageBackwardTxs')
           .mockResolvedValue({ scanned: 50, reachedEnd: true });
         txDigestModel.countDocuments.mockResolvedValue(50);
 
         const result = await service.backfillTxCountsForPackage('0xpkg');
-        expect(spy).toHaveBeenCalledWith('0xpkg', 10000);
+        expect(spy).toHaveBeenCalledWith('0xpkg', 200000);
         expect(result).toEqual({ total: 50, capped: false });
       });
 
-      it('capped=true when the drain hits the 10000-page budget', async () => {
+      it('uses the legacy 10000-page budget for framework packages (0x1 / 0x2 / 0x3)', async () => {
+        const spy = jest
+          .spyOn(service as any, 'pageBackwardTxs')
+          .mockResolvedValue({ scanned: 500000, reachedEnd: false });
+        txDigestModel.countDocuments.mockResolvedValue(500000);
+
+        const framework = '0x0000000000000000000000000000000000000000000000000000000000000002';
+        await service.backfillTxCountsForPackage(framework);
+        expect(spy).toHaveBeenCalledWith(framework, 10000);
+      });
+
+      it('capped=true when the drain hits the page budget', async () => {
         jest
           .spyOn(service as any, 'pageBackwardTxs')
           .mockResolvedValue({ scanned: 500000, reachedEnd: false });
