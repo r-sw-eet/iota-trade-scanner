@@ -2,9 +2,9 @@ import { ProjectDefinition } from './project.interface';
 
 import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale, clawSwapGateway } from './defi/_index';
 import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus, truvid } from './trade/_index';
-import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft } from './identity/_index';
+import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft, turingcerts } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft, wormhole } from './bridges/_index';
-import { pythOracle, switchboardOracle } from './oracles/_index';
+import { pythOracle, switchboardOracle, kamuiVrf } from './oracles/_index';
 import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip } from './games/_index';
 import {
@@ -12,6 +12,8 @@ import {
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,
   nativeStaking, iotaFramework, ifTesting, stardustMigratedTokens, krillTube, giveRep,
   carbonCredits,
+  stardustFramework, legacyMigrationHistory, iotaEvmAnchor,
+  studioB8b1Demos, studio0a0dExtras,
 } from './misc/_index';
 
 /**
@@ -44,6 +46,10 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   // Identity (identityFull before identityWot — more specific)
   identityFull, identityWot, objectid, credentials,
   iotaNames, iotaLink, carNft,
+  // Turing Certs — IOTA Business Innovation Program partner, W3C VC issuance
+  // stack. Deployer-pinned so the `vc_data` / `vc_envelope` module names can't
+  // false-positive against any other VC deployment.
+  turingcerts,
 
   // Bridges
   echoProtocolBridge,
@@ -55,6 +61,9 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
 
   // Oracles
   pythOracle, switchboardOracle,
+  // Kamui VRF by Mangekyou Labs — single-package VRF primitive at
+  // `0xc871ca37…`. Deployer-pinned + module-name-guarded.
+  kamuiVrf,
 
   // NFT (nftLaunchpad before tradeport so the launchpad sub-product wins
   // its `{launchpad, mint_box}` match over tradeport's deployer-catch-all)
@@ -82,6 +91,13 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   chess, ticTacToe, game2048, iotaFlip,
 
   // Misc
+  // Chain primitives grouped up top — genesis-installed framework packages
+  // and IF migration/anchor infrastructure. These ship from IOTA Foundation
+  // deployers (or deployerless genesis) and are matched by packageAddresses
+  // or narrow module rules, not by team routing.
+  stardustFramework,
+  legacyMigrationHistory,
+  iotaEvmAnchor,
   clawnera, vault, tokenSale, izipublish,
   giftDrop, liquidlink, boltEarth,
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,
@@ -90,6 +106,12 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   krillTube,
   giveRep,
   carbonCredits,
+  // Studio-sibling aggregate rows — MUST come after any narrower project defs
+  // on the same team (studioB8b1Demos after game2048, studio0a0dExtras after
+  // clawnera/clawSwapGateway/tokenSale). Both deployer-pinned + module-any
+  // bucket rows, catch-all for modules that don't match dedicated rules.
+  studioB8b1Demos,
+  studio0a0dExtras,
   // `ifTesting` is routing-only (match: {}) and MUST come last among
   // `iota-foundation` projects — the team-deployer routing code picks the
   // first routing-only project it finds on the team, so putting it last

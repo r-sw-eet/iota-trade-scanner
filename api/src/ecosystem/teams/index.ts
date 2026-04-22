@@ -2,9 +2,9 @@ import { Team } from './team.interface';
 
 import { poolsFinance, virtue, swirl, cyberperp, iotaroyale, magicsea } from './defi/_index';
 import { tlip, twinFoundation, salus } from './trade/_index';
-import { objectid, iotaNames } from './identity/_index';
+import { objectid, iotaNames, turingcerts } from './identity/_index';
 import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
-import { switchboard } from './oracles/_index';
+import { switchboard, kamui } from './oracles/_index';
 import { tradeport, iotaPunks, apeDao } from './nft/_index';
 import { iotaFlip, gamifly } from './games/_index';
 import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, studio49c4, studiob5fc, studio457d, studiocebe, clawnera, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
@@ -34,13 +34,13 @@ export const ALL_TEAMS: Team[] = [
   tlip, twinFoundation, salus,
 
   // Identity
-  objectid, iotaNames,
+  objectid, iotaNames, turingcerts,
 
   // Bridges
   echoProtocol, layerzero, wormholeFoundation,
 
   // Oracles
-  switchboard,
+  switchboard, kamui,
 
   // NFT
   tradeport, iotaPunks, apeDao,

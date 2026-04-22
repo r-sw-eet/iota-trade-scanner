@@ -5,3 +5,4 @@ export { credentials } from './credentials';
 export { iotaNames } from './iota-names';
 export { iotaLink } from './iota-link';
 export { carNft } from './car-nft';
+export { turingcerts } from './turingcerts';

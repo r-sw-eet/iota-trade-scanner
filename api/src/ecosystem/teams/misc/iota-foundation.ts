@@ -40,6 +40,18 @@ export const iotaFoundation: Team = {
     // (12 pkgs: iotalink + 3 LayerZero OFT wrappers + 3 mockcoins + airdrop
     // + rebased_nft + test_nft + icon/spam + custom_metadata_registry+nft)
     '0xd3906909a7bfc50ea9f4c0772a75bc99cd0da938c90ec05a556de1b5407bd639',
+    // Stardust→Rebased migration-history ledger admin. Single package at
+    // `0x4770d22b…` (module `legacy_migration_history`) with a `MigrationHistory`
+    // shared object recording 2,274 migrations across 3,968 addresses. See the
+    // `legacyMigrationHistory` project def for the full evidence trail.
+    '0xbeb1ba753fd0bbc0f5470b3948345da6dc870c0421d809cfc3abe95b70f625a7',
+    // IOTA EVM L2 anchor deployer — publishes the live mainnet IOTA EVM anchor
+    // package `0x1b33a3cf…` (ISC `anchor` + `assets_bag` + `request` modules).
+    // Gold-standard confirmation: IOTA's own docs page
+    // (docs.iota.org/developer/iota-evm/getting-started/networks-and-chains)
+    // publishes `0x1b33a3cf7eb5dde04ed7ae571db1763006811ff6b7bb35b3d1c780de153af9dd`
+    // verbatim as the mainnet IOTA EVM Package ID. Chain ID 8822.
+    '0x8779ca52589fd6f4ca1776b63b200a7b8f9fd71f2c4d386a987dfdb24569fc5e',
     // Internal test deployments — used to live on the standalone `if-testing`
     // team, merged in 2026-04-18 so "Hide IOTA Foundation" is one team check.
     // The routing-only `Testing` project picks up packages at these
@@ -48,7 +60,9 @@ export const iotaFoundation: Team = {
     '0x278f2a12f9cb6f2c54f6f08bad283c3abc588696fadff6cf9dd88fd20019afeb',
     '0x164625aaa09a1504cd37ba25ab98525cf2e15792f06a12dd378a044a0d719abe',
     // Chain primitives: system packages 0x2 / 0x3 have no conventional deployer
-    // and are matched by package address, not by deployer.
+    // and are matched by package address, not by deployer. `0x107a` (Stardust
+    // framework, per `stardustFramework`) is likewise genesis-installed and
+    // deployerless.
   ],
   attribution: `
 Consolidated team covering the IOTA Foundation's chain-primitive packages, Identity stack, Identity Asset Framework, Accreditation Registry, Notarization, Traceability, and internal test deployments. All deployers are IF-operated addresses identified from IF-published documentation (iota.org/products, github.com/iotaledger/notarization, the IOTA Identity developer docs) and cross-referenced against the module signatures we match (\`dynamic_notarization\`, \`asset\` + \`multicontroller\` for the Identity Asset Framework, \`accreditation\` + \`property\` for the Accreditation Registry, \`traceability\`, Identity modules). Chain primitives (\`0x0000000000000000000000000000000000000000000000000000000000000002\`, \`0x0000000000000000000000000000000000000000000000000000000000000003\`) are matched by literal address — genesis-installed system packages have no conventional deployer.
