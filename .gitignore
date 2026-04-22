@@ -24,3 +24,8 @@ plans/
 # Nuxt port of the React design prototype — work in progress, keep local
 # until it reaches MVP parity. Revisit before Phase 3 cutover.
 projects/website-v2/
+
+# Teaser — branded with "IOTA Registry" which violates IOTA Foundation's
+# trademark policy (use of IOTA as project name is prohibited). Kept local
+# and deployed manually via rsync until a compliant name is chosen.
+projects/website-v2-teaser/
