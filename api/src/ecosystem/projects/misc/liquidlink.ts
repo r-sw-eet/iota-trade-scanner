@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const liquidlink: ProjectDefinition = {
   name: 'LiquidLink',
   layer: 'L1',
-  category: 'Incentive / Social',
+  category: 'Social',
+  subcategory: 'Incentive',
   description: 'On-chain points, loyalty, and profile system on IOTA Rebased. LiquidLink\'s IOTA-native front door (iota.liquidlink.io) lets projects attach verifiable engagement scores to user profiles.',
   urls: [
     { label: 'Website', href: 'https://www.liquidlink.io' },

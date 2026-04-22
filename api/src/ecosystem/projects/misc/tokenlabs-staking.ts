@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const tokenlabsStaking: ProjectDefinition = {
   name: 'TokenLabs Staking Framework',
   layer: 'L1',
-  category: 'Staking',
+  category: 'DeFi',
+  subcategory: 'Staking',
   description: 'Liquidswap-derived multi-pool staking framework shipped by TokenLabs\' engine deployer. Generic `StakePool<StakingCoin, RewardCoin>` primitive that powers the 7 live TokenLabs farms — TLN/IOTA, TLN/TLN self-stake with compound, Pools Finance LP-token farms, cross-protocol CERT/CERT pair farms.',
   urls: [{ label: 'Website', href: 'https://tokenlabs.network' }],
   teamId: 'tokenlabs',

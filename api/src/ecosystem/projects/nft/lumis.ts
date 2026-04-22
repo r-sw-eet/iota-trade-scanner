@@ -4,6 +4,7 @@ export const lumis: ProjectDefinition = {
   name: 'Lumis',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Collection',
   description: 'MagicSea\'s 3,333-supply community PFP collection (symbols of friendship, originally airdropped to long-time ShimmerSea community members). Re-materialised on IOTA Rebased L1 Move. Lumi holders get $LUM fair-launch whitelist + governance voice. 3-trait PFP shape (`background` / `body` / `face`), with rare variants (Lumi Pirate, Lumi Bot, golden/bronze/silver). Single package at `0x6a1e3e9c…`, module `lumi_nft`. Not a dumb collectible exactly — carries DAO utility — but stays `isCollectible: true` for dashboard consistency with other governance-NFT rows (ApeDAO Apes).',
   urls: [
     { label: 'Lumis docs', href: 'https://docs.magicsea.finance/protocol/nft-marketplace/lumis' },

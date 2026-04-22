@@ -4,6 +4,8 @@ export const ctrlvAgents: ProjectDefinition = {
   name: 'ctrlv AI Agents',
   layer: 'L1',
   category: 'Identity',
+  subcategory: 'Framework',
+  industries: ['AI'],
   description: 'On-chain AI-agent identity-registry pilot on IOTA Rebased. Single package shipping the `ctrlv_agent::AgentNFT` primitive with structured AI-agent metadata (`model` / `service` / `role` / `name` / `description` / `url`) and full lifecycle events (Mint / Transfer / Update / Burn). Each `AgentNFT` represents one tokenized AI agent — a bet on giving agents durable cross-service identity + reputation. Demo scale: 1 "Demo Agent" minted (`model: "Claude"`, `role: "Assistant"`, `service: "Customer Support"`). No public brand presence.',
   urls: [],
   teamId: 'studio-cebe',

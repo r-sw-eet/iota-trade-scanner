@@ -9,7 +9,8 @@ import { ProjectDefinition } from '../project.interface';
 export const iotaEvmAnchor: ProjectDefinition = {
   name: 'IOTA EVM Anchor',
   layer: 'L1',
-  category: 'Chain Primitive',
+  category: 'Infrastructure',
+  subcategory: 'EVM Anchor',
   description: 'L1 anchor for the IOTA EVM L2 (Chain ID 8822) — the ISC `anchor` + `assets_bag` + `request` primitive published at `0x1b33a3cf…` by the IOTA Foundation. Official IOTA docs name this exact address as the mainnet IOTA EVM Package ID. User-facing side of the anchor: retail traffic bridging assets between L1 and the EVM, L2 blocks being finalized via the anchor object, and ISC request objects recording user actions. Live activity: 500k+ TXs (hits the backfill floor — real count higher), 11.8k events, 2,908 unique senders — one of the top-activity unattributed clusters on the network, now gold-standard attributed.',
   urls: [
     { label: 'IOTA EVM', href: 'https://blog.iota.org/iotas-evm-mainnet-launch/' },

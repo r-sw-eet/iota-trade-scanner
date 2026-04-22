@@ -17,7 +17,8 @@ import { ProjectDefinition } from '../project.interface';
 export const stardustFramework: ProjectDefinition = {
   name: 'Stardust Framework',
   layer: 'L1',
-  category: 'Chain Primitive',
+  category: 'Infrastructure',
+  subcategory: 'Chain Primitive',
   description: 'Genesis-installed Stardust framework package at `0x107a`, documented by IOTA as the on-chain identifier for the Stardust Move package. Ships 12 modules emulating pre-Rebased Stardust output types — `alias_output`, `basic_output`, `nft_output` + their unlock-condition modules (`address_unlock_condition`, `expiration_unlock_condition`, `storage_deposit_return_unlock_condition`, `timelock_unlock_condition`) + `alias` / `nft` (the output-owned inner objects) + `irc27` (Stardust NFT metadata standard) + `stardust_upgrade_label` + `utilities` — so migrated UTXOs can be unlocked, spent, and claimed via Move. Live claim traffic: 5.6k TXs observed post-launch, ongoing as Stardust holders migrate late.',
   urls: [
     { label: 'Stardust framework docs', href: 'https://docs.iota.org/references/framework/stardust' },

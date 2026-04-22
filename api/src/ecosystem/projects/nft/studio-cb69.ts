@@ -4,6 +4,7 @@ export const studioCb69Aggregate: ProjectDefinition = {
   name: 'Studio 0xcb6956e9',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Collection',
   description: 'Deployer-level aggregate for the anonymous multi-collection NFT shop at `0xcb6956e9…3d63724c` — 33 packages mixing a handful of small hand-minted PFP collections (Healthy Gang, Ghost Lights, Tanapaz, Toma Rajadão, Tranquilidade Drops) with ~25 keyboard-mash test-deploy modules. Narrow fingerprint projects (currently just Healthy Gang) carve out labeled rows for the real collections; this aggregate catches the remainder so the activity stays visible without polluting the project list with per-deploy rows.',
   urls: [],
   teamId: 'studio-cb69',

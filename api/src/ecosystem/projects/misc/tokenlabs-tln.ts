@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const tokenlabsTln: ProjectDefinition = {
   name: 'TLN Token',
   layer: 'L1',
-  category: 'Token',
+  category: 'DeFi',
+  subcategory: 'Token',
   description: 'TokenLabs Network (TLN) token. TokenLabs\' governance / utility token, consumed by downstream IOTA products (e.g. IotaRoyale\'s TLN farm).',
   urls: [{ label: 'Website', href: 'https://tokenlabs.network' }],
   teamId: 'tokenlabs',

@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const poolsFinance: ProjectDefinition = {
   name: 'Pools Finance',
   layer: 'L1',
-  category: 'DEX (AMM)',
+  category: 'DeFi',
+  subcategory: 'DEX',
   description: 'First decentralized exchange on IOTA Rebased. Constant-product AMM with pools, stable-pool math, swap routing, and LP staking — all shipped inside a single audited 10-module package.',
   urls: [{ label: 'App', href: 'https://pools.finance' }],
   teamId: 'pools-finance',

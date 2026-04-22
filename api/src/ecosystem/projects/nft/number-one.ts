@@ -11,6 +11,7 @@ export const numberOneFreeNft: ProjectDefinition = {
   name: 'Number 1 Collection',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Collection',
   addedAt: '2026-04-22',
   description: 'Biggest user-facing mint campaign on IOTA Rebased by any measure: 1,045,000 unique senders each signed their own `mint_for_free` call, producing 1,484,566 `EvtMintedNFT` events over a 6-week window (2026-02-03 → 2026-03-15). Single package at `0x86a84861…` (module `free_nft`, struct `FreeNFT`), data-URL SVG art (blue-cyan gradient rectangle with a per-mint claim-number rendered as white text). No public brand surface found — synthetic `studio-2cd3` team; dashboard surfaces the scale regardless.',
   urls: [],

@@ -4,6 +4,7 @@ export const wormhole: ProjectDefinition = {
   name: 'Wormhole',
   layer: 'L1',
   category: 'Bridge',
+  subcategory: 'Messaging',
   description: 'Wormhole cross-chain messaging protocol on IOTA Rebased. Generic message passing between IOTA and other blockchains, secured by a network of guardian nodes that verify and relay cross-chain attestations (VAAs — Verifiable Action Approvals).',
   urls: [
     { label: 'Website', href: 'https://wormhole.com' },

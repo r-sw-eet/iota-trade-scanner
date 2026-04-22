@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const tokenlabsVIota: ProjectDefinition = {
   name: 'TokenLabs Liquid Staking (vIOTA)',
   layer: 'L1',
-  category: 'Liquid Staking',
+  category: 'DeFi',
+  subcategory: 'Liquid Staking',
   description: 'TokenLabs\' liquid staking product. Users stake IOTA and receive vIOTA, an LST that accrues validator rewards while remaining liquid. **Second liquid-staking protocol on IOTA Rebased** alongside Swirl\'s stIOTA.',
   urls: [{ label: 'Website', href: 'https://tokenlabs.network' }],
   teamId: 'tokenlabs',

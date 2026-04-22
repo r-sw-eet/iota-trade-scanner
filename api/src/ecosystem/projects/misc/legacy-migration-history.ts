@@ -13,7 +13,8 @@ import { ProjectDefinition } from '../project.interface';
 export const legacyMigrationHistory: ProjectDefinition = {
   name: 'Legacy Migration History',
   layer: 'L1',
-  category: 'Chain Primitive',
+  category: 'Infrastructure',
+  subcategory: 'Chain Primitive',
   description: 'Admin-maintained ledger recording Stardust→Rebased migrations. Single package at `0x4770d22b…` with module `legacy_migration_history` shipping a shared `MigrationHistory` object + `records_lut` per-address table. Live counters (2026-04-22 probe): `migration_count: 2274`, `address_count: 3968` — 2.3k migrations recorded for 3,968 distinct addresses. Sole writer is the dedicated admin account `0xbeb1ba…`; activity continued as late as 2026-01-09, months after Rebased mainnet launch, indicating the migration window stays open for late claimants.',
   urls: [
     { label: 'Stardust migration process', href: 'https://docs.iota.org/developer/stardust/migration-process' },

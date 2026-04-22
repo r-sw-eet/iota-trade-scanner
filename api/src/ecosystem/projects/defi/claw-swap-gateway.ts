@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const clawSwapGateway: ProjectDefinition = {
   name: 'CLAW Swap Gateway',
   layer: 'L1',
-  category: 'DEX (AMM)',
+  category: 'DeFi',
+  subcategory: 'DEX',
   description: 'On-ramp swap gateway for the CLAW token (Studio 0a0d ecosystem, operated by GitHub user `Moron1337`). Users swap other coins into CLAW via an oracle-priced gateway with pausable / role-gated controls (`AdminCap`, `GuardianCap`, `OracleCap`). Distinct from a generic AMM — the gateway is the sole mint / distribution endpoint for CLAW, governed by explicit FX-update + coin-registration events. Single package `0x73467a1b…` on the `studio-0a0d` deployer, module `claw_swap_gateway`.',
   urls: [
     { label: 'CLAW sale', href: 'https://buy.claw-coin.com' },

@@ -17,7 +17,7 @@ jest.mock('./projects', () => {
     {
       name: 'AddrOnly',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Matches on specific package address.',
       urls: [],
       teamId: null,
@@ -27,7 +27,7 @@ jest.mock('./projects', () => {
     {
       name: 'Exact',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Matches only if module set equals exactly.',
       urls: [],
       teamId: null,
@@ -36,7 +36,7 @@ jest.mock('./projects', () => {
     {
       name: 'AllRequired',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'All required modules must be present.',
       urls: [],
       teamId: null,
@@ -45,7 +45,7 @@ jest.mock('./projects', () => {
     {
       name: 'AnyOne',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'At least one of listed modules must be present.',
       urls: [],
       teamId: null,
@@ -54,7 +54,7 @@ jest.mock('./projects', () => {
     {
       name: 'MinMods',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Requires a minimum module count.',
       urls: [],
       teamId: null,
@@ -63,7 +63,7 @@ jest.mock('./projects', () => {
     {
       name: 'EmptyMatch',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Def with no synchronous matcher — only reachable via fingerprint or team routing.',
       urls: [],
       teamId: null,
@@ -72,7 +72,7 @@ jest.mock('./projects', () => {
     {
       name: 'FingerprintOnly',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Def with only a fingerprint — must be invisible to the sync matcher.',
       urls: [],
       teamId: null,
@@ -81,7 +81,7 @@ jest.mock('./projects', () => {
     {
       name: 'Combo',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Def with both packageAddresses and a fingerprint (Salus-style).',
       urls: [],
       teamId: null,
@@ -92,7 +92,7 @@ jest.mock('./projects', () => {
     {
       name: 'DeployerOnly',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Matches every package published by a listed deployer.',
       urls: [],
       teamId: null,
@@ -101,7 +101,7 @@ jest.mock('./projects', () => {
     {
       name: 'DeployerAndModule',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Composition: deployer AND a required module.',
       urls: [],
       teamId: null,
@@ -130,7 +130,7 @@ jest.mock('./projects', () => {
     {
       name: 'StrictSolo',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Sole project of team-strict — has its own synchronous match rule, so it must NOT absorb Aggregate packages from the shared deployer (regression guard for the TWIN/IF-Testing shared-deployer bug).',
       urls: [],
       teamId: 'team-strict',
@@ -139,7 +139,7 @@ jest.mock('./projects', () => {
     {
       name: 'SharedRoutingSolo',
       layer: 'L1',
-      category: 'Test',
+      category: 'Misc',
       description: 'Sole project of team-shared-routing — routing-only (empty match), shares the deployer 0xSTRICT with StrictSolo. Tests that routing iterates past a sync-match team and lands on the routing-only team (TWIN + IF-Testing in production).',
       urls: [],
       teamId: 'team-shared-routing',
@@ -2681,7 +2681,10 @@ describe('EcosystemService', () => {
       expect(snap.l2.map((p: any) => p.name)).toContain('L2Dex');
       const l2 = snap.l2.find((p: any) => p.name === 'L2Dex');
       expect(l2.slug).toBe('evm-l2dex');
-      expect(l2.category).toBe('Dexs');
+      // DefiLlama's `Dexs` is normalized to our taxonomy at read time.
+      expect(l2.category).toBe('DeFi');
+      expect(l2.subcategory).toBe('DEX');
+      expect(l2.categoryLabel).toBe('DeFi / DEX');
       expect(l2.urls[0]).toEqual({ label: 'Website', href: 'https://l2dex.example' });
       expect(l2.tvl).toBe(5_000);
     });
@@ -2736,7 +2739,10 @@ describe('EcosystemService', () => {
       expect(snap.l2.map((p: any) => p.name)).not.toContain('Ghost');
       const min = snap.l2.find((p: any) => p.name === 'MinL2');
       expect(min).toBeTruthy();
-      expect(min.category).toBe('Unknown');
+      // Missing / unmapped DefiLlama category falls through to Misc.
+      expect(min.category).toBe('Misc');
+      expect(min.subcategory).toBeNull();
+      expect(min.categoryLabel).toBe('Misc');
       expect(min.urls).toEqual([]);
       expect(min.slug).toBe('evm-minl2');
     });

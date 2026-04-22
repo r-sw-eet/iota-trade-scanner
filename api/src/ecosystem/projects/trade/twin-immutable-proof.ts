@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const twinImmutableProof: ProjectDefinition = {
   name: 'TWIN ImmutableProof',
   layer: 'L1',
-  category: 'Trade Finance',
+  category: 'Real World',
+  subcategory: 'Framework',
   description: 'TWIN Foundation\'s generic anchoring layer on IOTA mainnet. Each call to `verifiable_storage::store_data` writes a W3C Verifiable Credential of type ImmutableProof into a Move object, giving TWIN-powered trade apps a tamper-evident on-chain timestamp plus DID-signed author attribution for any off-chain document or changeset.',
   urls: [
     { label: 'TWIN', href: 'https://www.twin.org' },

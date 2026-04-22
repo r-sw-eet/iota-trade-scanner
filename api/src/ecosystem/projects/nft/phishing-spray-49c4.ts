@@ -4,6 +4,7 @@ export const phishingSpray49c4: ProjectDefinition = {
   name: 'Phishing Spray (PANDABYTE / Kiln)',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Collection',
   description: 'Phishing-airdrop NFT campaign on IOTA Rebased. Deployer `0x49c4e917…` sprays NFTs with metadata pointing at two non-resolving impersonation sites: `pandabyte.org` (inventing a "PANDABYTE Reward Event 2025" brand) and `kilnstake.net` (squatting on real validator brand Kiln, whose actual site is `kiln.fi`). Spray fingerprint confirms the pattern — 597 `PandabyteTicket` NFTs, each held by a different wallet (one per recipient). Classic scam-airdrop playbook: recipient sees "claim your reward" metadata, visits fake site, wallet drains. All 3 packages on this deployer attributed here as one warning row.',
   urls: [],
   teamId: 'studio-49c4',

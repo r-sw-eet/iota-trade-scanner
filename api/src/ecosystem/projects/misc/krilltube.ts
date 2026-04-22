@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const krillTube: ProjectDefinition = {
   name: 'KrillTube',
   layer: 'L1',
-  category: 'Incentive / Social',
+  category: 'Social',
+  subcategory: 'Incentive',
   description: 'Decentralized video platform on IOTA Rebased — watch-to-earn + upload-to-earn economics via Move `tunnel` primitive: each viewer-creator session opens a `Tunnel` with a `ReceiverConfig` fee-split (creator / operator / additional recipients, all in basis-points). `CreatorConfig` objects register each content creator and their payout routing. 21 creators onboarded, primary operator `0xba1e07d0…` (matches the KrillTube operator noted in the `studio-b8b1` team attribution). Branded metadata on closed tunnels shows `"KrillTube Video - <UUID>"` — TX-history reveals real video-payment flows. Frontend at `krill.tube` is currently offline (Vercel `DEPLOYMENT_NOT_FOUND`), but the on-chain tunnel package remains deployed and the creator-config state is intact.',
   urls: [
     { label: 'App (currently offline)', href: 'https://krill.tube/' },

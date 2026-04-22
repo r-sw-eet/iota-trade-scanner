@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const cyberperp: ProjectDefinition = {
   name: 'CyberPerp (L1 Move)',
   layer: 'L1',
-  category: 'Perpetuals / DEX',
+  category: 'DeFi',
+  subcategory: 'Perpetuals',
   description: 'CyberPerp\'s IOTA L1 Move deployment — GMX-style perpetuals, CYB token, and LayerZero OFT wrapper. CyberPerp\'s primary deployment is on IOTA EVM (L2, shown separately via DefiLlama); this row covers the L1 Move companion only. Both layers are tracked independently — TVL / volume are layer-specific and not double-counted.',
   urls: [
     { label: 'Website', href: 'https://cyberperp.io' },

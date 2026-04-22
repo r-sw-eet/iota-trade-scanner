@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const objectid: ProjectDefinition = {
   name: 'ObjectID',
   layer: 'L1',
-  category: 'RWA / Product Authenticity',
+  category: 'Real World',
+  subcategory: 'Application',
   description: 'Object-authenticity platform linking physical goods (via GS1 codes and document anchors) to on-chain identities and credit. Showcased on iota.org as a product-authenticity solution.',
   urls: [
     { label: 'Website', href: 'https://objectid.io' },

@@ -10,6 +10,7 @@ export const layerZeroCounterExample: ProjectDefinition = {
   name: 'LayerZero Counter (Example OApp)',
   layer: 'L1',
   category: 'Bridge',
+  subcategory: 'Messaging',
   description: 'LayerZero V2\'s canonical tutorial OApp on IOTA L1 — a `counter` Move package demonstrating how to build an Omnichain Application (OApp) on top of LayerZero\'s EndpointV2 + OApp framework. Single package at deployer `0xbd261819…` with modules `counter, counter_ptb_builder, msg_codec, options_builder`. Each counter transaction composes with the protocol deployer\'s EndpointV2 + OApp + Worker packages. Dev/test scale (21 TXs, 2 senders) — not production activity, but a concrete demonstration that the full V2 stack is live and integrable on IOTA.',
   addedAt: '2026-04-22',
   urls: [

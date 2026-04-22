@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const tokenlabsPayment: ProjectDefinition = {
   name: 'TokenLabs Payment',
   layer: 'L1',
-  category: 'Payments',
+  category: 'DeFi',
+  subcategory: 'Payments',
   description: 'Simple payment primitive by TokenLabs. Utility module for direct on-chain transfers with attached metadata; paired with TLN for in-ecosystem settlements.',
   urls: [{ label: 'Website', href: 'https://tokenlabs.network' }],
   teamId: 'tokenlabs',

@@ -14,7 +14,7 @@ import { ProjectDefinition } from '../project.interface';
 export const studio0a0dExtras: ProjectDefinition = {
   name: 'Studio 0a0d — CLAW Token & SPEC Packs',
   layer: 'L1',
-  category: 'Token / Game',
+  category: 'Misc',
   description: 'Catch-all sibling row for Studio 0a0d (Moron1337 / Clawnera ecosystem) modules not yet carved into dedicated rows: the `claw_coin` token-type package (the CLAW meme coin itself — OTW witness + CoinMetadata), the `spec_packs` SPEC lootbox / pack-opening mini-game (observed struct `spec_packs::Global<SPEC_COIN>` + `spec_packs::Pack`), and `onchain_asset_lane_manager` + `order_payment_assets` + `payment_assets` commerce-lane modules iterated on the deployer. 8 packages, 2,423 TXs, 89 unique senders. Siblings to the existing `clawnera` marketplace, `clawSwapGateway`, and `tokenSale` (SPEC launchpad) rows.',
   urls: [
     { label: 'Clawnera', href: 'https://clawnera.com' },

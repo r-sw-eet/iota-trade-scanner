@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const iotaroyale: ProjectDefinition = {
   name: 'IotaRoyale',
   layer: 'L1',
-  category: 'Gaming / GambleFi',
+  category: 'Game',
+  subcategory: 'GambleFi',
   description: 'Parchís and board-games platform on IOTA Rebased. Players compete in PvP matches; the product ships its own $IRT reward token plus farms that pair IRT with TLN and with Pools Finance LP tokens.',
   urls: [{ label: 'Website', href: 'https://iotaroyale.com' }],
   teamId: 'iotaroyale',

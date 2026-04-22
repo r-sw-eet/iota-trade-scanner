@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const iotaNames: ProjectDefinition = {
   name: 'IOTA Names',
   layer: 'L1',
-  category: 'Name Service',
+  category: 'Identity',
+  subcategory: 'Name Service',
   description: 'Native name service for IOTA Rebased — users register `.iota` domains that map human-readable handles to addresses, replacing long hex IDs in UX flows. Codebase is IF-maintained at `github.com/iotaledger/iota-names` (Apache-2.0) with a TypeScript SDK at `@iota/iota-names-sdk`; commercial service at `iotanames.com` is operated by **Rising Phoenix 2 Ltd** (British Virgin Islands; privacy contact at `privacy@iota.org` — IF-operated BVI wrapper). Sampled registrations surface enterprise / trade-finance use cases (`kenyaportsauthority.iota`, `hapaglloyd.iota`, `nnpc.iota`, `onchainidentity.iota`) alongside community names.',
   urls: [
     { label: 'App', href: 'https://iotanames.com' },

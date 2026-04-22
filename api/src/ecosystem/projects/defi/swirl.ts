@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const swirl: ProjectDefinition = {
   name: 'Swirl V2',
   layer: 'L1',
-  category: 'Liquid Staking',
+  category: 'DeFi',
+  subcategory: 'Liquid Staking',
   description: 'Current (V2) Swirl liquid staking protocol on IOTA Rebased — users stake IOTA and receive stIOTA (Move type `cert::CERT`), a reward-bearing LST that accrues validator rewards while remaining tradeable and usable as DeFi collateral (Virtue accepts it for VUSD CDPs). 9 packages across two deployers shipping the 5-module `{cert, math, native_pool, ownership, validator_set}` codebase audited by Hacken for Ankr\'s Asphere team. V1 (`{pool, riota}`) is tracked as a separate project under the same team so the V1→V2 migration stays visible on-chain.',
   urls: [
     { label: 'App', href: 'https://swirlstake.com' },
@@ -32,7 +33,8 @@ History: originally \`{exact: [pool, riota]}\` here (V1-only, 4 of 13 packages).
 export const swirlV1: ProjectDefinition = {
   name: 'Swirl V1',
   layer: 'L1',
-  category: 'Liquid Staking',
+  category: 'DeFi',
+  subcategory: 'Liquid Staking',
   description: 'Swirl\'s original (V1) liquid staking deployment — 4 on-chain packages with the 2-module `{pool, riota}` core. `pool` is the staking vault, `riota` is the receipt token (internally called "rIOTA"). Superseded by Swirl V2, which rebuilds the protocol around a 5-module architecture and a new `cert::CERT` token externally branded as stIOTA. Listed separately so residual V1 activity (unmigrated stakers, redemptions) stays visible as the migration completes.',
   urls: [
     { label: 'App', href: 'https://swirlstake.com' },

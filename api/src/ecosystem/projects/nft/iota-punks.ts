@@ -4,6 +4,7 @@ export const iotaPunks: ProjectDefinition = {
   name: 'IOTAPUNKS',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Collection',
   description: 'Community-driven 32×32 pixel-art PFP collection on IOTA Rebased, CryptoPunks-inspired but with traits modelled on well-known figures from the IOTA Foundation / community (character trait values like "Holger" surface in minted NFTs). 15,555 total planned; 89 minted on Rebased L1 Move so far (gradual ramp-up from a 2022-era Stardust/IOTA-EVM origin listed on Figment Marketplace). Single package at `0x65034c5…cd31`, single module `iotapunks`, full collection-management shape (AdminCap, RelayerCap, shared Collection object with swap + freeze controls).',
   urls: [
     { label: 'Website', href: 'https://iotapunks.com/' },

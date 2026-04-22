@@ -4,6 +4,7 @@ export const iotaLink: ProjectDefinition = {
   name: 'IOTA Link',
   layer: 'L1',
   category: 'Identity',
+  subcategory: 'Framework',
   description: 'IOTA Foundation commemorative NFT issued post-Rebased-mainnet-launch (2025-05) that links an Ethereum-format `network_address` (likely the holder\'s IOTA EVM L2 account) to their L1 Move identity. `token_id` issued sequentially into the thousands; media `IOTA-Link-NFT.mp4` served from `files.iota.org/media/` (IF CDN). Mints from the IF migration deployer `0xd3906909…` which also ships LayerZero OFT wrappers, mockcoin tokens, airdrop + rebased_nft scaffolding — the broader IF migration / bridge-tooling footprint.',
   urls: [
     { label: 'IF-hosted media', href: 'https://files.iota.org/media/IOTA-Link-NFT.mp4' },

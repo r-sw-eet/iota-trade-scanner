@@ -3,7 +3,7 @@ import { ProjectDefinition } from '../project.interface';
 export const ifTesting: ProjectDefinition = {
   name: 'Testing',
   layer: 'L1',
-  category: 'Testing',
+  category: 'Misc',
   description: 'Internal test deployments by the IOTA Foundation — gas station validation, transfer tests, and comparison campaigns. 79 packages across three deployers, each a single-module `nft` package; NFT instances carry tags like `gas_station_*`, `transfer_test`, `regular_comparison`. Packages reach this project exclusively via deployer-based team routing out of the NFT Collections aggregate bucket — the module matcher intentionally claims nothing directly.',
   urls: [{ label: 'IOTA Foundation', href: 'https://www.iota.org' }],
   teamId: 'iota-foundation',

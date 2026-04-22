@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const notarization: ProjectDefinition = {
   name: 'Notarization',
   layer: 'L1',
-  category: 'Notarization',
+  category: 'Real World',
+  subcategory: 'Framework',
   description: 'On-chain document notarization service on IOTA Rebased. Supports dynamic and locked notarization modes, with timelock capabilities. Documents are anchored on-chain with cryptographic proofs of existence and timestamps.',
   urls: [
     { label: 'IOTA Foundation', href: 'https://www.iota.org/products/notarization' },

@@ -4,6 +4,7 @@ export const echoProtocolBridge: ProjectDefinition = {
   name: 'Echo Protocol Bridge',
   layer: 'L1',
   category: 'Bridge',
+  subcategory: 'Asset Bridge',
   description: 'Multi-asset BTCFi bridge operated by Echo Protocol. First asset minted is iBTC; the bridge is designed to custody additional assets behind the same committee-based security model with rate limiting and a multi-sig treasury.',
   urls: [{ label: 'Website', href: 'https://www.echo-protocol.xyz' }],
   teamId: 'echo-protocol',

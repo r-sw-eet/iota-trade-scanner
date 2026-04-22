@@ -4,6 +4,7 @@ export const layerZero: ProjectDefinition = {
   name: 'LayerZero',
   layer: 'L1',
   category: 'Bridge',
+  subcategory: 'Messaging',
   description: 'LayerZero V2 protocol contracts on IOTA Rebased — EndpointV2, ULN302 send+receive message libraries, ZRO token, OApp framework, PTB builders, worker-interface libs (dvn_assign_job / executor_assign_job / worker_registry / worker_common). 22 packages at the protocol deployer `0x8a81a6…`. Separate DVN + Executor worker deployments tracked as the sibling "LayerZero Workers" row under the same team.',
   urls: [
     { label: 'Website', href: 'https://layerzero.network' },
@@ -25,6 +26,7 @@ export const layerZeroWorkers: ProjectDefinition = {
   name: 'LayerZero Workers',
   layer: 'L1',
   category: 'Bridge',
+  subcategory: 'Messaging',
   description: 'LayerZero\'s on-chain worker + admin deployments — 5 DVN instances (Nethermind, LayerZero Labs, USDT0, Luganodes, Horizen) sharing one LayerZero-Labs-published worker codebase at deployer `0x62279630…`, the Executor worker at deployer `0x76f89ad2…` (LayerZero Labs), and 5 per-operator DVN identity packages published by LZ Labs\' admin account `0x9004e1e4…` at the DVN-operator canonical addresses. 15 packages combined across 3 deployers. Separated from the protocol-contracts row so verification / delivery / operator-identity activity is visible independently from user-messaging activity.',
   urls: [
     { label: 'DVN directory API', href: 'https://metadata.layerzero-api.com/v1/metadata/dvns' },
@@ -65,7 +67,8 @@ Why not split per-DVN-operator into 5 rows: the DVN worker codebase is one Layer
 export const layerZeroPriceFeed: ProjectDefinition = {
   name: 'LayerZero Executor Price Feed',
   layer: 'L1',
-  category: 'Oracle',
+  category: 'Bridge',
+  subcategory: 'Messaging',
   description: 'On-chain price feed that LayerZero\'s off-chain Executor reads to quote cross-chain delivery fees on IOTA L1. Holds per-endpoint pricing models (native-token USD, denominator ratios) plus L2-specific calldata cost extensions (Arbitrum `gas_per_l2_tx` / `gas_per_l1_call_data_byte` / compression percent). Push-oracle admin model: `OwnerCap` + permissioned `PriceUpdaterCap` records, with updater gating delegated to LayerZero\'s own `package_whitelist_validator`.',
   urls: [
     { label: 'Website', href: 'https://layerzero.network' },
@@ -99,7 +102,8 @@ On-chain evidence (conclusive):
 export const layerZeroOft: ProjectDefinition = {
   name: 'LayerZero OFT',
   layer: 'L1',
-  category: 'Bridge (OFT)',
+  category: 'Bridge',
+  subcategory: 'OFT',
   description: 'LayerZero Omnichain Fungible Token standard on IOTA. Allows tokens to exist natively on multiple chains simultaneously with unified supply, enabling seamless cross-chain token transfers.',
   urls: [
     { label: 'Website', href: 'https://layerzero.network' },

@@ -19,7 +19,8 @@ import { ProjectDefinition } from '../project.interface';
 export const stardustMigratedTokens: ProjectDefinition = {
   name: 'Stardust Migrated Tokens',
   layer: 'L1',
-  category: 'Token',
+  category: 'Infrastructure',
+  subcategory: 'Chain Primitive',
   description: 'Legacy native tokens migrated from the pre-Rebased IOTA network (Stardust era) into Rebased mainnet as genesis-installed Move packages. 79 packages spanning 64 distinct tickers — BTC×5, T×5, KATZO×4, plus 60 singletons including `monke`, `katzo`, `magic`, `chips`, `idota`, `ape`, `xau`, `love`, `heart`, plus anonymous foundry-issued tokens (`foundry_*`). Each package ships one module (lowercase ticker) containing one witness struct (uppercase ticker, `drop` ability) — the canonical IOTA coin-type pattern. IF-installed at Rebased genesis.',
   urls: [
     { label: 'Rebased Genesis Ceremony', href: 'https://blog.iota.org/rebased-mainnet-upgrade/' },

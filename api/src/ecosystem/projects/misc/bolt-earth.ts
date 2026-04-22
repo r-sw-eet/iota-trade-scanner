@@ -3,7 +3,9 @@ import { ProjectDefinition } from '../project.interface';
 export const boltEarth: ProjectDefinition = {
   name: 'Bolt.Earth RealFi',
   layer: 'L1',
-  category: 'DePIN / RWA',
+  category: 'Real World',
+  subcategory: 'Application',
+  industries: ['Energy', 'DePIN'],
   description: 'Bolt.Earth tokenizes revenue shares of real-world EV-charging stations on IOTA. Stations are registered on-chain, ownership and revenue rights are traded as shares, and proxy contracts distribute earnings to tokenholders.',
   urls: [{ label: 'Website', href: 'https://bolt.earth' }],
   teamId: 'bolt-earth',

@@ -156,4 +156,4 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   ifTesting,
 ];
 
-export { ProjectDefinition };
+export { ProjectDefinition, Category, Subcategory, CATEGORIES, SUBCATEGORIES } from './project.interface';

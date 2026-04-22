@@ -11,6 +11,7 @@ export const studioB30cRootAnchor: ProjectDefinition = {
   name: 'Studio 0xb30cf677 — Root Anchor',
   layer: 'L1',
   category: 'Infrastructure',
+  subcategory: 'Chain Primitive',
   description: 'Unknown rollup or sidechain posting state roots to IOTA Rebased L1. Single package, single `root_anchor` module, single shared `RootRegistry` object receiving sequential `store_root(block_number, root[32], timestamp_ms)` commits at ~6.6s cadence from one admin relayer wallet. No events emitted, no retail users — pure admin-driven Merkle-root stream. Shape matches an off-chain rollup / DA layer anchoring to L1 for censorship resistance + checkpoint verification, but no public project claims the deployer as of 2026-04-22.',
   addedAt: '2026-04-22',
   urls: [],

@@ -3,7 +3,9 @@ import { ProjectDefinition } from '../project.interface';
 export const tlip: ProjectDefinition = {
   name: 'TLIP',
   layer: 'L1',
-  category: 'Trade Finance',
+  category: 'Real World',
+  subcategory: 'Application',
+  industries: ['Trade Documents', 'Logistics'],
   description: 'Trade and Logistics Information Pipeline — IOTA × TradeMark East Africa partnership for digital trade documents. Kenya customs deployment is the anchor integration. Handles electronic Bills of Lading (eBL), carrier registries, and endorsement chains for cross-border shipments.',
   urls: [
     { label: 'Website', href: 'https://tlip.io' },

@@ -3,7 +3,9 @@ import { ProjectDefinition } from '../project.interface';
 export const salus: ProjectDefinition = {
   name: 'Salus Platform',
   layer: 'L1',
-  category: 'Trade Finance',
+  category: 'Real World',
+  subcategory: 'Application',
+  industries: ['Luxury'],
   description: 'Tokenizes physical commodities — metal ore, raw materials — as Digital Warehouse Receipts (DWRs) on IOTA mainnet. Each NFT anchors a SHA-384 hash of the off-chain document, proving authenticity without storing the file on-chain. Supports financing, marketplace listings, and title transfers of commodity-backed assets.',
   urls: [
     { label: 'Platform', href: 'https://salusplatform.com' },

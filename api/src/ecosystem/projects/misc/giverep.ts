@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const giveRep: ProjectDefinition = {
   name: 'GiveRep',
   layer: 'L1',
-  category: 'Incentive / Social',
+  category: 'Social',
+  subcategory: 'Incentive',
   description: 'SocialFi reputation / reward-claim platform at `giverep.com`. Converts social-media engagement (primarily X / Twitter) into on-chain $REP points. Primary deployment is on Sui; IOTA Rebased is the secondary chain, used for campaign reward claims. On-chain module `giverep_claim` provides per-workspace `Pool` objects (balance + managers + claimed-set); admins deposit IOTA, users claim their rewards via signed proofs. Same `studio-b8b1` team as KrillTube / chess / 2048 / tic_tac_iota / vault / giftdrop. IOTA Foundation\'s Ambassador Program famously migrated to GiveRep for engagement rewards (press-covered: "750k+ $IOTA distributed to LiquidLink users via GiveRep campaigns").',
   urls: [
     { label: 'Website', href: 'https://giverep.com/' },

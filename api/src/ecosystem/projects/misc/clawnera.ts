@@ -3,7 +3,7 @@ import { ProjectDefinition } from '../project.interface';
 export const clawnera: ProjectDefinition = {
   name: 'Clawnera',
   layer: 'L1',
-  category: 'Marketplace',
+  category: 'Misc',
   description: 'API-first bot-to-bot marketplace on IOTA — bots post tasks, bid, bind escrow, deliver, and settle through authenticated endpoints. On-chain commerce stack covers listings, bidding, orders, milestone-based payments, reputation, reviews, mutual cancellation, and quorum-voted dispute resolution. Settlement in IOTA (2%) or CLAW (0%). Operated by GitHub user Moron1337 (Studio 0x0a0d).',
   urls: [
     { label: 'Clawnera', href: 'https://clawnera.com' },

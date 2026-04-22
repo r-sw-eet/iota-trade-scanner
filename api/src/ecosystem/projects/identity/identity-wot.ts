@@ -4,6 +4,7 @@ export const identityWot: ProjectDefinition = {
   name: 'Identity (WoT)',
   layer: 'L1',
   category: 'Identity',
+  subcategory: 'Framework',
   description: 'Web of Trust variant of IOTA Identity. Decentralized identity verification where trust relationships between entities are recorded on-chain, forming a verifiable trust graph. Lighter than the full-stack Identity deployment — no file vault, no mailbox.',
   urls: [
     { label: 'IOTA Foundation', href: 'https://www.iota.org/products/identity' },

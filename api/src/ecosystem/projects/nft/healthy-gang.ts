@@ -4,6 +4,7 @@ export const healthyGang: ProjectDefinition = {
   name: 'Healthy Gang',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Collection',
   description: 'Small hand-minted PFP collection on IOTA Rebased — fruit-themed named editions (sampled: `Healthy Gang #2 - Strawberry`). Pure collectible: name + IPFS media, no utility, no RWA anchor. Shipped from the `studio-cb69` deployer (same address that mints Ghost Lights / Tanapaz / Toma Rajadão / Tranquilidade Drops — see the studio aggregate for the full footprint). Marked `isCollectible` so the dashboard\'s "Hide collectibles" toggle can keep it out of the real-usecases view.',
   urls: [],
   teamId: 'studio-cb69',

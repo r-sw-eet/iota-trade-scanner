@@ -1,7 +1,76 @@
+/**
+ * Top-level categories. Exactly 10, closed set. `Misc` is the catch-all and
+ * must stay last — reserved for projects that don't fit any domain bucket.
+ * See also `SUBCATEGORIES` for the per-category sub-vocabulary.
+ */
+export const CATEGORIES = [
+  'DeFi',
+  'Bridge',
+  'Oracle',
+  'NFT',
+  'Game',
+  'Identity',
+  'Real World',
+  'Infrastructure',
+  'Social',
+  'Misc',
+] as const;
+export type Category = (typeof CATEGORIES)[number];
+
+/**
+ * Per-category sub-vocabulary, capped at 10 subs each. Populated slots carry
+ * existing projects; reserved slots exist so adding the 11th project of a new
+ * shape forces a deliberate merge/split decision rather than string drift.
+ *
+ * `Misc` has no subcategories by design. A project sitting in Misc is a
+ * signal to revisit — if a second similar project arrives, promote the
+ * pattern to its own subcategory under an existing top-level.
+ */
+export const SUBCATEGORIES = {
+  DeFi: [
+    'DEX', 'Perpetuals', 'Stablecoin', 'Lending', 'Liquid Staking',
+    'Staking', 'Vault', 'Liquidity Manager', 'Payments', 'Token',
+  ],
+  Bridge: ['Messaging', 'OFT', 'Asset Bridge', 'Liquidity Bridge', 'Wrapped Token'],
+  Oracle: ['Price Feed', 'VRF', 'Data Feed', 'Keeper / Automation'],
+  NFT: ['Collection', 'Launchpad', 'Marketplace', 'Aggregator', 'Dynamic NFT', 'Royalty / Rental'],
+  Game: ['On-chain', 'GambleFi', 'P2E', 'TCG', 'Sandbox / Metaverse', 'Racing / Sports'],
+  Identity: ['Framework', 'Credentials', 'Name Service', 'Reputation', 'Attestation', 'KYC'],
+  'Real World': ['Framework', 'Application'],
+  Infrastructure: [
+    'Chain Primitive', 'EVM Anchor', 'Data / Publishing', 'Wallet',
+    'Explorer', 'Indexer', 'Account Abstraction', 'Multisig', 'SDK',
+  ],
+  Social: ['Incentive', 'Airdrop', 'Community', 'SocialFi', 'Creator', 'Tipping'],
+  Misc: [],
+} as const satisfies Record<Category, readonly string[]>;
+export type Subcategory = (typeof SUBCATEGORIES)[Category][number];
+
 export interface ProjectDefinition {
   name: string;
   layer: 'L1' | 'L2';
-  category: string;
+  /**
+   * Top-level category from the closed 10-member `CATEGORIES` set. Display
+   * label combines `category` + `subcategory` as `"<Category> / <Sub>"`
+   * (computed at read time; see `ecosystem.service.ts`). Use subcategory to
+   * carry the mechanism/type within a category; use `industries` for the
+   * orthogonal sector tag axis.
+   */
+  category: Category;
+  /**
+   * Optional sub-vocabulary within the category — must be a member of
+   * `SUBCATEGORIES[category]`. Runtime-validated by
+   * `ecosystem-registry.spec.ts`; `Misc` projects leave this unset.
+   */
+  subcategory?: Subcategory;
+  /**
+   * Orthogonal sector tags. Multi-valued. Free-form strings with a starter
+   * vocabulary (`Agriculture`, `Carbon`, `Luxury`, `Trade Documents`, …) —
+   * industries are tags, not taxonomy, so no cap and no enum. Primarily used
+   * on Real World projects (the target industry a supply-chain / authenticity
+   * / traceability app serves) but available on every project.
+   */
+  industries?: string[];
   /** 50-500 characters describing what the project does */
   description: string;
   /**

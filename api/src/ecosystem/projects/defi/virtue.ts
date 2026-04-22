@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const virtue: ProjectDefinition = {
   name: 'Virtue',
   layer: 'L1',
-  category: 'Stablecoin / CDP',
+  category: 'DeFi',
+  subcategory: 'Stablecoin',
   description: 'First native stablecoin (VUSD) protocol on IOTA Rebased. Users mint VUSD (USD-pegged) by locking wIOTA or stIOTA as collateral in Collateralized Debt Positions. Row covers all Virtue packages by their known deployer — Framework, VUSD Treasury, Oracle, CDP, plus the rule packages (cert_rule, vcert_rule, whitelist_rule, pyth_rule), incentive add-ons (borrow_incentive, stability_pool_incentive, incentive_admin), config/upgrade variants, and any future packages they ship. The Stability Pool primitive has its own row.',
   urls: [
     { label: 'App', href: 'https://virtue.money' },
@@ -25,7 +26,8 @@ Match rule history: previously \`{all: [liquidity_pool, delegates]}\`, which act
 export const virtueStabilityPool: ProjectDefinition = {
   name: 'Virtue Stability Pool',
   layer: 'L1',
-  category: 'Stability Pool',
+  category: 'DeFi',
+  subcategory: 'Stablecoin',
   description: 'Stability-pool primitive for the Virtue CDP system. Depositors provide VUSD to absorb liquidations and earn collateral rewards; the balance_number module maintains the internal ledger of depositor shares across the protocol.',
   urls: [{ label: 'App', href: 'https://virtue.money' }],
   teamId: 'virtue',

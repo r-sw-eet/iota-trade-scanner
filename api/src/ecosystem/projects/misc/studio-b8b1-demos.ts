@@ -11,7 +11,7 @@ import { ProjectDefinition } from '../project.interface';
 export const studioB8b1Demos: ProjectDefinition = {
   name: 'Studio 0xb8b1380e — Demos',
   layer: 'L1',
-  category: 'Demo / Developer Content',
+  category: 'Misc',
   description: 'Catch-all sibling row for Studio 0xb8b1380e\'s demo / educational packages: a stripped-down `game_2048` (without `campaign_rewards`), a standalone `gas_station` wrapper, and two OTW-template token types (`demo_coin`, `demo_krill_coin`). 12 packages total on the deployer, 178 TXs + 9 senders — studio-internal dev / playground footprint alongside the production KrillTube / GiveRep / games portfolio.',
   urls: [],
   teamId: 'studio-b8b1',

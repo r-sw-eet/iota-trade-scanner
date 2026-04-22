@@ -4,6 +4,7 @@ export const iotaAccreditationRegistry: ProjectDefinition = {
   name: 'Accreditation Registry',
   layer: 'L1',
   category: 'Identity',
+  subcategory: 'Credentials',
   description: 'IOTA Foundation credential-issuer attestation registry. Authorities publish accreditations with structured property-shape vocabulary (name, value, shape); consumers verify credentials against the on-chain registry.',
   urls: [{ label: 'IOTA Foundation', href: 'https://www.iota.org' }],
   teamId: 'iota-foundation',

@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const izipublish: ProjectDefinition = {
   name: 'izipublish',
   layer: 'L1',
-  category: 'Data / Publishing',
+  category: 'Infrastructure',
+  subcategory: 'Data / Publishing',
   description: 'Data-publishing framework on IOTA Rebased. Publishers notarize structured datasets on-chain and distribute them to subscribers. Not a Move-package publisher — the easy_publish module name predates the product rename and refers to dataset publication, not package deployment.',
   urls: [{ label: 'Website', href: 'https://izipublish.com' }],
   teamId: 'izipublish',

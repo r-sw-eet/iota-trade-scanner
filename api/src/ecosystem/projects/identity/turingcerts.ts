@@ -8,7 +8,8 @@ import { ProjectDefinition } from '../project.interface';
 export const turingcerts: ProjectDefinition = {
   name: 'Turing Certs',
   layer: 'L1',
-  category: 'Identity / Credentials',
+  category: 'Identity',
+  subcategory: 'Credentials',
   description: 'W3C Verifiable Credentials issuance platform by Turing Space — IOTA Business Innovation Program partner. Three-package pipeline at deployer `0xb0c359…`: `turingcerts` (main logic), `vc_data` (VcData payload struct), `vc_envelope` (VcEnvelope holder object). Used in production to issue credentials via API — sampled `VcEnvelope` objects carry `"Issued by API request [trackingId=…]"` metadata with Q3-Q4 2025 timestamps. 362,009 TXs from 4 admin sender addresses — canonical B2B VC mass-issuance at scale. Flagship deployment: Taiwan Renewable Energy Certificate digitization (3.5M+ certs verified per IOTA blog).',
   urls: [
     { label: 'Turing Certs', href: 'https://turingcerts.com' },

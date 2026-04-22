@@ -3,7 +3,9 @@ import { ProjectDefinition } from '../project.interface';
 export const carNft: ProjectDefinition = {
   name: 'Car NFT',
   layer: 'L1',
-  category: 'RWA / Product Authenticity',
+  category: 'Real World',
+  subcategory: 'Application',
+  industries: ['Automotive'],
   description: 'RWA vehicle-title NFT pilot on IOTA Rebased — each token represents one car, with fields for `brand` / `model` / `vin` / `fuel` / `power` / `year` / `mileage` / `last_maintenance_date` / `last_TC_status` (European inspection) / `current_owner` + IPFS image. 3 single-module `car_nft` packages at one anonymous deployer; sophisticated architecture with a shared `Config` object holding a 32-byte `backend_pubkey` (for off-chain signed mileage / TC / ownership updates) + a `vin_registry` table. Currently 1 minted token (a 2019 Ford Fiesta — demo scale). Listed as `isCollectible: false` — functional RWA, not a PFP.',
   urls: [],
   teamId: 'studio-5451',

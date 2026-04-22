@@ -8,7 +8,9 @@ import { ProjectDefinition } from '../project.interface';
 export const seedlotLakeToba: ProjectDefinition = {
   name: 'Seedlot — Lake Toba Collective',
   layer: 'L1',
-  category: 'RWA / Agriculture',
+  category: 'Real World',
+  subcategory: 'Application',
+  industries: ['Agriculture', 'Coffee'],
   description: 'Tokenized Arabica coffee supply chain for smallholder farmers around Lake Toba, North Sumatra. Single package at deployer `0x52f3cf39…` with 14 modules: cooperative registry (`collective`), per-farmer DIDs (`identity`), cupping-score certifications, harvest-lot tokens (`produce_token`), KML farm-plot polygons on IPFS, stake + audit + USDC-denominated settlement. Domain-verified IOTA DID (`did:iota:laketoba.seedlot.io`). 147 collective_lots registered, 6 farming_heads, 50,000+ coffee trees across ~320 ha per off-chain site copy.',
   addedAt: '2026-04-22',
   urls: [

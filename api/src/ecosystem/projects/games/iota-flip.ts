@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const iotaFlip: ProjectDefinition = {
   name: 'IOTA Flip',
   layer: 'L1',
-  category: 'Gambling',
+  category: 'Game',
+  subcategory: 'GambleFi',
   description: 'On-chain coin flip, roulette, and raffle contracts on IOTA Rebased. Uses verifiable randomness for fair outcomes; all bets and results settle on-chain.',
   urls: [{ label: 'App', href: 'https://iotaflip.netlify.app' }],
   teamId: 'iota-flip',

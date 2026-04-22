@@ -12,6 +12,7 @@ export const lostCrusaderArcaneDust: ProjectDefinition = {
   name: 'Lost Crusader — Arcane Rush',
   layer: 'L1',
   category: 'Game',
+  subcategory: 'On-chain',
   addedAt: '2026-04-22',
   description: 'Daily-claim mini-game for the Q1 2026 IOTA-grant-phase MMO "Lost Crusader" — users sign in at `arcanerush.lostcrusader.xyz` and claim one soulbound `ArcaneDust` NFT per day as proof of continued participation. On-chain description: "A measure of daily devotion from the Lost Crusader. This Arcane Dust is a non-transferable token from the Arcane Rush event, redeemable once per day as proof of your continued participation." Single package at `0x2938b2bd…` (module `arcane_dust`, struct `ArcaneDust`, `NFTMinted`/`NFTBurned`/`NFTCounter` events). Early grant-phase footprint — 1,195 TXs, 41 unique senders.',
   urls: [
@@ -75,6 +76,7 @@ export const lostCrusaderReviveSpells: ProjectDefinition = {
   name: 'Lost Crusader — Revive Spells',
   layer: 'L1',
   category: 'Game',
+  subcategory: 'On-chain',
   addedAt: '2026-04-22',
   description: 'Higher-tier crafting / revive layer for Lost Crusader. 3 packages on deployer `0x3d9ccdc7…`: one shipping `arcane_dust::SoulboundNFT` ("Golden Arcane Dust — Mint exclusive Arcane Dust"), two shipping `revive_spell` (struct `ReviveSpell` "Revival Potion" + `BrewingStand` shared brewing-timer object). The `BrewingStand.current_brew_start` field points to an active brew in progress — live brewing mechanic. 480 TXs, 3 unique senders — early grant-phase state.',
   urls: [

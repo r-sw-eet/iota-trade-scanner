@@ -3,7 +3,9 @@ import { ProjectDefinition } from '../project.interface';
 export const truvid: ProjectDefinition = {
   name: 'TruvID',
   layer: 'L1',
-  category: 'Notarization',
+  category: 'Real World',
+  subcategory: 'Application',
+  industries: ['Documents'],
   description: '7 packages at a single anonymous deployer, all single-module `nft_minter2` with struct `NFT`. On-chain-minted tokens self-identify as `name: "TruvID"` / `"TruvID Genesis"` with `description: "standard document proof"` / `"First TruvID proof NFT with IPFS metadata."` — the shape of an on-chain anchor for off-chain-signed proofs. Circumstantial evidence links this deployer to an anonymous solo-developer video-authenticity PWA; full findings in the `studio-295e` team attribution. Operator identity unconfirmed.',
   urls: [],
   teamId: 'studio-295e',

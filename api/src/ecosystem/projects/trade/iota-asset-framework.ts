@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const iotaAssetFramework: ProjectDefinition = {
   name: 'Identity Asset Framework',
   layer: 'L1',
-  category: 'Identity',
+  category: 'Real World',
+  subcategory: 'Framework',
   description: 'IOTA Foundation governance-over-on-chain-assets primitive. Multi-controller registry with borrow / config / delete / transfer / upgrade proposals, plus migration tooling and permissioned public VCs. A distinct IF product from Notarization, shipped at the same deployer.',
   urls: [{ label: 'IOTA Foundation', href: 'https://www.iota.org' }],
   teamId: 'iota-foundation',

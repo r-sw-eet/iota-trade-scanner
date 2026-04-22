@@ -10,6 +10,7 @@ export const tradeportEarlyMover: ProjectDefinition = {
   name: 'Tradeport — Proof of Early Mover',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Marketplace',
   description: 'Promotional NFT issued by Tradeport to celebrate their IOTA mainnet launch (October 2025). Single package with one `proof_of_early_mover__iota` module; NFT metadata: name "Proof of Early Mover: IOTA", description "The very beginning of the IOTA NFT era". 131 TXs from one admin minting wallet — one-off campaign drop, not marketplace product activity.',
   addedAt: '2026-04-22',
   urls: [

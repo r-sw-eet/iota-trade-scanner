@@ -3,7 +3,9 @@ import { ProjectDefinition } from '../project.interface';
 export const carbonCredits: ProjectDefinition = {
   name: 'Carbon Credits',
   layer: 'L1',
-  category: 'RWA / Product Authenticity',
+  category: 'Real World',
+  subcategory: 'Application',
+  industries: ['Carbon', 'Sustainability'],
   description: 'Anonymous RWA pilot for tokenized voluntary carbon credits on IOTA Rebased. Single package at `0xb8f25b82…` with 4 modules forming a textbook voluntary-carbon-market primitive: permissioned minter-pass NFT → issues CREDIT_TOKEN coins → per-record credit accounting (CarbonCreditRecord) → proof-of-consumption CertificateNFT on retirement. Current supply: 6,187 CREDIT_TOKEN units. Demo scale, placeholder art, no public web surface — dev\'s showcase of an RWA-carbon-credit design.',
   urls: [],
   teamId: 'studio-b5fc',

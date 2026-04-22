@@ -4,6 +4,7 @@ export const credentials: ProjectDefinition = {
   name: 'Credentials',
   layer: 'L1',
   category: 'Identity',
+  subcategory: 'Credentials',
   description: 'Verifiable credentials primitive on IOTA Rebased — issues, holds, and verifies digital credentials with on-chain trust anchors. Portable identity attestations across applications. Exact 3-module {credentials, identity, trust} variant in the IF Identity stack.',
   urls: [
     { label: 'IOTA Foundation', href: 'https://www.iota.org/products/identity' },

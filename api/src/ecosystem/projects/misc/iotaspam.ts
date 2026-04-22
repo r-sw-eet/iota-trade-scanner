@@ -24,7 +24,7 @@ import { ProjectDefinition } from '../project.interface';
 export const iotaSpam: ProjectDefinition = {
   name: 'Spam Club',
   layer: 'L1',
-  category: 'Experimental',
+  category: 'Misc',
   addedAt: '2026-04-22',
   description: '"Proof of Spam" coin-issuance product at `iotaspam.io` (brand: "Spam Club"). Port of Polymedia\'s Sui Spam (`juzybits/polymedia-spam`) to IOTA Rebased by GitHub user `trungtt198x` (fork linked from the site footer). Users send IOTA transactions → the `spam` module counts them into per-epoch `UserCounter` objects → next epoch, users claim SPAM coin proportional to their share of that epoch\'s total TX count. Legal wrapper: Rising Phoenix 2 Ltd (IF\'s BVI commercial entity, same operator as IOTA Names) — but NOT the codebase\'s author. 4M+ TXs registered, 152.8B SPAM in supply across 154 epochs.',
   urls: [

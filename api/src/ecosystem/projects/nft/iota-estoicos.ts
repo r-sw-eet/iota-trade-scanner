@@ -4,6 +4,7 @@ export const iotaEstoicos: ProjectDefinition = {
   name: 'IOTA Estoicos',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Collection',
   description: 'Pre-launch philosophy-themed PFP collection on IOTA Rebased — 7 upgrade versions of the `estoicos` module from an anonymous deployer, but only 1 NFT minted so far (`IOTA Estoicos Genesis OG NFT #1`). Name is Portuguese / Spanish for "stoics". Image hosted on ImgBB (free image host) — placeholder-tier infrastructure. No public brand / site / socials surface — dev iterating on the contract pre-drop.',
   urls: [],
   teamId: 'studio-457d',

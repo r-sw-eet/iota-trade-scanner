@@ -4,6 +4,7 @@ export const identityFull: ProjectDefinition = {
   name: 'Identity (full)',
   layer: 'L1',
   category: 'Identity',
+  subcategory: 'Framework',
   description: 'Comprehensive IOTA Identity deployment featuring Web of Trust verification, encrypted file vault for document storage, mailbox system for secure peer-to-peer messaging, and a WoT identity registry. The full-stack variant of the IF Identity product line.',
   urls: [
     { label: 'IOTA Foundation', href: 'https://www.iota.org/products/identity' },

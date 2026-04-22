@@ -4,6 +4,7 @@ export const pythOracle: ProjectDefinition = {
   name: 'Pyth Oracle',
   layer: 'L1',
   category: 'Oracle',
+  subcategory: 'Price Feed',
   description: 'Pyth Network price feeds integrated natively into IOTA Rebased. Real-time price data for 500+ assets (crypto, commodities, equities, forex) delivered via Wormhole VAAs. Pull-oracle architecture — consumers refresh prices on-demand rather than receiving push updates.',
   urls: [
     { label: 'Website', href: 'https://pyth.network' },

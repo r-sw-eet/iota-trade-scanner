@@ -3,7 +3,8 @@ import { ProjectDefinition } from '../project.interface';
 export const tradeport: ProjectDefinition = {
   name: 'Tradeport',
   layer: 'L1',
-  category: 'NFT Marketplace',
+  category: 'NFT',
+  subcategory: 'Marketplace',
   description: 'NFT marketplace on IOTA Rebased. Supports bidding, direct listings, kiosk-based trades, and transfer-policy rules (royalty / floor / kiosk-lock). Part of the multi-chain Tradeport NFT platform. Launchpad is a sibling product under the same team.',
   urls: [{ label: 'Website', href: 'https://tradeport.xyz' }],
   teamId: 'tradeport',

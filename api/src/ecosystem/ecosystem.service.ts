@@ -18,7 +18,7 @@ import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
 import { ProjectTxDigest } from './schemas/project-tx-digest.schema';
 import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
 import { AlertsService } from '../alerts/alerts.service';
-import { ALL_PROJECTS, ProjectDefinition } from './projects';
+import { ALL_PROJECTS, ProjectDefinition, Category, Subcategory } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
 
 /**
@@ -147,11 +147,51 @@ export interface UnattributedCluster {
   sampledObjectType: string | null;
 }
 
+/**
+ * Map DefiLlama category strings (returned on L2 IOTA EVM protocols) to our
+ * own `{ category, subcategory }` taxonomy. DefiLlama uses its own vocabulary
+ * (`Dexs`, `Derivatives`, `Liquidity Manager`, …) which otherwise appears as
+ * duplicate chip entries next to the L1-registry strings (`DEX`, `Perpetuals`,
+ * …). Anything not in this table falls through to `Misc`.
+ */
+const LLAMA_CATEGORY_MAP: Record<string, { category: Category; subcategory?: Subcategory }> = {
+  Dexs: { category: 'DeFi', subcategory: 'DEX' },
+  Derivatives: { category: 'DeFi', subcategory: 'Perpetuals' },
+  Lending: { category: 'DeFi', subcategory: 'Lending' },
+  'Liquidity Manager': { category: 'DeFi', subcategory: 'Liquidity Manager' },
+  'Yield Aggregator': { category: 'DeFi', subcategory: 'Vault' },
+  Yield: { category: 'DeFi', subcategory: 'Vault' },
+  Bridge: { category: 'Bridge', subcategory: 'Messaging' },
+  'Cross Chain Bridge': { category: 'Bridge', subcategory: 'Messaging' },
+  CDP: { category: 'DeFi', subcategory: 'Stablecoin' },
+  'Liquid Staking': { category: 'DeFi', subcategory: 'Liquid Staking' },
+  Staking: { category: 'DeFi', subcategory: 'Staking' },
+  Oracle: { category: 'Oracle', subcategory: 'Price Feed' },
+  RWA: { category: 'Real World', subcategory: 'Application' },
+};
+
+function normalizeLlamaCategory(llamaCat: string | null | undefined): { category: Category; subcategory?: Subcategory } {
+  if (!llamaCat) return { category: 'Misc' };
+  return LLAMA_CATEGORY_MAP[llamaCat] ?? { category: 'Misc' };
+}
+
+/** `Category / Subcategory` when a sub is set, otherwise just `Category`. Used for list/chip display. */
+function buildCategoryLabel(category: Category, subcategory?: Subcategory | null): string {
+  return subcategory ? `${category} / ${subcategory}` : category;
+}
+
 export interface Project {
   slug: string;
   name: string;
   layer: 'L1' | 'L2';
-  category: string;
+  /** Top-level category from the closed 10-member `CATEGORIES` set. */
+  category: Category;
+  /** Sub-vocabulary within the category. `null` for Misc projects and some L2 rows where DefiLlama's category has no mapping. */
+  subcategory: Subcategory | null;
+  /** Display-ready "Category / Subcategory" label (or just "Category" when no sub). Convenience for existing UI consumers. */
+  categoryLabel: string;
+  /** Orthogonal sector tags (Agriculture, Carbon, Luxury, …). Empty array when the project doesn't carry any. */
+  industries: string[];
   description: string;
   urls: { label: string; href: string }[];
   packages: number;
@@ -477,6 +517,7 @@ export class EcosystemService implements OnModuleInit {
       team: Team | null;
       logo: string | null;
       category: string | null;
+      categoryLabel: string | null;
       sampleIdentifiers: string[] | null;
     }>;
   } | null> {
@@ -534,6 +575,7 @@ export class EcosystemService implements OnModuleInit {
           team: p.team,
           logo: p.logo,
           category: p.category,
+          categoryLabel: p.categoryLabel,
           sampleIdentifiers: null,
         });
       }
@@ -568,6 +610,7 @@ export class EcosystemService implements OnModuleInit {
           team: null,
           logo: null,
           category: null,
+          categoryLabel: null,
           sampleIdentifiers: u.sampleIdentifiers,
         });
       }
@@ -2333,7 +2376,11 @@ export class EcosystemService implements OnModuleInit {
       const addrPrefix = firstPkg.address.slice(2, 8);
       projects.push({
         slug: `${addrPrefix}-${displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`,
-        name: displayName, layer: def.layer, category: def.category,
+        name: displayName, layer: def.layer,
+        category: def.category,
+        subcategory: def.subcategory ?? null,
+        categoryLabel: buildCategoryLabel(def.category, def.subcategory),
+        industries: def.industries ?? [],
         description: def.description, urls: def.urls,
         packages: facts.length,
         packageAddress: firstPkg.address,
@@ -2597,11 +2644,15 @@ export class EcosystemService implements OnModuleInit {
 
         const llamaSlug = (proto.slug || proto.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
         const l2Team = getTeam(L2_TEAM_MAP[proto.name.toLowerCase()]) ?? null;
+        const { category: l2Category, subcategory: l2Sub } = normalizeLlamaCategory(proto.category);
         l2Projects.push({
           slug: `evm-${llamaSlug}`,
           name: proto.name,
           layer: isEvm ? 'L2' : 'L1',
-          category: proto.category || 'Unknown',
+          category: l2Category,
+          subcategory: l2Sub ?? null,
+          categoryLabel: buildCategoryLabel(l2Category, l2Sub),
+          industries: [],
           description: `${proto.category || ''} on IOTA${isEvm ? ' EVM' : ''}`.trim(),
           urls: proto.url ? [{ label: 'Website', href: proto.url }] : [],
           packages: 0,

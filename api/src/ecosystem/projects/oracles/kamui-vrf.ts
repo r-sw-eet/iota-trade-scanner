@@ -9,6 +9,7 @@ export const kamuiVrf: ProjectDefinition = {
   name: 'Kamui VRF',
   layer: 'L1',
   category: 'Oracle',
+  subcategory: 'VRF',
   description: 'IOTA Rebased deployment of Kamui — verifiable random function (VRF) service by Mangekyou Labs. Single package at `0xc871ca37…` shipping `coordinator` (VRF config + per-consumer Subscription), `request` (RequestRecord ledger), `kamui_iota_vrf` (brand-labelled VRF logic), `demo_consumer` (example integration). Small early-stage footprint on mainnet (6 events, 2 senders, 11 TXs); promotes infrastructure-primitive visibility even at low current volume — VRF is a building block for on-chain games, lotteries, and provably-fair NFT drops.',
   urls: [
     { label: 'Kamui on HackQuest', href: 'https://www.hackquest.io/projects/Kamui-GntkNn' },

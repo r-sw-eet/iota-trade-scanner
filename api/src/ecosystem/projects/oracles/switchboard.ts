@@ -4,6 +4,7 @@ export const switchboardOracle: ProjectDefinition = {
   name: 'Switchboard Oracle',
   layer: 'L1',
   category: 'Oracle',
+  subcategory: 'Price Feed',
   description: 'Switchboard On-Demand oracle network on IOTA Rebased. Customizable data feeds with aggregator/oracle/queue primitives, guardian-queue initialization, and on-demand oracle functionality for smart contracts. Multi-chain provider; IOTA is one of many supported deployments.',
   urls: [
     { label: 'Website', href: 'https://switchboard.xyz' },

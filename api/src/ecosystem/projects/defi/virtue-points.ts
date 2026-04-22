@@ -11,7 +11,8 @@ import { ProjectDefinition } from '../project.interface';
 export const virtuePoints: ProjectDefinition = {
   name: 'Virtue Points',
   layer: 'L1',
-  category: 'Incentives',
+  category: 'Social',
+  subcategory: 'Incentive',
   addedAt: '2026-04-22',
   description: 'Pre-launch points primitive tied to Virtue (the IOTA stablecoin protocol). 6 upgrade-versioned packages at deployer `0x6ff423cb…` with struct `VirtuePointWitness` + `PointHandler` + `PointManager`. Deployer wallet owned Virtue\'s first-ever CDP position on 2025-06-25 (the genesis 78.3M-unit VUSD mint) — strongest circumstantial signal that this is a Virtue-internal / close-collaborator build, not an unrelated third party. No points awarded on-chain yet; Virtue\'s public site has no visible points page.',
   urls: [
@@ -84,7 +85,8 @@ Category \`Incentives\` — new category, distinct from \`Stablecoin / CDP\` (th
 export const multiAssetBank: ProjectDefinition = {
   name: 'Multi-Asset Bank',
   layer: 'L1',
-  category: 'Vault',
+  category: 'DeFi',
+  subcategory: 'Vault',
   addedAt: '2026-04-22',
   description: 'Generic multi-asset coin-bank on IOTA Rebased — single package, single `bank` module with permit-gated `deposit<T> / withdraw<T>` flow. Holds IOTA (~65k), CERT (~3.95k), VUSD (~1.1k), IBTC (~2.6 base units) in typed dynamic-field balances keyed by `BalanceKey<T>`. Fewer than a dozen permit holders ever, dominated by 2-3 recipient wallets. Small-team LP / MM / treasury-management shape, not a user-facing retail product. No public brand surfaces.',
   urls: [],

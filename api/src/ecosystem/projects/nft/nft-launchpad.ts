@@ -4,6 +4,7 @@ export const nftLaunchpad: ProjectDefinition = {
   name: 'NFT Launchpad',
   layer: 'L1',
   category: 'NFT',
+  subcategory: 'Launchpad',
   description: 'NFT launch platform on IOTA Rebased with mint box mechanics, pseudorandom minting for fair distribution, and signature-based whitelist verification. Tradeport\'s launchpad product — sibling to the core Tradeport marketplace, shipped from the same deployer keys.',
   urls: [{ label: 'Website', href: 'https://tradeport.xyz' }],
   teamId: 'tradeport',
