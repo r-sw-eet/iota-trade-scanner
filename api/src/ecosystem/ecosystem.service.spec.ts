@@ -495,7 +495,7 @@ describe('EcosystemService', () => {
             storageRebateNanos: 1_000_000_000,
             modules: ['module_only'],
             moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
-            objectCount: 0,
+            objectHolderCount: 0,
             fingerprint: { sampledObjectType: '0xabcdef::m::Old', identifiers: [] },
           },
           {
@@ -504,7 +504,7 @@ describe('EcosystemService', () => {
             storageRebateNanos: 2_000_000_000,
             modules: ['module_only'],
             moduleMetrics: [{ module: 'module_only', events: 2, eventsCapped: false, uniqueSenders: 1 }],
-            objectCount: 0,
+            objectHolderCount: 0,
             fingerprint: {
               sampledObjectType: '0xabcdef::m::Latest',
               identifiers: ['asset_metadata.name: Real Thing', 'asset_metadata.symbol: RTG'],
@@ -535,7 +535,7 @@ describe('EcosystemService', () => {
             storageRebateNanos: 1_000_000_000,
             modules: ['module_only'],
             moduleMetrics: [{ module: 'module_only', events: 0, eventsCapped: false, uniqueSenders: 0 }],
-            objectCount: 0,
+            objectHolderCount: 0,
             fingerprint: { sampledObjectType: '0xabcdef::m::Only', identifiers: [] },
           },
         ],
@@ -568,7 +568,7 @@ describe('EcosystemService', () => {
             storageRebateNanos: 1_000_000_000,
             modules: ['module_only'],
             moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
-            objectCount: 0,
+            objectHolderCount: 0,
             fingerprint: null,
           },
           {
@@ -577,7 +577,7 @@ describe('EcosystemService', () => {
             storageRebateNanos: 500_000_000,
             modules: ['free_standing'],
             moduleMetrics: [{ module: 'free_standing', events: 0, eventsCapped: false, uniqueSenders: 0 }],
-            objectCount: 0,
+            objectHolderCount: 0,
             fingerprint: null,
           },
         ],
@@ -610,7 +610,7 @@ describe('EcosystemService', () => {
             storageRebateNanos: 500_000_000,
             modules: ['lonely'],
             moduleMetrics: [{ module: 'lonely', events: 1, eventsCapped: false, uniqueSenders: 1 }],
-            objectCount: 0,
+            objectHolderCount: 0,
             fingerprint: null,
           },
         ],
@@ -637,7 +637,7 @@ describe('EcosystemService', () => {
             storageRebateNanos: 100_000_000,
             modules: ['system'],
             moduleMetrics: [{ module: 'system', events: 100, eventsCapped: false, uniqueSenders: 50 }],
-            objectCount: 0,
+            objectHolderCount: 0,
             fingerprint: null,
           },
         ],
@@ -1160,7 +1160,7 @@ describe('EcosystemService', () => {
       storageIota: 0, events: 100, eventsCapped: false, transactions: 0, transactionsCapped: false,
       modules: [], tvl: null, tvlShared: null, tvlSharedWith: null, isCollectible: false,
       logo: null, logoWordmark: null, team: null, disclaimer: null, detectedDeployers: [],
-      anomalousDeployers: [], uniqueSenders: 0, uniqueHolders: null, objectCount: null,
+      anomalousDeployers: [], uniqueSenders: 0, uniqueHolders: null, objectHolderCount: null,
       marketplaceListedCount: null, uniqueWalletsReach: 0, attribution: null, addedAt: null,
       ...overrides,
     });
@@ -2527,17 +2527,17 @@ describe('EcosystemService', () => {
       expect(snap.l1[0].name).toBe('Exact');
     });
 
-    it('classify: populates uniqueHolders + objectCount + marketplaceListedCount + uniqueWalletsReach for projects with countTypes', async () => {
+    it('classify: populates uniqueHolders + objectHolderCount + marketplaceListedCount + uniqueWalletsReach for projects with countTypes', async () => {
       // Collectible mock project declares `countTypes: ['pfp::PFPNFT']`. Stubbing
       // captureObjectTypesForPackage to write a matching entry onto the
       // PackageFact; classifyFromRaw's countTypes-filter branch should sum
-      // count + listedCount and query the holders collection. Reach uses the
-      // $unionWith pipeline.
+      // objectHolderCount + listedCount and query the holders collection. Reach
+      // uses the $unionWith pipeline.
       (global as any).fetch = scriptFetch({
         packages: [pkg({ address: '0xaa', modules: ['pfp'] })],
       });
       jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
-        { type: '0xaa::pfp::PFPNFT', count: 200, listedCount: 30, capped: false },
+        { type: '0xaa::pfp::PFPNFT', objectHolderCount: 200, listedCount: 30, objectHolderCountCapped: false },
       ]);
       // First senderDocModel.aggregate call is `pairs.length>0` senders count;
       // second call is the $unionWith reach aggregation. Return distinct counts.
@@ -2549,7 +2549,7 @@ describe('EcosystemService', () => {
       const proj = snap.l1.find((p: any) => p.name === 'Collectible');
       expect(proj).toBeDefined();
       expect(proj.uniqueSenders).toBe(50);
-      expect(proj.objectCount).toBe(200);
+      expect(proj.objectHolderCount).toBe(200);
       expect(proj.marketplaceListedCount).toBe(30);
       expect(proj.uniqueHolders).toBe(150);
       expect(proj.uniqueWalletsReach).toBe(180);
@@ -2569,7 +2569,7 @@ describe('EcosystemService', () => {
       expect(proj).toBeDefined();
       expect(proj.uniqueSenders).toBe(77);
       expect(proj.uniqueHolders).toBeNull();
-      expect(proj.objectCount).toBeNull();
+      expect(proj.objectHolderCount).toBeNull();
       expect(proj.marketplaceListedCount).toBeNull();
       // Reach falls back to uniqueSenders when no countTypes contribute.
       expect(proj.uniqueWalletsReach).toBe(77);
@@ -2583,7 +2583,7 @@ describe('EcosystemService', () => {
         packages: [pkg({ address: '0xabcdef', modules: [] })],
       });
       jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
-        { type: '0xabcdef::module_only::ObjectOnly', count: 42, listedCount: 0, capped: false },
+        { type: '0xabcdef::module_only::ObjectOnly', objectHolderCount: 42, listedCount: 0, objectHolderCountCapped: false },
       ]);
       holderEntryModel.aggregate.mockResolvedValue([{ count: 42 }]);
       const snap = await runCapture();
@@ -2600,14 +2600,14 @@ describe('EcosystemService', () => {
       });
       // Capture returns objectTypeCounts with a non-matching type (AdminCap).
       jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
-        { type: '0xaa::pfp::AdminCap', count: 1, listedCount: 0, capped: false },
+        { type: '0xaa::pfp::AdminCap', objectHolderCount: 1, listedCount: 0, objectHolderCountCapped: false },
       ]);
       senderDocModel.aggregate.mockResolvedValue([{ count: 12 }]);
       const snap = await runCapture();
       const proj = snap.l1.find((p: any) => p.name === 'Collectible');
       expect(proj).toBeDefined();
-      // countTypes is non-empty but filter matched nothing → objectCount=0, holders=0, reach=senders.
-      expect(proj.objectCount).toBe(0);
+      // countTypes is non-empty but filter matched nothing → objectHolderCount=0, holders=0, reach=senders.
+      expect(proj.objectHolderCount).toBe(0);
       expect(proj.uniqueHolders).toBe(0);
       expect(proj.uniqueWalletsReach).toBe(12);
     });
@@ -4101,9 +4101,9 @@ describe('EcosystemService', () => {
         expect(drainSpy).toHaveBeenCalledTimes(2);  // key-able only; NFTMinted skipped
         const byType: any = Object.fromEntries(result.map((r: any) => [r.type, r]));
         expect(byType['0xpkg::otterfly_1::OtterFly1NFT']).toEqual({
-          type: '0xpkg::otterfly_1::OtterFly1NFT', count: 200, listedCount: 10, capped: false,
+          type: '0xpkg::otterfly_1::OtterFly1NFT', objectHolderCount: 200, listedCount: 10, objectHolderCountCapped: false,
         });
-        expect(byType['0xpkg::otterfly_1::AdminCap'].count).toBe(1);
+        expect(byType['0xpkg::otterfly_1::AdminCap'].objectHolderCount).toBe(1);
       });
 
       it('returns [] when struct enumeration fails (graphql error) — capture stays resilient', async () => {
@@ -4134,8 +4134,8 @@ describe('EcosystemService', () => {
         });
         const result = await (service as any).captureObjectTypesForPackage('0xpkg');
         const byType: any = Object.fromEntries(result.map((r: any) => [r.type, r]));
-        expect(byType['0xpkg::m::T1']).toEqual({ type: '0xpkg::m::T1', count: 0, listedCount: 0, capped: false });
-        expect(byType['0xpkg::m::T2'].count).toBe(7);
+        expect(byType['0xpkg::m::T1']).toEqual({ type: '0xpkg::m::T1', objectHolderCount: 0, listedCount: 0, objectHolderCountCapped: false });
+        expect(byType['0xpkg::m::T2'].objectHolderCount).toBe(7);
       });
     });
 

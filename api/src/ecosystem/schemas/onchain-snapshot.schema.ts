@@ -50,14 +50,13 @@ export class ModuleMetrics {
 }
 
 /**
- * Cumulative per-struct-type object counts for a package. One entry per
- * `key`-able struct declared by any of the package's modules. Capture is
- * type-agnostic — *every* such struct gets an entry, not just ones a
- * `ProjectDefinition` has opted in via `countTypes`. This preserves the
- * classification-free invariant (`plan_tx_count.md` invariant 2) — adding
- * a new NFT project to the registry tomorrow retroactively populates its
- * `objectCount` / `uniqueHolders` / `marketplaceListedCount` from the
- * history already captured.
+ * Per-struct-type holder counts for a package. One entry per `key`-able struct
+ * declared by any of the package's modules. Capture is type-agnostic — *every*
+ * such struct gets an entry, not just ones a `ProjectDefinition` has opted in
+ * via `countTypes`. This preserves the classification-free invariant
+ * (`plan_tx_count.md` invariant 2) — adding a new NFT project to the registry
+ * tomorrow retroactively populates its `objectHolderCount` / `uniqueHolders` /
+ * `marketplaceListedCount` from the history already captured.
  *
  * Not all entries are user-facing: MintCaps, AdminCaps, Registries, Bag-
  * typed objects, dynamic_field wrappers will all appear here by construction.
@@ -69,20 +68,28 @@ export class ObjectTypeCount {
   /** Fully-qualified Move struct type — e.g. `0x35fa…::otterfly_1::OtterFly1NFT`. */
   @Prop({ required: true }) type: string;
 
-  /** Total live objects of this type as of capture. Point-in-time, not cumulative. */
-  @Prop({ required: true, default: 0 }) count: number;
+  /**
+   * Distinct wallet addresses currently observed holding at least one live
+   * Move object of this type (`countDocuments({pkg, type})` against
+   * `project_holder_entries`). The collection is append-only with dedup, so
+   * this is "wallets ever caught holding one at any past scan tick" — drifts
+   * slightly above true current holders as wallets transfer/burn between scans.
+   * Receivers who flip out before any scan catches them aren't counted; for
+   * "ever-received" semantics use `ProjectSenders` (TX initiators) instead.
+   */
+  @Prop({ required: true, default: 0 }) objectHolderCount: number;
 
   /**
-   * Subset of `count` whose `owner.__typename === 'Parent'` — objects sitting
-   * inside another object (marketplace listing dynamic_field wrapper, Kiosk-like
-   * wrapper, etc.). Not held by a wallet directly; surfaced on the detail page
-   * as "Listed on marketplace" so the gap between `count` and `uniqueHolders`
-   * is visible rather than silent.
+   * Count of `owner.__typename === 'Parent'` observations during the holder walk —
+   * objects sitting inside another object (marketplace listing dynamic_field
+   * wrapper, Kiosk-like wrapper, etc.). Not held by a wallet directly; surfaced
+   * on the detail page as "Listed on marketplace" so the gap between live-object
+   * count and `objectHolderCount` is visible rather than silent.
    */
   @Prop({ required: true, default: 0 }) listedCount: number;
 
-  /** True if `countObjects` hit its per-scan page cap — `count` is then a floor. */
-  @Prop({ required: true, default: false }) capped: boolean;
+  /** True if the holder walk hit its per-scan page cap — `objectHolderCount` is then a floor. */
+  @Prop({ required: true, default: false }) objectHolderCountCapped: boolean;
 }
 
 @Schema({ _id: false })
@@ -112,11 +119,19 @@ export class PackageFact {
   @Prop({ type: [ModuleMetrics], default: [] }) moduleMetrics: ModuleMetrics[];
 
   /**
-   * Live Move-object count currently owned/emitted under this package's
-   * types. Point-in-time (not cumulative). Used alongside `storageRebateNanos`
-   * to compute per-package storage amplification over time.
+   * Sum of `objectHolderCount` across this package's per-type entries — i.e.
+   * total distinct (type, address) holder pairs observed for the package.
+   * Cross-type wallet duplication is not removed at this layer (a wallet
+   * holding both type A and type B counts twice); for project-level dedupe
+   * see `project.uniqueHolders` (computed via aggregation over
+   * `project_holder_entries` at classify time).
+   *
+   * NOTE: this field used to be misnamed `objectCount` and documented as
+   * "live Move-object count" — it never measured live objects, only holder
+   * addresses. True live-object counts are deferred to a separate field per
+   * `plans/plan_object_count.md`.
    */
-  @Prop({ required: true, default: 0 }) objectCount: number;
+  @Prop({ required: true, default: 0 }) objectHolderCount: number;
 
   /**
    * Cumulative MoveCall TX count addressing this package since deploy.
@@ -132,13 +147,13 @@ export class PackageFact {
   @Prop({ required: true, default: false }) transactionsCapped: boolean;
 
   /**
-   * Raw count of every `key`-able struct type declared by this package.
-   * One entry per struct. Populated by the Option C capture pass
+   * Per-type holder counts for every `key`-able struct type declared by this
+   * package. One entry per struct. Populated by the Option C capture pass
    * (`plans/plan_object_count.md`). Classify-time filter against
-   * `ProjectDefinition.fingerprint.countTypes` selects which are summed
-   * into a project's `objectCount` / `uniqueHolders` / `marketplaceListedCount`.
-   * Empty array on old snapshots predating this field — treated as "unknown
-   * for that interval" by the growth endpoint.
+   * `ProjectDefinition.countTypes` selects which are summed into a project's
+   * `objectHolderCount` / `uniqueHolders` / `marketplaceListedCount`. Empty
+   * array on old snapshots predating this field — treated as "unknown for
+   * that interval" by the growth endpoint.
    */
   @Prop({ type: [ObjectTypeCount], default: [] }) objectTypeCounts: ObjectTypeCount[];
 

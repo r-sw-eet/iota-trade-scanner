@@ -312,7 +312,7 @@ async function main() {
       // UnattributedCluster shape-parity with attributed `Project` — the CLI
       // never computes these; zero / null keeps the shared type satisfied.
       uniqueHolders: 0,
-      objectCount: 0,
+      objectHolderCount: 0,
       marketplaceListedCount: 0,
       uniqueWalletsReach: 0,
       sampleIdentifiers: identifiers,

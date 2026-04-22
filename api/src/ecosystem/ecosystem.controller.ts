@@ -39,7 +39,7 @@ export class EcosystemController {
    *   - `scope`  — one of `all` | `attributed` | `unattributed` (default `all`)
    *   - `sortBy` — one of `eventsDelta` | `transactionsDelta` |
    *     `uniqueSendersDelta` | `uniqueHoldersDelta` | `uniqueWalletsReachDelta` |
-   *     `objectCountDelta` | `marketplaceListedCountDelta` (default `eventsDelta`)
+   *     `objectHolderCountDelta` | `marketplaceListedCountDelta` (default `eventsDelta`)
    *
    * `window=all` resolves baseline to `1970-01-01` — since no snapshot
    * predates it, deltas collapse to absolute current values and the ranking
@@ -67,7 +67,7 @@ export class EcosystemController {
       'uniqueSendersDelta',
       'uniqueHoldersDelta',
       'uniqueWalletsReachDelta',
-      'objectCountDelta',
+      'objectHolderCountDelta',
       'marketplaceListedCountDelta',
     ];
     if (!['all', 'attributed', 'unattributed'].includes(scope)) {

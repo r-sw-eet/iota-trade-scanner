@@ -57,7 +57,7 @@ describe('Ecosystem (functional)', () => {
               uniqueSenders: 2,
             },
           ],
-          objectCount: 0,
+          objectHolderCount: 0,
           fingerprint: null,
         },
       ],

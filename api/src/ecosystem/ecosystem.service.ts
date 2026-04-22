@@ -136,7 +136,7 @@ export interface UnattributedCluster {
    */
   uniqueHolders: number;
   /** Always 0 on unattributed clusters — see `uniqueHolders` doc. */
-  objectCount: number;
+  objectHolderCount: number;
   /** Always 0 on unattributed clusters — see `uniqueHolders` doc. */
   marketplaceListedCount: number;
   /** Equals `uniqueSenders` on unattributed clusters (no holder union to contribute). */
@@ -263,15 +263,16 @@ export interface Project {
    */
   uniqueHolders: number | null;
   /**
-   * Total live Move objects of the project's declared `countTypes`, summed
-   * across its packages. `null` when `countTypes` is absent/empty.
-   * Includes both wallet-held and marketplace-listed objects.
+   * Sum across the project's `countTypes` of the per-type `objectHolderCount`
+   * (distinct wallets currently holding at least one live object of each type).
+   * Cross-type wallet duplication is not removed here; for the dedup'd version
+   * see `uniqueHolders`. `null` when `countTypes` is absent/empty.
    */
-  objectCount: number | null;
+  objectHolderCount: number | null;
   /**
    * Count of the project's objects currently owned by another object
    * (marketplace listings via dynamic_field wrappers, Kiosk-like wrappers,
-   * etc.). Surfaced on the detail page so the gap between `objectCount`
+   * etc.). Surfaced on the detail page so the gap between `objectHolderCount`
    * and `uniqueHolders` is visible. `null` when `countTypes` absent.
    */
   marketplaceListedCount: number | null;
@@ -355,7 +356,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 3;
+  private static readonly CLASSIFIER_VERSION = 4;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -518,7 +519,7 @@ export class EcosystemService implements OnModuleInit {
       | 'uniqueSendersDelta'
       | 'uniqueHoldersDelta'
       | 'uniqueWalletsReachDelta'
-      | 'objectCountDelta'
+      | 'objectHolderCountDelta'
       | 'marketplaceListedCountDelta' = 'eventsDelta',
   ): Promise<{
     window: { from: Date; to: Date };
@@ -542,10 +543,10 @@ export class EcosystemService implements OnModuleInit {
       /** Distinct wallets holding project objects. `null` on attributed rows without `countTypes`; always `0` on unattributed. */
       uniqueHolders: number | null;
       uniqueHoldersDelta: number;
-      /** Total live objects of project `countTypes`. Null semantics mirror `uniqueHolders`. */
-      objectCount: number | null;
-      objectCountDelta: number;
-      /** Subset of `objectCount` sitting inside marketplace listing wrappers (Parent-owned). Null semantics mirror. */
+      /** Sum of per-type `objectHolderCount` across project `countTypes`. Null semantics mirror `uniqueHolders`. */
+      objectHolderCount: number | null;
+      objectHolderCountDelta: number;
+      /** Count of `Parent`-owned observations during the holder walk (marketplace listings, dynamic-field wrappers). Null semantics mirror. */
       marketplaceListedCount: number | null;
       marketplaceListedCountDelta: number;
       /** Deduped senders ∪ holders. Always populated (falls back to uniqueSenders when no countTypes). This is what the overview `Wallets*` column shows. */
@@ -603,8 +604,8 @@ export class EcosystemService implements OnModuleInit {
           uniqueSendersDelta: p.uniqueSenders - (prev?.uniqueSenders ?? 0),
           uniqueHolders: p.uniqueHolders ?? null,
           uniqueHoldersDelta: (p.uniqueHolders ?? 0) - (prev?.uniqueHolders ?? 0),
-          objectCount: p.objectCount ?? null,
-          objectCountDelta: (p.objectCount ?? 0) - (prev?.objectCount ?? 0),
+          objectHolderCount: p.objectHolderCount ?? null,
+          objectHolderCountDelta: (p.objectHolderCount ?? 0) - (prev?.objectHolderCount ?? 0),
           marketplaceListedCount: p.marketplaceListedCount ?? null,
           marketplaceListedCountDelta: (p.marketplaceListedCount ?? 0) - (prev?.marketplaceListedCount ?? 0),
           uniqueWalletsReach: p.uniqueWalletsReach ?? p.uniqueSenders,
@@ -638,8 +639,8 @@ export class EcosystemService implements OnModuleInit {
           // Unattributed shape-parity: literal fallbacks (see UnattributedCluster doc).
           uniqueHolders: u.uniqueHolders ?? 0,
           uniqueHoldersDelta: (u.uniqueHolders ?? 0) - (prev?.uniqueHolders ?? 0),
-          objectCount: u.objectCount ?? 0,
-          objectCountDelta: (u.objectCount ?? 0) - (prev?.objectCount ?? 0),
+          objectHolderCount: u.objectHolderCount ?? 0,
+          objectHolderCountDelta: (u.objectHolderCount ?? 0) - (prev?.objectHolderCount ?? 0),
           marketplaceListedCount: u.marketplaceListedCount ?? 0,
           marketplaceListedCountDelta: (u.marketplaceListedCount ?? 0) - (prev?.marketplaceListedCount ?? 0),
           uniqueWalletsReach: u.uniqueWalletsReach ?? u.uniqueSenders,
@@ -1721,10 +1722,10 @@ export class EcosystemService implements OnModuleInit {
         const type = keyableTypes[i];
         try {
           const { count, listedCount, capped } = await this.updateHoldersForType(packageAddress, type);
-          results.push({ type, count, listedCount, capped });
+          results.push({ type, objectHolderCount: count, listedCount, objectHolderCountCapped: capped });
         } catch (e) {
           this.logger.warn(`captureObjectTypes: ${type} drain failed — ${(e as Error).message}`);
-          results.push({ type, count: 0, listedCount: 0, capped: false });
+          results.push({ type, objectHolderCount: 0, listedCount: 0, objectHolderCountCapped: false });
         }
       }
     };
@@ -2188,13 +2189,13 @@ export class EcosystemService implements OnModuleInit {
       const { total: transactions, capped: transactionsCapped } =
         await this.updateTxCountForPackage(pkg.address);
 
-      // Per-package object counts + holder cursor advance. Option C: every
+      // Per-package holder counts + holder cursor advance. Option C: every
       // `key`-able struct type gets captured, not just project-configured
       // ones. Inner-loop type-level concurrency=3 keeps this off the 2h
       // cron's critical path. Classify filters to project `countTypes` at
       // read time. See `plans/plan_object_count.md § Option C + Step 3.5`.
       const objectTypeCounts = await this.captureObjectTypesForPackage(pkg.address);
-      const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.count, 0);
+      const summedObjectHolderCount = objectTypeCounts.reduce((s, e) => s + e.objectHolderCount, 0);
 
       packages.push({
         address: pkg.address,
@@ -2202,7 +2203,7 @@ export class EcosystemService implements OnModuleInit {
         storageRebateNanos,
         modules,
         moduleMetrics,
-        objectCount: summedObjectCount,
+        objectHolderCount: summedObjectHolderCount,
         transactions,
         transactionsCapped,
         objectTypeCounts,
@@ -2390,17 +2391,17 @@ export class EcosystemService implements OnModuleInit {
       // additionally `$unionWith`es `project_sender_entries` to produce the
       // deduped senders ∪ holders reach number — see `plans/plan_object_count.md`.
       const countTypes = def.countTypes ?? [];
-      let objectCount: number | null = null;
+      let objectHolderCount: number | null = null;
       let marketplaceListedCount: number | null = null;
       let uniqueHolders: number | null = null;
       const typePairs: Array<{ packageAddress: string; type: string }> = [];
       if (countTypes.length > 0) {
-        objectCount = 0;
+        objectHolderCount = 0;
         marketplaceListedCount = 0;
         for (const pkg of facts) {
           for (const entry of (pkg.objectTypeCounts ?? [])) {
             if (countTypes.some((ct) => entry.type.endsWith(`::${ct}`))) {
-              objectCount += entry.count;
+              objectHolderCount += entry.objectHolderCount;
               marketplaceListedCount += entry.listedCount;
               typePairs.push({ packageAddress: pkg.address, type: entry.type });
             }
@@ -2512,7 +2513,7 @@ export class EcosystemService implements OnModuleInit {
         anomalousDeployers,
         uniqueSenders: uniqueSendersCount,
         uniqueHolders,
-        objectCount,
+        objectHolderCount,
         marketplaceListedCount,
         uniqueWalletsReach,
         attribution: def.attribution ?? null,
@@ -2664,7 +2665,7 @@ export class EcosystemService implements OnModuleInit {
         // always pin to zero / senders-fallback. `growthRanking` can
         // interleave attributed + unattributed rows without branching on kind.
         uniqueHolders: 0,
-        objectCount: 0,
+        objectHolderCount: 0,
         marketplaceListedCount: 0,
         uniqueWalletsReach: uniqueSenders,
         sampleIdentifiers: identifiers,
@@ -2851,7 +2852,7 @@ export class EcosystemService implements OnModuleInit {
           anomalousDeployers: [],
           uniqueSenders: 0,
           uniqueHolders: null,
-          objectCount: null,
+          objectHolderCount: null,
           marketplaceListedCount: null,
           uniqueWalletsReach: 0,
           attribution: null,
