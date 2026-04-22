@@ -262,6 +262,17 @@ export interface Project {
   attribution: string | null;
   /** ISO-8601 date the project was first added to the registry (from `ProjectDefinition.addedAt`). `null` for defs that predate the field or for DefiLlama-synthesized L2 rows. */
   addedAt: string | null;
+  /**
+   * Probe-extracted string fields from one sampled Move object per project
+   * (latest package first, first-non-empty wins). Exposed for the same
+   * review-and-audit purpose as on `UnattributedCluster`: surfaces on-chain
+   * self-attestation (names, symbols, URLs, tags) so a registry maintainer
+   * can confirm a match rule is capturing what they think it is. `[]` if the
+   * project's packages had no probe-worthy fields.
+   */
+  sampleIdentifiers: string[];
+  /** Move type repr of the sampled object behind `sampleIdentifiers`. `null` when no object was sampled. */
+  sampledObjectType: string | null;
 }
 
 interface PackageInfo {
@@ -318,7 +329,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 1;
+  private static readonly CLASSIFIER_VERSION = 2;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -576,7 +587,7 @@ export class EcosystemService implements OnModuleInit {
           logo: p.logo,
           category: p.category,
           categoryLabel: p.categoryLabel,
-          sampleIdentifiers: null,
+          sampleIdentifiers: p.sampleIdentifiers ?? null,
         });
       }
     }
@@ -1907,7 +1918,10 @@ export class EcosystemService implements OnModuleInit {
         this.flattenJson(json, '', 0, leaves);
         for (const [path, v] of leaves) {
           const trimmed = v.trim();
-          if (!trimmed || trimmed.length > 80) continue;
+          // Min 3 chars keeps real tickers (`BTC`, `NFT`, `IRT`) but drops
+          // 1–2 char junk that snuck in via whitelisted keys (e.g. a `url`
+          // field literally set to `"ee"`).
+          if (!trimmed || trimmed.length < 3 || trimmed.length > 80) continue;
           const leafKey = path.split('.').pop()!.toLowerCase();
           const looksIdentifying =
             identifierKeys.has(leafKey) ||
@@ -2372,6 +2386,24 @@ export class EcosystemService implements OnModuleInit {
           : `${def.name} (deployer-${hash})`;
       }
 
+      // Same walk-latest-first-non-empty rule as unattributed clusters
+      // (`ecosystem.service.ts` — unattributed block below). Surfacing this
+      // on attributed projects too lets a maintainer eyeball the actual
+      // Move metadata a match rule is claiming (catches cases like a
+      // package matched on module-name alone whose on-chain `asset_metadata`
+      // says something different from the registry name).
+      let sampleIdentifiers: string[] = [];
+      let sampledObjectType: string | null = null;
+      for (const pkg of [...facts].reverse()) {
+        const fp = pkg.fingerprint;
+        if (!fp) continue;
+        if (fp.sampledObjectType && !sampledObjectType) sampledObjectType = fp.sampledObjectType;
+        if (fp.identifiers?.length) {
+          sampleIdentifiers = fp.identifiers;
+          break;
+        }
+      }
+
       const firstPkg = facts[0]; // original deployment — address never changes
       const addrPrefix = firstPkg.address.slice(2, 8);
       projects.push({
@@ -2406,6 +2438,8 @@ export class EcosystemService implements OnModuleInit {
         uniqueWalletsReach,
         attribution: def.attribution ?? null,
         addedAt: def.addedAt ?? null,
+        sampleIdentifiers,
+        sampledObjectType,
       });
     }
 
@@ -2681,6 +2715,8 @@ export class EcosystemService implements OnModuleInit {
           uniqueWalletsReach: 0,
           attribution: null,
           addedAt: null,
+          sampleIdentifiers: [],
+          sampledObjectType: null,
         });
       }
       view.l2 = l2Projects;

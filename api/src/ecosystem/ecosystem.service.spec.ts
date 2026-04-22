@@ -392,6 +392,78 @@ describe('EcosystemService', () => {
     });
   });
 
+  // ---------- classifyFromRaw: sampleIdentifiers propagation ----------
+
+  describe('classifyFromRaw — attributed project sampleIdentifiers', () => {
+    it('surfaces fingerprint.identifiers from the latest matched package onto the Project row', async () => {
+      // AddrOnly matches on packageAddresses = ['0xABCDEF']. Seed two packages
+      // under that project: the earlier one has empty identifiers, the latest
+      // has real ones. The walk-latest-first-non-empty rule should pick the
+      // latest's identifiers and its sampledObjectType.
+      const raw = {
+        _id: 'raw1',
+        packages: [
+          {
+            address: '0xabcdef',
+            deployer: '0xdeployer',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0,
+            fingerprint: { sampledObjectType: '0xabcdef::m::Old', identifiers: [] },
+          },
+          {
+            address: '0xabcdef',
+            deployer: '0xdeployer',
+            storageRebateNanos: 2_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 2, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0,
+            fingerprint: {
+              sampledObjectType: '0xabcdef::m::Latest',
+              identifiers: ['asset_metadata.name: Real Thing', 'asset_metadata.symbol: RTG'],
+            },
+          },
+        ],
+        totalStorageRebateNanos: 3_000_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const proj = view.l1.find((p: any) => p.name === 'AddrOnly');
+      expect(proj).toBeDefined();
+      expect(proj.sampleIdentifiers).toEqual([
+        'asset_metadata.name: Real Thing',
+        'asset_metadata.symbol: RTG',
+      ]);
+      expect(proj.sampledObjectType).toBe('0xabcdef::m::Latest');
+    });
+
+    it('falls back to sampledObjectType only when all matched packages have empty identifiers', async () => {
+      const raw = {
+        _id: 'raw2',
+        packages: [
+          {
+            address: '0xabcdef',
+            deployer: '0xdeployer',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 0, eventsCapped: false, uniqueSenders: 0 }],
+            objectCount: 0,
+            fingerprint: { sampledObjectType: '0xabcdef::m::Only', identifiers: [] },
+          },
+        ],
+        totalStorageRebateNanos: 1_000_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const proj = view.l1.find((p: any) => p.name === 'AddrOnly');
+      expect(proj.sampleIdentifiers).toEqual([]);
+      expect(proj.sampledObjectType).toBe('0xabcdef::m::Only');
+    });
+  });
+
   // ---------- getLatest ----------
 
   describe('getLatest', () => {
@@ -1337,6 +1409,31 @@ describe('EcosystemService', () => {
       expect(identifiers.find((s: string) => s.startsWith('noise:'))).toBeUndefined();
     });
 
+    it('drops values under 3 chars even when the key is whitelisted', async () => {
+      // `url` is in the whitelist but the value `"ee"` is junk — pre-fix it
+      // would leak through. The length < 3 guard kills it without affecting
+      // legit short tickers (BTC/NFT/IRT are all 3).
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{
+                asMoveObject: {
+                  contents: {
+                    type: { repr: '0xaa::m::T' },
+                    json: { url: 'ee', symbol: 'BTC', name: 'Real Name' },
+                  },
+                },
+              }],
+            },
+          },
+        }),
+      });
+      const { identifiers } = await probe('0xaa');
+      expect(identifiers).toEqual(expect.arrayContaining(['symbol: BTC', 'name: Real Name']));
+      expect(identifiers.find((s: string) => s.startsWith('url'))).toBeUndefined();
+    });
+
     it('drops strings that just echo a full address', async () => {
       fetchMock.mockResolvedValue({
         json: async () => ({
@@ -1383,7 +1480,7 @@ describe('EcosystemService', () => {
           data: {
             objects: {
               nodes: [
-                { asMoveObject: { contents: { type: { repr: '0xaa::nft::NFT' }, json: { tag: 'p1', name: 'P1', issuer: 'P1Inc' } } } },
+                { asMoveObject: { contents: { type: { repr: '0xaa::nft::NFT' }, json: { tag: 'alpha', name: 'Page1', issuer: 'P1Inc' } } } },
               ],
               pageInfo: { hasNextPage: true, endCursor: 'NEXT' },
             },

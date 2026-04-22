@@ -702,6 +702,7 @@ const projectTvlChartOptions = {
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(l1Sort, 'storageIota') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'storageIota') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('tvl')">TVL<span class="ml-1" :class="sortActive(l1Sort, 'tvl') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'tvl') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('packages')">Packages<span class="ml-1" :class="sortActive(l1Sort, 'packages') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'packages') }}</span></th>
+                        <th class="text-left pb-2 pr-4" title="String fields extracted from one sampled Move object per project — on-chain self-attestation, kept visible for audit / sanity-checking of match rules.">Sample identifiers</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -740,6 +741,13 @@ const projectTvlChartOptions = {
                           <template v-else>—</template>
                         </td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#71717a]">{{ p.packages }}</td>
+                        <td class="py-3 pr-4" @click.stop>
+                          <div v-if="p.sampleIdentifiers?.length" class="flex flex-wrap gap-1 max-w-md">
+                            <span v-for="(id, i) in p.sampleIdentifiers.slice(0, 6)" :key="i" class="px-1.5 py-0.5 text-xs font-mono bg-scanner-elevated text-[#e4e4e7] rounded-xs" :title="id">{{ id.length > 40 ? id.slice(0, 40) + '…' : id }}</span>
+                            <span v-if="p.sampleIdentifiers.length > 6" class="px-1.5 py-0.5 text-xs text-[#52525b]">+{{ p.sampleIdentifiers.length - 6 }}</span>
+                          </div>
+                          <span v-else class="text-xs text-[#52525b]">—</span>
+                        </td>
                       </tr>
                     </tbody>
                   </table>
