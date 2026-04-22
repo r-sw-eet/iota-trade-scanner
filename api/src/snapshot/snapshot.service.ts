@@ -17,6 +17,7 @@ export class SnapshotService implements OnModuleInit {
 
   async onModuleInit() {
     if (process.env.NODE_ENV === 'test') return;
+    if (process.env.API_ROLE === 'serve') return;
     const count = await this.snapshotModel.countDocuments();
     if (count === 0) {
       this.logger.log('No snapshots found, capturing initial snapshot...');

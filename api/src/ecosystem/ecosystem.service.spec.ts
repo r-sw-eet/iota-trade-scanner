@@ -1011,6 +1011,22 @@ describe('EcosystemService', () => {
       expect(ecoModel.countDocuments).not.toHaveBeenCalled();
     });
 
+    it('skips capture branch when API_ROLE=serve (web host leaves capture to scanner)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.API_ROLE = 'serve';
+      const captureSpy = jest.spyOn(service, 'capture').mockResolvedValue(undefined as any);
+      const selfHealSpy = jest.spyOn(service as any, 'selfHealLatestClassified').mockResolvedValue(undefined);
+      try {
+        await service.onModuleInit();
+        expect(ecoModel.countDocuments).not.toHaveBeenCalled();
+        expect(captureSpy).not.toHaveBeenCalled();
+        // Self-heal is read-only and still runs in serve mode.
+        expect(selfHealSpy).toHaveBeenCalled();
+      } finally {
+        delete process.env.API_ROLE;
+      }
+    });
+
     it('fires an initial capture in background when DB is empty', async () => {
       process.env.NODE_ENV = 'development';
       ecoModel.countDocuments.mockResolvedValue(0);

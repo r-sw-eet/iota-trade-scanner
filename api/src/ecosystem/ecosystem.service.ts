@@ -418,11 +418,14 @@ export class EcosystemService implements OnModuleInit {
 
   async onModuleInit() {
     if (process.env.NODE_ENV === 'test') return;
-    const count = await this.ecoModel.countDocuments();
-    if (count === 0) {
-      this.logger.log('No ecosystem snapshot found, capturing in background...');
-      this.capture().catch((e) => this.logger.error('Initial ecosystem capture failed', e));
-      return;
+    const isServeOnly = process.env.API_ROLE === 'serve';
+    if (!isServeOnly) {
+      const count = await this.ecoModel.countDocuments();
+      if (count === 0) {
+        this.logger.log('No ecosystem snapshot found, capturing in background...');
+        this.capture().catch((e) => this.logger.error('Initial ecosystem capture failed', e));
+        return;
+      }
     }
     // Self-heal: if the latest snapshot has no classified doc, or its
     // persisted view was computed against a stale registry (registry edit or

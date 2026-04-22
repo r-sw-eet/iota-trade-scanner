@@ -125,6 +125,17 @@ describe('SnapshotService', () => {
       expect(model.countDocuments).not.toHaveBeenCalled();
     });
 
+    it('short-circuits when API_ROLE=serve (two-box split: web host does not capture)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.API_ROLE = 'serve';
+      try {
+        await service.onModuleInit();
+        expect(model.countDocuments).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.API_ROLE;
+      }
+    });
+
     it('captures an initial snapshot when none exist, then schedules backfill', async () => {
       process.env.NODE_ENV = 'development';
       model.countDocuments.mockResolvedValue(0);

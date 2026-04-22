@@ -12,7 +12,9 @@ import { AlertsModule } from './alerts/alerts.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     MongooseModule.forRoot(process.env.MONGODB_URI || 'mongodb://localhost:27019/scanner'),
-    ...(process.env.NODE_ENV === 'test' ? [] : [ScheduleModule.forRoot()]),
+    ...(process.env.NODE_ENV === 'test' || process.env.API_ROLE === 'serve'
+      ? []
+      : [ScheduleModule.forRoot()]),
     AlertsModule,
     IotaModule,
     SnapshotModule,
