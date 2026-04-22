@@ -156,6 +156,20 @@ function shortAddr(addr: string): string {
 function toSlug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
 }
+
+// Split sampleIdentifiers into "top-level" (flat keys read directly from the
+// sampled Move object — name: Foo, tag: bar) vs "nested" (path-prefixed,
+// produced by the 2026-04-22 flatten change — metadata.name: Foo). A `.` in
+// the key segment before the first `:` marks it as nested. Both arrays
+// preserve the original order within their category.
+function flatIdentifiers(ids: string[] | undefined | null): string[] {
+  if (!ids) return []
+  return ids.filter((id) => !/^[^:]+\./.test(id))
+}
+function nestedIdentifiers(ids: string[] | undefined | null): string[] {
+  if (!ids) return []
+  return ids.filter((id) => /^[^:]+\./.test(id))
+}
 const ecosystemError = ref('')
 
 // --- Nav state ---
@@ -702,7 +716,6 @@ const projectTvlChartOptions = {
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(l1Sort, 'storageIota') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'storageIota') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('tvl')">TVL<span class="ml-1" :class="sortActive(l1Sort, 'tvl') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'tvl') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-scanner-accent" @click="toggleL1Sort('packages')">Packages<span class="ml-1" :class="sortActive(l1Sort, 'packages') ? 'text-scanner-accent' : 'text-[#3f3f46]'">{{ sortGlyph(l1Sort, 'packages') }}</span></th>
-                        <th class="text-left pb-2 pr-4" title="String fields extracted from one sampled Move object per project — on-chain self-attestation, kept visible for audit / sanity-checking of match rules.">Sample identifiers</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -741,13 +754,6 @@ const projectTvlChartOptions = {
                           <template v-else>—</template>
                         </td>
                         <td class="py-3 pr-4 text-right font-mono text-base text-[#71717a]">{{ p.packages }}</td>
-                        <td class="py-3 pr-4" @click.stop>
-                          <div v-if="p.sampleIdentifiers?.length" class="flex flex-wrap gap-1 max-w-md">
-                            <span v-for="(id, i) in p.sampleIdentifiers.slice(0, 6)" :key="i" class="px-1.5 py-0.5 text-xs font-mono bg-scanner-elevated text-[#e4e4e7] rounded-xs" :title="id">{{ id.length > 40 ? id.slice(0, 40) + '…' : id }}</span>
-                            <span v-if="p.sampleIdentifiers.length > 6" class="px-1.5 py-0.5 text-xs text-[#52525b]">+{{ p.sampleIdentifiers.length - 6 }}</span>
-                          </div>
-                          <span v-else class="text-xs text-[#52525b]">—</span>
-                        </td>
                       </tr>
                     </tbody>
                   </table>
@@ -828,7 +834,7 @@ const projectTvlChartOptions = {
                   {{ ecosystem.totalUnattributedPackages }} package{{ ecosystem.totalUnattributedPackages === 1 ? '' : 's' }})
                 </h3>
                 <p class="text-xs text-[#71717a] text-center max-w-2xl mx-auto mb-6">
-                  Packages published on mainnet that no current project definition claims. Clustered by deployer; sample identifiers are string fields extracted from one Move object per cluster — these are discovery leads, not attributions.
+                  Packages published on mainnet that no current project definition claims. Clustered by deployer. <strong class="text-[#a1a1aa]">Top-level identifiers</strong> are string fields read directly from one sampled Move object's keys; <strong class="text-scanner-accent">Nested identifiers</strong> (highlighted) are fields surfaced inside wrapper structs / `Option` / `VecMap` by the 2026-04-22 deep-probe change. Together these are discovery leads, not attributions.
                 </p>
 
                 <div class="overflow-x-auto">
@@ -841,7 +847,8 @@ const projectTvlChartOptions = {
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" title="MoveCall transaction count across the cluster's packages — rescues 0-events-but-real-activity deployers from the discovery queue bottom" @click="toggleUnattributedSort('transactions')">TXs<span class="ml-1" :class="sortActive(unattributedSort, 'transactions') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'transactions') }}</span></th>
                         <th class="text-right pb-2 pr-4 cursor-pointer whitespace-nowrap hover:text-status-active" @click="toggleUnattributedSort('storageIota')">Storage (IOTA)<span class="ml-1" :class="sortActive(unattributedSort, 'storageIota') ? 'text-status-active' : 'text-[#3f3f46]'">{{ sortGlyph(unattributedSort, 'storageIota') }}</span></th>
                         <th class="text-left pb-2 pr-4 whitespace-nowrap">Modules</th>
-                        <th class="text-left pb-2 pr-4">Sample identifiers</th>
+                        <th class="text-left pb-2 pr-4" title="Flat (pre-flatten) sample identifiers — string fields read directly from one sampled Move object's top-level keys.">Top-level identifiers</th>
+                        <th class="text-left pb-2 pr-4" title="Nested (post-flatten) sample identifiers — string fields discovered inside wrapper structs / Option / VecMap, surfaced by the 2026-04-22 flatten change. Path-prefixed like `metadata.name:`.">Nested identifiers</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -865,10 +872,21 @@ const projectTvlChartOptions = {
                           </div>
                         </td>
                         <td class="py-3 pr-4">
-                          <div v-if="c.sampleIdentifiers?.length" class="flex flex-wrap gap-1 max-w-md">
-                            <span v-for="(id, i) in c.sampleIdentifiers.slice(0, 6)" :key="i" class="px-1.5 py-0.5 text-xs font-mono bg-scanner-elevated text-[#e4e4e7] rounded-xs" :title="id">{{ id.length > 40 ? id.slice(0, 40) + '…' : id }}</span>
-                            <span v-if="c.sampleIdentifiers.length > 6" class="px-1.5 py-0.5 text-xs text-[#52525b]">+{{ c.sampleIdentifiers.length - 6 }}</span>
-                          </div>
+                          <template v-if="flatIdentifiers(c.sampleIdentifiers).length">
+                            <div class="flex flex-wrap gap-1 max-w-md">
+                              <span v-for="(id, i) in flatIdentifiers(c.sampleIdentifiers).slice(0, 6)" :key="i" class="px-1.5 py-0.5 text-xs font-mono bg-scanner-elevated text-[#e4e4e7] rounded-xs" :title="id">{{ id.length > 40 ? id.slice(0, 40) + '…' : id }}</span>
+                              <span v-if="flatIdentifiers(c.sampleIdentifiers).length > 6" class="px-1.5 py-0.5 text-xs text-[#52525b]">+{{ flatIdentifiers(c.sampleIdentifiers).length - 6 }}</span>
+                            </div>
+                          </template>
+                          <span v-else class="text-xs text-[#52525b]">—</span>
+                        </td>
+                        <td class="py-3 pr-4">
+                          <template v-if="nestedIdentifiers(c.sampleIdentifiers).length">
+                            <div class="flex flex-wrap gap-1 max-w-md">
+                              <span v-for="(id, i) in nestedIdentifiers(c.sampleIdentifiers).slice(0, 6)" :key="i" class="px-1.5 py-0.5 text-xs font-mono bg-scanner-accent/10 text-scanner-accent rounded-xs" :title="id">{{ id.length > 40 ? id.slice(0, 40) + '…' : id }}</span>
+                              <span v-if="nestedIdentifiers(c.sampleIdentifiers).length > 6" class="px-1.5 py-0.5 text-xs text-[#52525b]">+{{ nestedIdentifiers(c.sampleIdentifiers).length - 6 }}</span>
+                            </div>
+                          </template>
                           <span v-else class="text-xs text-[#52525b]">—</span>
                         </td>
                       </tr>
