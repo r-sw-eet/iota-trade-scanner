@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "group:allNonMajor"
+  ],
+  "timezone": "Europe/Berlin",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "major": {
+    "dependencyDashboardApproval": true
+  },
+  "packageRules": [
+    {
+      "description": "Group NestJS packages",
+      "matchPackageNames": ["@nestjs/**"],
+      "groupName": "nestjs"
+    },
+    {
+      "description": "Group Nuxt / Vue packages",
+      "matchPackageNames": ["nuxt", "vue", "vue-router", "@nuxt/**", "@vue/**"],
+      "groupName": "nuxt + vue"
+    },
+    {
+      "description": "Group Playwright packages",
+      "matchPackageNames": ["@playwright/test", "playwright"],
+      "groupName": "playwright"
+    },
+    {
+      "description": "Pin Node engines to the major we run",
+      "matchDepTypes": ["engines"],
+      "matchPackageNames": ["node"],
+      "allowedVersions": "22"
+    },
+    {
+      "description": "MongoDB image: only minor/patch within the 7.x series we run",
+      "matchManagers": ["docker-compose"],
+      "matchPackageNames": ["mongo"],
+      "allowedVersions": "/^7\\./"
+    }
+  ]
+}
