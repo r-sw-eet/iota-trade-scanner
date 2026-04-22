@@ -145,6 +145,32 @@ export interface UnattributedCluster {
   sampleIdentifiers: string[];
   /** Fully-qualified type of the object we probed, for provenance. */
   sampledObjectType: string | null;
+  /**
+   * Attributed projects (L1) whose `detectedDeployers` include this cluster's
+   * deployer. A non-empty list is a strong "probably same team" signal: the
+   * unattributed cluster is very likely a spillover of a known team's footprint
+   * that our match rules don't yet cover. Empty = deployer is not claimed by
+   * any current ProjectDefinition / Team. Rendered in the UI's Insights column.
+   */
+  deployerAttributedProjects: { name: string; slug: string }[];
+  /**
+   * True if the cluster's deployer address also appears as a sender on at
+   * least one of the cluster's (package, module) pairs. Distinguishes
+   * "self-deployed, no external usage" shapes (deployer is the only interactor)
+   * from "distributed-usage" shapes (deployer absent from the sender list).
+   * Feeds the Insights column; lets a maintainer spot throwaway / internal
+   * deploys at a glance.
+   */
+  deployerIsSender: boolean;
+  /**
+   * Human-readable notes synthesized from the signals above (deployer
+   * cross-ref, deployer-as-sender, basic sender count). Not raw strings —
+   * short sentences like "Same deployer as Salus, TWIN" or "Self-deployed
+   * only: deployer is the sole sender". Up to ~5 entries; UI renders them as
+   * stacked badges in the Insights column so they're scannable across
+   * clusters.
+   */
+  insights: string[];
 }
 
 /**
@@ -329,7 +355,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 2;
+  private static readonly CLASSIFIER_VERSION = 3;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -1807,6 +1833,59 @@ export class EcosystemService implements OnModuleInit {
   }
 
   /**
+   * Synthesize the human-readable notes that appear in the UI's Insights
+   * column on each unattributed cluster. Input is the already-computed
+   * per-cluster aggregates + cross-references; output is an ordered array
+   * of short sentences (up to ~5). Kept separate from the cluster-push loop
+   * so it's trivially unit-testable without a full classify setup.
+   *
+   * Not raw identifier strings — these are *interpretations*: "same deployer
+   * as X", "self-deployed only", "never interacted with". Order runs from
+   * highest-specificity / strongest-signal first so a reader can scan the
+   * first entry and stop when satisfied.
+   */
+  private buildClusterInsights(ctx: {
+    packageCount: number;
+    uniqueSenders: number;
+    transactions: number;
+    events: number;
+    deployerAttributedProjects: { name: string; slug: string }[];
+    deployerIsSender: boolean;
+    deployerIsUnknown: boolean;
+  }): string[] {
+    const out: string[] = [];
+
+    if (ctx.deployerAttributedProjects.length > 0) {
+      const names = ctx.deployerAttributedProjects.map((p) => p.name);
+      const joined =
+        names.length <= 3
+          ? names.join(', ')
+          : `${names.slice(0, 3).join(', ')} +${names.length - 3}`;
+      out.push(`Same deployer as ${joined}`);
+    }
+
+    if (ctx.uniqueSenders === 0 && ctx.transactions === 0 && ctx.events === 0) {
+      out.push('No on-chain interaction yet — deploy-only');
+    } else if (ctx.deployerIsUnknown) {
+      // Framework / legacy publish records have no resolvable deployer.
+      // Keep the `deployerIsSender` story silent here since there's no
+      // deployer to test against.
+    } else if (ctx.uniqueSenders === 1 && ctx.deployerIsSender) {
+      out.push('Self-deployed only: deployer is the sole sender');
+    } else if (ctx.deployerIsSender && ctx.uniqueSenders > 1) {
+      out.push(`Deployer-driven + ${ctx.uniqueSenders - 1} other sender(s)`);
+    } else if (!ctx.deployerIsSender && ctx.uniqueSenders > 0) {
+      out.push(`Distributed usage: ${ctx.uniqueSenders} sender(s), deployer absent from senders`);
+    }
+
+    if (ctx.packageCount >= 5) {
+      out.push(`${ctx.packageCount}-package footprint — likely a multi-contract protocol`);
+    }
+
+    return out;
+  }
+
+  /**
    * Flattens a Move object's JSON into `[dotPath, stringValue]` leaves so the
    * identity probe can reach fields hidden inside wrapper structs, `Option`
    * (`{vec:[T]}`), `VecMap` (`[{key,value}]`) and plain nested objects.
@@ -2470,6 +2549,48 @@ export class EcosystemService implements OnModuleInit {
         return b.storageIota - a.storageIota;
       });
 
+    // Build deployer → attributed-project index so each unattributed cluster
+    // can surface "same deployer as <known project>" insights. Deployer
+    // strings are lowercased on both sides during `detectedDeployers` build,
+    // so this map matches the cluster's deployer key directly. Cheap (one
+    // pass over the attributed `projects` array, already built above).
+    const deployerToAttributedProjects = new Map<
+      string,
+      { name: string; slug: string }[]
+    >();
+    for (const p of projects) {
+      for (const d of p.detectedDeployers) {
+        const key = d.toLowerCase();
+        const bucket = deployerToAttributedProjects.get(key);
+        const entry = { name: p.name, slug: p.slug };
+        if (bucket) bucket.push(entry);
+        else deployerToAttributedProjects.set(key, [entry]);
+      }
+    }
+
+    // Bulk sender probe — one Mongo query covers every (clusterPkg, deployer)
+    // pair. Key the result set so the per-cluster loop below is an O(1)
+    // lookup rather than a per-cluster round-trip. Senders store the deployer
+    // address verbatim from on-chain data (lowercased on write in
+    // `updateSendersForModule`); cluster deployer keys are already lowercase.
+    const deployerSenderPairs: Array<{ packageAddress: string; address: string }> = [];
+    for (const { deployer, facts } of unattributedRanked) {
+      if (deployer === 'unknown') continue;
+      for (const pkg of facts) {
+        deployerSenderPairs.push({ packageAddress: pkg.address, address: deployer });
+      }
+    }
+    const deployerSenderHits = new Set<string>();
+    if (deployerSenderPairs.length > 0) {
+      const rows = await this.senderDocModel
+        .find({ $or: deployerSenderPairs }, { packageAddress: 1, address: 1 })
+        .lean()
+        .exec();
+      for (const r of rows as Array<{ packageAddress: string; address: string }>) {
+        deployerSenderHits.add(`${r.packageAddress.toLowerCase()}|${r.address.toLowerCase()}`);
+      }
+    }
+
     const unattributed: UnattributedCluster[] = [];
     for (const { deployer, facts, storageIota } of unattributedRanked) {
       const firstPkg = facts[0];
@@ -2509,6 +2630,23 @@ export class EcosystemService implements OnModuleInit {
         }
       }
 
+      const deployerAttributedProjects =
+        deployer !== 'unknown'
+          ? deployerToAttributedProjects.get(deployer.toLowerCase()) ?? []
+          : [];
+      const deployerIsSender =
+        deployer !== 'unknown' &&
+        facts.some((p) => deployerSenderHits.has(`${p.address.toLowerCase()}|${deployer.toLowerCase()}`));
+      const insights = this.buildClusterInsights({
+        packageCount: facts.length,
+        uniqueSenders,
+        transactions,
+        events,
+        deployerAttributedProjects,
+        deployerIsSender,
+        deployerIsUnknown: deployer === 'unknown',
+      });
+
       unattributed.push({
         deployer,
         packages: facts.length,
@@ -2531,6 +2669,9 @@ export class EcosystemService implements OnModuleInit {
         uniqueWalletsReach: uniqueSenders,
         sampleIdentifiers: identifiers,
         sampledObjectType: objectType,
+        deployerAttributedProjects,
+        deployerIsSender,
+        insights,
       });
     }
     const totalUnattributedPackages = unattributed.reduce((s, c) => s + c.packages, 0);

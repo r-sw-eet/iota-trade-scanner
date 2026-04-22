@@ -256,6 +256,10 @@ describe('EcosystemService', () => {
       insertMany: jest.fn().mockResolvedValue([]),
       countDocuments: jest.fn().mockResolvedValue(0),
       aggregate: jest.fn().mockResolvedValue([]),
+      // `classifyFromRaw` calls `.find(...).lean().exec()` to check whether
+      // an unattributed cluster's deployer is also a sender on its own
+      // packages. Default: no hits.
+      find: jest.fn(() => ({ lean: () => ({ exec: () => Promise.resolve([]) }) })),
       collection: { name: 'project_sender_entries' },
     };
     txCountModel = {
@@ -392,6 +396,88 @@ describe('EcosystemService', () => {
     });
   });
 
+  // ---------- buildClusterInsights (insights synthesizer) ----------
+
+  describe('buildClusterInsights', () => {
+    const build = (ctx: any) => (service as any).buildClusterInsights(ctx);
+
+    it('leads with "same deployer as <projects>" when deployer cross-references attributed projects', () => {
+      const insights = build({
+        packageCount: 1,
+        uniqueSenders: 5,
+        transactions: 10,
+        events: 10,
+        deployerAttributedProjects: [{ name: 'Salus', slug: 'salus' }, { name: 'TWIN', slug: 'twin' }],
+        deployerIsSender: false,
+        deployerIsUnknown: false,
+      });
+      expect(insights[0]).toBe('Same deployer as Salus, TWIN');
+    });
+
+    it('truncates the deployer cross-ref with a +N suffix when more than 3 attributed hits', () => {
+      const insights = build({
+        packageCount: 1,
+        uniqueSenders: 0,
+        transactions: 0,
+        events: 0,
+        deployerAttributedProjects: [
+          { name: 'A', slug: 'a' }, { name: 'B', slug: 'b' }, { name: 'C', slug: 'c' }, { name: 'D', slug: 'd' },
+        ],
+        deployerIsSender: false,
+        deployerIsUnknown: false,
+      });
+      expect(insights[0]).toBe('Same deployer as A, B, C +1');
+    });
+
+    it('flags "no on-chain interaction yet — deploy-only" when uniqueSenders / transactions / events are all zero', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 0, transactions: 0, events: 0,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+      });
+      expect(insights).toContain('No on-chain interaction yet — deploy-only');
+    });
+
+    it('reports self-deployed-only when deployer is the sole sender', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 1, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: true, deployerIsUnknown: false,
+      });
+      expect(insights).toContain('Self-deployed only: deployer is the sole sender');
+    });
+
+    it('reports deployer-driven plus others when deployer is one of several senders', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 4, transactions: 8, events: 4,
+        deployerAttributedProjects: [], deployerIsSender: true, deployerIsUnknown: false,
+      });
+      expect(insights).toContain('Deployer-driven + 3 other sender(s)');
+    });
+
+    it('reports distributed-usage when deployer is absent from the sender list', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 42, transactions: 100, events: 50,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+      });
+      expect(insights).toContain('Distributed usage: 42 sender(s), deployer absent from senders');
+    });
+
+    it('adds a multi-contract-protocol note when the cluster has ≥5 packages', () => {
+      const insights = build({
+        packageCount: 7, uniqueSenders: 10, transactions: 30, events: 20,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+      });
+      expect(insights).toContain('7-package footprint — likely a multi-contract protocol');
+    });
+
+    it('stays silent about deployer-sender patterns when the deployer is unknown (framework packages)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 5, transactions: 5, events: 5,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: true,
+      });
+      expect(insights.find((s: string) => s.includes('deployer'))).toBeUndefined();
+    });
+  });
+
   // ---------- classifyFromRaw: sampleIdentifiers propagation ----------
 
   describe('classifyFromRaw — attributed project sampleIdentifiers', () => {
@@ -461,6 +547,109 @@ describe('EcosystemService', () => {
       const proj = view.l1.find((p: any) => p.name === 'AddrOnly');
       expect(proj.sampleIdentifiers).toEqual([]);
       expect(proj.sampledObjectType).toBe('0xabcdef::m::Only');
+    });
+  });
+
+  // ---------- classifyFromRaw — unattributed insights ----------
+
+  describe('classifyFromRaw — unattributed insights', () => {
+    it('cross-references an unattributed cluster deployer against attributed projects and emits an insight', async () => {
+      // AddrOnly claims 0xabcdef via packageAddresses. Seed it AND an
+      // unattributed package at a different address but the same deployer
+      // (0xfeedbabe). The unattributed cluster should see "Same deployer as
+      // AddrOnly" because detectedDeployers on the attributed row will
+      // include 0xfeedbabe.
+      const raw = {
+        _id: 'raw-xref',
+        packages: [
+          {
+            address: '0xabcdef',
+            deployer: '0xfeedbabe',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0,
+            fingerprint: null,
+          },
+          {
+            address: '0x999aaa',
+            deployer: '0xfeedbabe',
+            storageRebateNanos: 500_000_000,
+            modules: ['free_standing'],
+            moduleMetrics: [{ module: 'free_standing', events: 0, eventsCapped: false, uniqueSenders: 0 }],
+            objectCount: 0,
+            fingerprint: null,
+          },
+        ],
+        totalStorageRebateNanos: 1_500_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const unattr = view.unattributed.find((c: any) => c.deployer === '0xfeedbabe');
+      expect(unattr).toBeDefined();
+      expect(unattr.deployerAttributedProjects).toEqual([{ name: 'AddrOnly', slug: expect.any(String) }]);
+      expect(unattr.insights[0]).toBe('Same deployer as AddrOnly');
+    });
+
+    it('populates deployerIsSender from a matching project_sender_entries row', async () => {
+      // One unattributed package; mock the senders collection to return the
+      // deployer as a sender on that package → cluster should flip
+      // deployerIsSender=true and emit the self-deployed insight.
+      senderDocModel.find = jest.fn(() => ({
+        lean: () => ({
+          exec: () => Promise.resolve([{ packageAddress: '0x999aaa', address: '0xfeedbabe' }]),
+        }),
+      }));
+      const raw = {
+        _id: 'raw-self',
+        packages: [
+          {
+            address: '0x999aaa',
+            deployer: '0xfeedbabe',
+            storageRebateNanos: 500_000_000,
+            modules: ['lonely'],
+            moduleMetrics: [{ module: 'lonely', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0,
+            fingerprint: null,
+          },
+        ],
+        totalStorageRebateNanos: 500_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const unattr = view.unattributed[0];
+      expect(unattr.deployerIsSender).toBe(true);
+      expect(unattr.insights).toContain('Self-deployed only: deployer is the sole sender');
+    });
+
+    it('skips deployer-sender patterns for unknown-deployer clusters (framework packages)', async () => {
+      // A package without a resolvable deployer lands in the `unknown`
+      // bucket. No sender check should be attempted (no deployer to test)
+      // and the insight builder must not mention the deployer.
+      const raw = {
+        _id: 'raw-unknown',
+        packages: [
+          {
+            address: '0x111111',
+            deployer: null,
+            storageRebateNanos: 100_000_000,
+            modules: ['system'],
+            moduleMetrics: [{ module: 'system', events: 100, eventsCapped: false, uniqueSenders: 50 }],
+            objectCount: 0,
+            fingerprint: null,
+          },
+        ],
+        totalStorageRebateNanos: 100_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const unattr = view.unattributed.find((c: any) => c.deployer === 'unknown');
+      expect(unattr).toBeDefined();
+      expect(unattr.deployerIsSender).toBe(false);
+      expect(unattr.insights.find((s: string) => s.toLowerCase().includes('deployer'))).toBeUndefined();
     });
   });
 

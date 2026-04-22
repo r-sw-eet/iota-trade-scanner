@@ -849,6 +849,7 @@ const projectTvlChartOptions = {
                         <th class="text-left pb-2 pr-4 whitespace-nowrap">Modules</th>
                         <th class="text-left pb-2 pr-4" title="Flat (pre-flatten) sample identifiers — string fields read directly from one sampled Move object's top-level keys.">Top-level identifiers</th>
                         <th class="text-left pb-2 pr-4" title="Nested (post-flatten) sample identifiers — string fields discovered inside wrapper structs / Option / VecMap, surfaced by the 2026-04-22 flatten change. Path-prefixed like `metadata.name:`.">Nested identifiers</th>
+                        <th class="text-left pb-2 pr-4" title="Synthesized insights — human-readable notes about this cluster: whether the deployer matches a known attributed project, whether on-chain usage is deployer-only vs distributed, and multi-contract footprint signals.">Insights</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -887,6 +888,24 @@ const projectTvlChartOptions = {
                               <span v-if="nestedIdentifiers(c.sampleIdentifiers).length > 6" class="px-1.5 py-0.5 text-xs text-[#52525b]">+{{ nestedIdentifiers(c.sampleIdentifiers).length - 6 }}</span>
                             </div>
                           </template>
+                          <span v-else class="text-xs text-[#52525b]">—</span>
+                        </td>
+                        <td class="py-3 pr-4" @click.stop>
+                          <div v-if="c.insights?.length" class="flex flex-col gap-1 max-w-sm">
+                            <template v-for="(note, i) in c.insights" :key="i">
+                              <NuxtLink
+                                v-if="i === 0 && c.deployerAttributedProjects?.length === 1"
+                                :to="`/project/${c.deployerAttributedProjects[0].slug}`"
+                                class="text-xs leading-snug text-scanner-accent hover:underline"
+                                :title="note"
+                              >{{ note }}</NuxtLink>
+                              <span
+                                v-else
+                                class="text-xs leading-snug text-[#d4d4d8]"
+                                :title="note"
+                              >{{ note }}</span>
+                            </template>
+                          </div>
                           <span v-else class="text-xs text-[#52525b]">—</span>
                         </td>
                       </tr>

@@ -317,6 +317,11 @@ async function main() {
       uniqueWalletsReach: 0,
       sampleIdentifiers: identifiers,
       sampledObjectType: objectType,
+      // Triage CLI — never joins against the registry or the senders
+      // collection, so these insight-layer fields default to empty.
+      deployerAttributedProjects: [],
+      deployerIsSender: false,
+      insights: [],
     });
   }
   console.log(JSON.stringify(out));
