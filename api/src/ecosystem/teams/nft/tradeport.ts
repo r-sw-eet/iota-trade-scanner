@@ -11,6 +11,22 @@ export const tradeport: Team = {
   deployers: [
     '0x20d666d8e759b3c0c3a094c2bac81794e437775c7e4d3d6fe33761ae063385f7',
     '0xae24ce73cd653c8199bc24afddc0c4ddbf0e9901d504c3b41066a6a396e8bf1e',
+    // Deployer C — third marketplace-code key, ships a fresh byte-identical
+    // copy of the 6-module kiosk transfer-policy rules package (identical
+    // module set to Deployer B's `0x78eedf…`). Co-created objects in its txs
+    // cross-reference Tradeport's own `kiosk_listings::Store` (Deployer A)
+    // and `personal_kiosk::PersonalKioskCap` (Deployer B) — it's wired
+    // directly into Tradeport's live marketplace flow. 351 TXs / 133 real
+    // retail senders. Added 2026-04-22.
+    '0x4ecf96a1cc095f0feac25b5a8e09aaa79dcc9e5728668f14ea5068bd6fe6dfbd',
+    // Promo-mint wallet — separate from the marketplace-code deployers. Ships
+    // the "Proof of Early Mover: IOTA" NFT celebrating Tradeport's October
+    // 2025 IOTA mainnet launch. Collection hosted at
+    // tradeport.xyz/iota/collection/proof-of-early-mover-iota; X post
+    // status/1978522182587191333 announces it. Caught separately by the
+    // narrow `tradeportEarlyMover` project row so the 131-TX promo drop
+    // doesn't conflate with marketplace activity metrics. Added 2026-04-22.
+    '0x68e65b6b00aba9486e3c2209c4db382e8503fd26bce62eb3844121a58da6eb48',
   ],
   logo: '/logos/tradeport.svg',
   logoWordmark: '/logos/tradeport-wordmark.svg',

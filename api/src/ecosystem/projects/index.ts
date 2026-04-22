@@ -1,11 +1,11 @@
 import { ProjectDefinition } from './project.interface';
 
 import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale, clawSwapGateway, virtuePoints, multiAssetBank } from './defi/_index';
-import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus, truvid } from './trade/_index';
+import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus, truvid, seedlotLakeToba } from './trade/_index';
 import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft, turingcerts } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle, kamuiVrf } from './oracles/_index';
-import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents, numberOneFreeNft } from './nft/_index';
+import { nftLaunchpad, tradeport, tradeportEarlyMover, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents, numberOneFreeNft } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip, lostCrusaderArcaneDust, lostCrusaderReviveSpells } from './games/_index';
 import {
   clawnera, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
@@ -15,6 +15,7 @@ import {
   stardustFramework, legacyMigrationHistory, iotaEvmAnchor,
   studioB8b1Demos, studio0a0dExtras,
   iotaSpam,
+  studioB30cRootAnchor,
 } from './misc/_index';
 
 /**
@@ -47,6 +48,9 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   tlip, twinImmutableProof,
   notarization, iotaAssetFramework, iotaAccreditationRegistry,
   traceability, salus, truvid,
+  // Seedlot — Lake Toba Collective. First RWA / Agriculture project. Single
+  // deployer-pinned rule catches the 14-module coffee-traceability stack.
+  seedlotLakeToba,
 
   // Identity (identityFull before identityWot — more specific)
   identityFull, identityWot, objectid, credentials,
@@ -71,8 +75,10 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   kamuiVrf,
 
   // NFT (nftLaunchpad before tradeport so the launchpad sub-product wins
-  // its `{launchpad, mint_box}` match over tradeport's deployer-catch-all)
-  nftLaunchpad, tradeport, nftCollections,
+  // its `{launchpad, mint_box}` match over tradeport's deployer-catch-all;
+  // tradeportEarlyMover before tradeport for the same reason — packageAddresses
+  // pin must win over the deployer catch-all on the promo-mint wallet)
+  nftLaunchpad, tradeportEarlyMover, tradeport, nftCollections,
   // Studio 0xcb6956e9 — multi-collection PFP deployer. Narrow defs
   // (healthyGang fingerprint + the 4 sibling module-name rules) come before
   // the deployer-catch-all aggregate so the specific rule wins sync match;
@@ -111,6 +117,10 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   stardustFramework,
   legacyMigrationHistory,
   iotaEvmAnchor,
+  // Studio 0xb30cf677 — unknown rollup / sidechain state-root anchor
+  // (`root_anchor::RootRegistry`, ~6.6s cadence). Synthetic until a public
+  // project claims it. Deployer-pinned, no overlap risk.
+  studioB30cRootAnchor,
   clawnera, vault, tokenSale, izipublish,
   giftDrop, liquidlink, boltEarth,
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,

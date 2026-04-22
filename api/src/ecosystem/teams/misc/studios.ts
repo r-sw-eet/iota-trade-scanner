@@ -1,5 +1,17 @@
 import { Team } from '../team.interface';
 
+export const studioB30c: Team = {
+  id: 'studio-b30c',
+  name: 'Studio 0xb30cf677',
+  description: 'Anonymous deployer running a rollup / sidechain state-root anchor on IOTA Rebased. Single `root_anchor` module posting sequential 32-byte Merkle roots keyed by `block_number` + `timestamp_ms` to a singleton `RootRegistry` object at ~6.6-second cadence. 223+ commits captured. One admin relayer wallet, zero events, zero retail senders — pure DA / checkpoint anchor shape. No public project claims the deployer as of 2026-04-22.',
+  deployers: ['0xb30cf677dde91d56aaecb8105e28941dfd5d65c50eacb1c1e47e6048619c2906'],
+  attribution: `
+Synthetic team id for an unknown off-chain chain (rollup or sidechain) posting state roots to IOTA L1 as a DA / checkpoint anchor. Single package \`0x2fb4252a3043bcc996ba15ea5b1c5a91ad80fa4e881f2f00f78f3ca4ef89dfb2\` at anonymous deployer \`0xb30cf677dde91d56aaecb8105e28941dfd5d65c50eacb1c1e47e6048619c2906\`. See the \`studioB30cRootAnchor\` project def for the full attribution prose — on-chain shape is unambiguous (sequential \`store_root(block_number, root[32], timestamp_ms)\` commits at ~6.6s cadence from one admin relayer), but no iotaledger repo, docs.iota.org page, or third-party announcement references the \`root_anchor\` module or this deployer.
+
+Kept synthetic pending any public announcement that names this deployer. Not routed to \`iota-foundation\` — IF's L2 anchor (IOTA EVM) uses the \`anchor\` + \`assets_bag\` + \`request\` module set at deployer \`0x1b33a3cf…\`, a completely different codebase.
+`.trim(),
+};
+
 export const studiob5fc: Team = {
   id: 'studio-b5fc',
   name: 'Studio 0xb5fca220',

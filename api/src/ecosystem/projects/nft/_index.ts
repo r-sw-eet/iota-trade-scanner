@@ -1,5 +1,6 @@
 export { nftLaunchpad } from './nft-launchpad';
 export { tradeport } from './tradeport';
+export { tradeportEarlyMover } from './tradeport-early-mover';
 export { nftCollections } from './nft-collections';
 export { healthyGang } from './healthy-gang';
 export { ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops } from './studio-cb69-siblings';

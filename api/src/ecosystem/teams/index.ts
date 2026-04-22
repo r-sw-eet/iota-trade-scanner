@@ -1,13 +1,13 @@
 import { Team } from './team.interface';
 
 import { poolsFinance, virtue, swirl, cyberperp, iotaroyale, magicsea, studio6ff4, studioB9cf } from './defi/_index';
-import { tlip, twinFoundation, salus } from './trade/_index';
+import { tlip, twinFoundation, salus, seedlot } from './trade/_index';
 import { objectid, turingcerts } from './identity/_index';
 import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
 import { switchboard, kamui } from './oracles/_index';
 import { tradeport, iotaPunks, apeDao, studio2cd3 } from './nft/_index';
 import { iotaFlip, gamifly, lostCrusader } from './games/_index';
-import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, studio49c4, studiob5fc, studio457d, studiocebe, clawnera, izipublish, liquidlink, boltEarth, tokenlabs, risingPhoenix2 } from './misc/_index';
+import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, studio49c4, studiob5fc, studio457d, studiocebe, studioB30c, clawnera, izipublish, liquidlink, boltEarth, tokenlabs, risingPhoenix2 } from './misc/_index';
 
 /**
  * Team registry. Every project references exactly one team via `teamId`.
@@ -37,6 +37,10 @@ export const ALL_TEAMS: Team[] = [
 
   // Trade
   tlip, twinFoundation, salus,
+  // Seedlot — SEEDLOT PTE. LTD. (Singapore). Third-party coffee-RWA startup
+  // running the Lake Toba Collective pilot in North Sumatra. First RWA /
+  // Agriculture project on the site.
+  seedlot,
 
   // Identity
   objectid, turingcerts,
@@ -76,7 +80,7 @@ export const ALL_TEAMS: Team[] = [
   // deployers — the routing code at `ecosystem.service.ts` splitByDeployer
   // iterates all claiming teams, so the overlap is explicitly supported.
   studioB8b1, studio0a0d, clawnera, studioCb69, studio295e, studio5451, studio49c4,
-  studiob5fc, studio457d, studiocebe,
+  studiob5fc, studio457d, studiocebe, studioB30c,
   izipublish, liquidlink, boltEarth, tokenlabs,
 ];
 
