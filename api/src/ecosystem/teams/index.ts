@@ -1,13 +1,13 @@
 import { Team } from './team.interface';
 
-import { poolsFinance, virtue, swirl, cyberperp, iotaroyale, magicsea } from './defi/_index';
+import { poolsFinance, virtue, swirl, cyberperp, iotaroyale, magicsea, studio6ff4, studioB9cf } from './defi/_index';
 import { tlip, twinFoundation, salus } from './trade/_index';
-import { objectid, iotaNames, turingcerts } from './identity/_index';
+import { objectid, turingcerts } from './identity/_index';
 import { echoProtocol, layerzero, wormholeFoundation } from './bridges/_index';
 import { switchboard, kamui } from './oracles/_index';
-import { tradeport, iotaPunks, apeDao } from './nft/_index';
-import { iotaFlip, gamifly } from './games/_index';
-import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, studio49c4, studiob5fc, studio457d, studiocebe, clawnera, izipublish, liquidlink, boltEarth, tokenlabs } from './misc/_index';
+import { tradeport, iotaPunks, apeDao, studio2cd3 } from './nft/_index';
+import { iotaFlip, gamifly, lostCrusader } from './games/_index';
+import { iotaFoundation, studioB8b1, studio0a0d, studioCb69, studio295e, studio5451, studio49c4, studiob5fc, studio457d, studiocebe, clawnera, izipublish, liquidlink, boltEarth, tokenlabs, risingPhoenix2 } from './misc/_index';
 
 /**
  * Team registry. Every project references exactly one team via `teamId`.
@@ -29,12 +29,17 @@ export const ALL_TEAMS: Team[] = [
   cyberperp,
   iotaroyale,
   magicsea,
+  // Virtue-adjacent synthetic studios (Virtue-points primitive and a
+  // multi-asset bank on neighbouring deployers). See team attribution for
+  // why they're tied to Virtue thematically but kept as their own synthetic
+  // teams pending Virtue's direct self-attestation.
+  studio6ff4, studioB9cf,
 
   // Trade
   tlip, twinFoundation, salus,
 
   // Identity
-  objectid, iotaNames, turingcerts,
+  objectid, turingcerts,
 
   // Bridges
   echoProtocol, layerzero, wormholeFoundation,
@@ -44,12 +49,25 @@ export const ALL_TEAMS: Team[] = [
 
   // NFT
   tradeport, iotaPunks, apeDao,
+  // Synthetic studio behind the "Number 1 Collection" FreeNFT campaign
+  // (1.04M unique senders, biggest on-chain campaign on IOTA Rebased).
+  studio2cd3,
 
   // Games
   iotaFlip, gamifly,
+  // Lost Crusader — Q1 2026 IOTA mainnet grant-phase MMO with daily
+  // Arcane Dust + Revive Spell mechanics.
+  lostCrusader,
 
   // IOTA Foundation (consolidated: chain primitives + Identity + Notarization +
-  // Traceability + Asset Framework + Accreditation + Testing)
+  // Traceability + Asset Framework + Accreditation + Testing).
+  // `rising-phoenix-2` (IOTA Names + IOTA SPAM) shares the `0xd3906909…`
+  // deployer with `iota-foundation` (iotaLink) and `layerZeroOft` (OFT
+  // wrappers) — declared before `iota-foundation` so team-deployer routing
+  // (first-match-wins) prefers the more-specific RP2 team for SPAM's packages;
+  // IF's own packages on that deployer still resolve via their `packageAddresses`
+  // pins (iotaLink) or module-set rules (LayerZero OFT, ifTesting routing).
+  risingPhoenix2,
   iotaFoundation,
 
   // Misc — anonymous studios + single-project teams.

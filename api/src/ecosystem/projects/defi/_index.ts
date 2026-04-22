@@ -4,3 +4,4 @@ export { swirl, swirlV1 } from './swirl';
 export { cyberperp } from './cyberperp';
 export { iotaroyale } from './iotaroyale';
 export { clawSwapGateway } from './claw-swap-gateway';
+export { virtuePoints, multiAssetBank } from './virtue-points';

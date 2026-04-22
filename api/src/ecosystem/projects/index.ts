@@ -1,12 +1,12 @@
 import { ProjectDefinition } from './project.interface';
 
-import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale, clawSwapGateway } from './defi/_index';
+import { poolsFinance, virtue, virtueStabilityPool, swirl, swirlV1, cyberperp, iotaroyale, clawSwapGateway, virtuePoints, multiAssetBank } from './defi/_index';
 import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccreditationRegistry, traceability, salus, truvid } from './trade/_index';
 import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft, turingcerts } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle, kamuiVrf } from './oracles/_index';
-import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents } from './nft/_index';
-import { chess, ticTacToe, game2048, iotaFlip } from './games/_index';
+import { nftLaunchpad, tradeport, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents, numberOneFreeNft } from './nft/_index';
+import { chess, ticTacToe, game2048, iotaFlip, lostCrusaderArcaneDust, lostCrusaderReviveSpells } from './games/_index';
 import {
   clawnera, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
   tokenlabsStaking, tokenlabsVIota, tokenlabsTln, tokenlabsPayment,
@@ -14,6 +14,7 @@ import {
   carbonCredits,
   stardustFramework, legacyMigrationHistory, iotaEvmAnchor,
   studioB8b1Demos, studio0a0dExtras,
+  iotaSpam,
 } from './misc/_index';
 
 /**
@@ -34,6 +35,10 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   swirl, swirlV1,
   cyberperp, iotaroyale,
   clawSwapGateway,
+  // Virtue-adjacent synthetic-studio rows (disjoint deployers from `virtue`
+  // itself — their own match rules pin `studio-6ff4` and `studio-b9cf` so
+  // there's no priority collision with Virtue's deployer catch-all).
+  virtuePoints, multiAssetBank,
 
   // Trade / Enterprise
   // TLIP and TWIN keep priority above IF Asset Framework / Accreditation to
@@ -86,9 +91,17 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   lumis,
   iotaEstoicos, ctrlvAgents,
   phishingSpray49c4,
+  // "Number 1 Collection" — biggest single-project unique-sender campaign
+  // on IOTA Rebased (1.04M wallets). Deployer + single module pin; no
+  // overlap with other NFT rules.
+  numberOneFreeNft,
 
   // Games
   chess, ticTacToe, game2048, iotaFlip,
+  // Lost Crusader — daily Arcane Dust claim + higher-tier Revive Spells /
+  // Golden Arcane Dust on the sibling deployer. Two separate project rows
+  // under the same `lost-crusader` team.
+  lostCrusaderArcaneDust, lostCrusaderReviveSpells,
 
   // Misc
   // Chain primitives grouped up top — genesis-installed framework packages
@@ -106,6 +119,15 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   krillTube,
   giveRep,
   carbonCredits,
+  // IOTA SPAM — Rising Phoenix 2 Ltd experimental "Proof of Spam" product.
+  // Shares deployer `0xd3906909…` with `iota-foundation` (iotaLink) and
+  // `layerZeroOft`. MUST come AFTER `iotaLink` (already declared in the
+  // Identity block above) and AFTER `layerZeroOft` (already declared in
+  // the Bridges block above) so the narrower rules win first; only packages
+  // on this deployer that don't match those narrower rules — i.e. the
+  // spam / icon / nft / airdrop / mockcoin / rebased_nft / test_nft /
+  // custom_metadata_registry cluster — fall through to iotaSpam.
+  iotaSpam,
   // Studio-sibling aggregate rows — MUST come after any narrower project defs
   // on the same team (studioB8b1Demos after game2048, studio0a0dExtras after
   // clawnera/clawSwapGateway/tokenSale). Both deployer-pinned + module-any

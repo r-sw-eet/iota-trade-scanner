@@ -21,3 +21,4 @@ export { giveRep } from './giverep';
 export { carbonCredits } from './carbon-credits';
 export { studioB8b1Demos } from './studio-b8b1-demos';
 export { studio0a0dExtras } from './studio-0a0d-extras';
+export { iotaSpam } from './iotaspam';

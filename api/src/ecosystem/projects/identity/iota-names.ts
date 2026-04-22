@@ -14,7 +14,7 @@ export const iotaNames: ProjectDefinition = {
   ],
   logo: '/logos/iota-names.svg',
   logoWordmark: '/logos/iota-names-wordmark.svg',
-  teamId: 'iota-names',
+  teamId: 'rising-phoenix-2',
   match: {
     deployerAddresses: [
       '0xfc684adb479789acb754d98b952deb46dbbeeaa9cb6d431b95c8f7d72e893af1',
