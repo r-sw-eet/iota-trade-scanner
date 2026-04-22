@@ -138,6 +138,10 @@ export interface UnattributedCluster {
   /** Always 0 on unattributed clusters — see `uniqueHolders` doc. */
   objectHolderCount: number;
   /** Always 0 on unattributed clusters — see `uniqueHolders` doc. */
+  objectCount: number;
+  /** Always false on unattributed clusters — see `uniqueHolders` doc. */
+  objectCountCapped: boolean;
+  /** Always 0 on unattributed clusters — see `uniqueHolders` doc. */
   marketplaceListedCount: number;
   /** Equals `uniqueSenders` on unattributed clusters (no holder union to contribute). */
   uniqueWalletsReach: number;
@@ -270,6 +274,14 @@ export interface Project {
    */
   objectHolderCount: number | null;
   /**
+   * Total live Move objects of the project's declared `countTypes`, summed
+   * across its packages. Stateless re-walk per scan via `countObjectsForType`.
+   * `null` when `countTypes` is absent/empty.
+   */
+  objectCount: number | null;
+  /** True if any constituent type's live-object walk hit its per-scan page cap — `objectCount` is then a floor. */
+  objectCountCapped: boolean;
+  /**
    * Count of the project's objects currently owned by another object
    * (marketplace listings via dynamic_field wrappers, Kiosk-like wrappers,
    * etc.). Surfaced on the detail page so the gap between `objectHolderCount`
@@ -356,7 +368,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 4;
+  private static readonly CLASSIFIER_VERSION = 5;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -520,6 +532,7 @@ export class EcosystemService implements OnModuleInit {
       | 'uniqueHoldersDelta'
       | 'uniqueWalletsReachDelta'
       | 'objectHolderCountDelta'
+      | 'objectCountDelta'
       | 'marketplaceListedCountDelta' = 'eventsDelta',
   ): Promise<{
     window: { from: Date; to: Date };
@@ -546,6 +559,10 @@ export class EcosystemService implements OnModuleInit {
       /** Sum of per-type `objectHolderCount` across project `countTypes`. Null semantics mirror `uniqueHolders`. */
       objectHolderCount: number | null;
       objectHolderCountDelta: number;
+      /** Sum of per-type live-object count across project `countTypes`. Null semantics mirror `uniqueHolders`. */
+      objectCount: number | null;
+      objectCountDelta: number;
+      objectCountCapped: boolean;
       /** Count of `Parent`-owned observations during the holder walk (marketplace listings, dynamic-field wrappers). Null semantics mirror. */
       marketplaceListedCount: number | null;
       marketplaceListedCountDelta: number;
@@ -606,6 +623,9 @@ export class EcosystemService implements OnModuleInit {
           uniqueHoldersDelta: (p.uniqueHolders ?? 0) - (prev?.uniqueHolders ?? 0),
           objectHolderCount: p.objectHolderCount ?? null,
           objectHolderCountDelta: (p.objectHolderCount ?? 0) - (prev?.objectHolderCount ?? 0),
+          objectCount: p.objectCount ?? null,
+          objectCountDelta: (p.objectCount ?? 0) - (prev?.objectCount ?? 0),
+          objectCountCapped: p.objectCountCapped ?? false,
           marketplaceListedCount: p.marketplaceListedCount ?? null,
           marketplaceListedCountDelta: (p.marketplaceListedCount ?? 0) - (prev?.marketplaceListedCount ?? 0),
           uniqueWalletsReach: p.uniqueWalletsReach ?? p.uniqueSenders,
@@ -641,6 +661,9 @@ export class EcosystemService implements OnModuleInit {
           uniqueHoldersDelta: (u.uniqueHolders ?? 0) - (prev?.uniqueHolders ?? 0),
           objectHolderCount: u.objectHolderCount ?? 0,
           objectHolderCountDelta: (u.objectHolderCount ?? 0) - (prev?.objectHolderCount ?? 0),
+          objectCount: u.objectCount ?? 0,
+          objectCountDelta: (u.objectCount ?? 0) - (prev?.objectCount ?? 0),
+          objectCountCapped: u.objectCountCapped ?? false,
           marketplaceListedCount: u.marketplaceListedCount ?? 0,
           marketplaceListedCountDelta: (u.marketplaceListedCount ?? 0) - (prev?.marketplaceListedCount ?? 0),
           uniqueWalletsReach: u.uniqueWalletsReach ?? u.uniqueSenders,
@@ -1017,6 +1040,45 @@ export class EcosystemService implements OnModuleInit {
         total += data.events.nodes.length;
         if (!data.events.pageInfo.hasNextPage) return { count: total, capped: false };
         cursor = data.events.pageInfo.endCursor;
+      } catch {
+        break;
+      }
+    }
+    return { count: total, capped: total >= maxPages * 50 };
+  }
+
+  /**
+   * Stateless live-object count for a fully-qualified Move struct type.
+   * Page-forward `objects(filter: { type })` from null cursor every call,
+   * sum `nodes.length`. No persistent cursor state by design — live object
+   * populations can shrink (burns, type-filter-leaving wraps), so a forward
+   * cursor would over-count by missing removals. Mirrors `countEvents`'s
+   * shape exactly.
+   *
+   * `maxPages` defaults to 200 (= 10k objects) — covers the long tail in one
+   * scan. NFT-class outliers (Otterfly tiers, IotaPunks) hit the cap and
+   * report `capped: true`; UI renders as `<n>+`. Bumping the cap is a
+   * config call, not a code change to the helper itself.
+   */
+  private async countObjectsForType(
+    type: string,
+    maxPages = 200,
+  ): Promise<{ count: number; capped: boolean }> {
+    let total = 0;
+    let cursor: string | null = null;
+
+    for (let i = 0; i < maxPages; i++) {
+      const afterClause: string = cursor ? `, after: "${cursor}"` : '';
+      try {
+        const data: any = await this.graphql(`{
+          objects(filter: { type: "${type}" }, first: 50${afterClause}) {
+            nodes { __typename }
+            pageInfo { hasNextPage endCursor }
+          }
+        }`);
+        total += data.objects.nodes.length;
+        if (!data.objects.pageInfo.hasNextPage) return { count: total, capped: false };
+        cursor = data.objects.pageInfo.endCursor;
       } catch {
         break;
       }
@@ -1721,11 +1783,34 @@ export class EcosystemService implements OnModuleInit {
         if (i >= keyableTypes.length) return;
         const type = keyableTypes[i];
         try {
-          const { count, listedCount, capped } = await this.updateHoldersForType(packageAddress, type);
-          results.push({ type, objectHolderCount: count, listedCount, objectHolderCountCapped: capped });
+          // Two passes per type. Holder walk maintains the dedup'd
+          // `project_holder_entries` collection (cheap on steady state — exits
+          // on caught-up). Object walk is a stateless live count that re-pages
+          // every scan because object populations can shrink (burns/wraps that
+          // a forward cursor would miss). Run in parallel: independent GraphQL
+          // shapes hitting the same `objects(filter:{type})` connection.
+          const [holders, objects] = await Promise.all([
+            this.updateHoldersForType(packageAddress, type),
+            this.countObjectsForType(type),
+          ]);
+          results.push({
+            type,
+            objectHolderCount: holders.count,
+            listedCount: holders.listedCount,
+            objectHolderCountCapped: holders.capped,
+            objectCount: objects.count,
+            objectCountCapped: objects.capped,
+          });
         } catch (e) {
           this.logger.warn(`captureObjectTypes: ${type} drain failed — ${(e as Error).message}`);
-          results.push({ type, objectHolderCount: 0, listedCount: 0, objectHolderCountCapped: false });
+          results.push({
+            type,
+            objectHolderCount: 0,
+            listedCount: 0,
+            objectHolderCountCapped: false,
+            objectCount: 0,
+            objectCountCapped: false,
+          });
         }
       }
     };
@@ -2196,6 +2281,7 @@ export class EcosystemService implements OnModuleInit {
       // read time. See `plans/plan_object_count.md § Option C + Step 3.5`.
       const objectTypeCounts = await this.captureObjectTypesForPackage(pkg.address);
       const summedObjectHolderCount = objectTypeCounts.reduce((s, e) => s + e.objectHolderCount, 0);
+      const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.objectCount, 0);
 
       packages.push({
         address: pkg.address,
@@ -2204,6 +2290,7 @@ export class EcosystemService implements OnModuleInit {
         modules,
         moduleMetrics,
         objectHolderCount: summedObjectHolderCount,
+        objectCount: summedObjectCount,
         transactions,
         transactionsCapped,
         objectTypeCounts,
@@ -2392,16 +2479,21 @@ export class EcosystemService implements OnModuleInit {
       // deduped senders ∪ holders reach number — see `plans/plan_object_count.md`.
       const countTypes = def.countTypes ?? [];
       let objectHolderCount: number | null = null;
+      let objectCount: number | null = null;
+      let objectCountCapped = false;
       let marketplaceListedCount: number | null = null;
       let uniqueHolders: number | null = null;
       const typePairs: Array<{ packageAddress: string; type: string }> = [];
       if (countTypes.length > 0) {
         objectHolderCount = 0;
+        objectCount = 0;
         marketplaceListedCount = 0;
         for (const pkg of facts) {
           for (const entry of (pkg.objectTypeCounts ?? [])) {
             if (countTypes.some((ct) => entry.type.endsWith(`::${ct}`))) {
               objectHolderCount += entry.objectHolderCount;
+              objectCount += entry.objectCount ?? 0;
+              if (entry.objectCountCapped) objectCountCapped = true;
               marketplaceListedCount += entry.listedCount;
               typePairs.push({ packageAddress: pkg.address, type: entry.type });
             }
@@ -2514,6 +2606,8 @@ export class EcosystemService implements OnModuleInit {
         uniqueSenders: uniqueSendersCount,
         uniqueHolders,
         objectHolderCount,
+        objectCount,
+        objectCountCapped,
         marketplaceListedCount,
         uniqueWalletsReach,
         attribution: def.attribution ?? null,
@@ -2666,6 +2760,8 @@ export class EcosystemService implements OnModuleInit {
         // interleave attributed + unattributed rows without branching on kind.
         uniqueHolders: 0,
         objectHolderCount: 0,
+        objectCount: 0,
+        objectCountCapped: false,
         marketplaceListedCount: 0,
         uniqueWalletsReach: uniqueSenders,
         sampleIdentifiers: identifiers,
@@ -2853,6 +2949,8 @@ export class EcosystemService implements OnModuleInit {
           uniqueSenders: 0,
           uniqueHolders: null,
           objectHolderCount: null,
+          objectCount: null,
+          objectCountCapped: false,
           marketplaceListedCount: null,
           uniqueWalletsReach: 0,
           attribution: null,

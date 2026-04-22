@@ -313,6 +313,8 @@ async function main() {
       // never computes these; zero / null keeps the shared type satisfied.
       uniqueHolders: 0,
       objectHolderCount: 0,
+      objectCount: 0,
+      objectCountCapped: false,
       marketplaceListedCount: 0,
       uniqueWalletsReach: 0,
       sampleIdentifiers: identifiers,

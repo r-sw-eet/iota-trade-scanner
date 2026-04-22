@@ -779,7 +779,11 @@ describe('EcosystemService', () => {
 
     const baselineClassified = {
       l1: [
-        { slug: 'proj-a', name: 'A', events: 100, eventsCapped: false, packages: 1, uniqueSenders: 10, team: null, logo: null, category: 'DeFi' },
+        // proj-a carries non-null objectCount / objectCountCapped on both
+        // baseline + latest so the growth-ranking ?? fallbacks fire their
+        // value-present arm (the missing-value arm is exercised by proj-b
+        // and by the unattributed clusters, which omit those fields).
+        { slug: 'proj-a', name: 'A', events: 100, eventsCapped: false, packages: 1, uniqueSenders: 10, team: null, logo: null, category: 'DeFi', objectCount: 200, objectCountCapped: false },
       ],
       unattributed: [
         { deployer: '0xaaa', events: 50, eventsCapped: false, packages: 2, uniqueSenders: 5, sampleIdentifiers: [], sampledObjectType: null },
@@ -787,11 +791,14 @@ describe('EcosystemService', () => {
     };
     const latestClassified = {
       l1: [
-        { slug: 'proj-a', name: 'A', events: 300, eventsCapped: false, packages: 1, uniqueSenders: 25, team: null, logo: null, category: 'DeFi' },
+        { slug: 'proj-a', name: 'A', events: 300, eventsCapped: false, packages: 1, uniqueSenders: 25, team: null, logo: null, category: 'DeFi', objectCount: 500, objectCountCapped: true },
         { slug: 'proj-b', name: 'B (new)', events: 80, eventsCapped: true, packages: 2, uniqueSenders: 4, team: null, logo: '/l.png', category: 'Oracle' },
       ],
       unattributed: [
-        { deployer: '0xaaa', events: 200, eventsCapped: false, packages: 2, uniqueSenders: 18, sampleIdentifiers: ['name: X'], sampledObjectType: 't::T' },
+        // 0xaaa carries explicit non-null Phase-2 fields so the `??` value-arms
+        // fire through the unattributed exposure path in growthRanking; 0xbbb
+        // omits them so the nullish-fallback arms also fire.
+        { deployer: '0xaaa', events: 200, eventsCapped: false, packages: 2, uniqueSenders: 18, sampleIdentifiers: ['name: X'], sampledObjectType: 't::T', objectHolderCount: 80, objectCount: 90, objectCountCapped: true, marketplaceListedCount: 5 },
         { deployer: '0xbbb', events: 40, eventsCapped: false, packages: 1, uniqueSenders: 2, sampleIdentifiers: [], sampledObjectType: null },
       ],
     };
@@ -2537,7 +2544,10 @@ describe('EcosystemService', () => {
         packages: [pkg({ address: '0xaa', modules: ['pfp'] })],
       });
       jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
-        { type: '0xaa::pfp::PFPNFT', objectHolderCount: 200, listedCount: 30, objectHolderCountCapped: false },
+        // objectCountCapped: true on this entry exercises the cap-propagation
+        // path — `proj.objectCountCapped` should flip true if any constituent
+        // type hit the per-scan page budget.
+        { type: '0xaa::pfp::PFPNFT', objectHolderCount: 200, listedCount: 30, objectHolderCountCapped: false, objectCount: 5000, objectCountCapped: true },
       ]);
       // First senderDocModel.aggregate call is `pairs.length>0` senders count;
       // second call is the $unionWith reach aggregation. Return distinct counts.
@@ -2550,6 +2560,8 @@ describe('EcosystemService', () => {
       expect(proj).toBeDefined();
       expect(proj.uniqueSenders).toBe(50);
       expect(proj.objectHolderCount).toBe(200);
+      expect(proj.objectCount).toBe(5000);
+      expect(proj.objectCountCapped).toBe(true);
       expect(proj.marketplaceListedCount).toBe(30);
       expect(proj.uniqueHolders).toBe(150);
       expect(proj.uniqueWalletsReach).toBe(180);
@@ -2570,6 +2582,7 @@ describe('EcosystemService', () => {
       expect(proj.uniqueSenders).toBe(77);
       expect(proj.uniqueHolders).toBeNull();
       expect(proj.objectHolderCount).toBeNull();
+      expect(proj.objectCount).toBeNull();
       expect(proj.marketplaceListedCount).toBeNull();
       // Reach falls back to uniqueSenders when no countTypes contribute.
       expect(proj.uniqueWalletsReach).toBe(77);
@@ -2583,7 +2596,7 @@ describe('EcosystemService', () => {
         packages: [pkg({ address: '0xabcdef', modules: [] })],
       });
       jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
-        { type: '0xabcdef::module_only::ObjectOnly', objectHolderCount: 42, listedCount: 0, objectHolderCountCapped: false },
+        { type: '0xabcdef::module_only::ObjectOnly', objectHolderCount: 42, listedCount: 0, objectHolderCountCapped: false, objectCount: 42, objectCountCapped: false },
       ]);
       holderEntryModel.aggregate.mockResolvedValue([{ count: 42 }]);
       const snap = await runCapture();
@@ -2600,7 +2613,7 @@ describe('EcosystemService', () => {
       });
       // Capture returns objectTypeCounts with a non-matching type (AdminCap).
       jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([
-        { type: '0xaa::pfp::AdminCap', objectHolderCount: 1, listedCount: 0, objectHolderCountCapped: false },
+        { type: '0xaa::pfp::AdminCap', objectHolderCount: 1, listedCount: 0, objectHolderCountCapped: false, objectCount: 1, objectCountCapped: false },
       ]);
       senderDocModel.aggregate.mockResolvedValue([{ count: 12 }]);
       const snap = await runCapture();
@@ -4071,7 +4084,7 @@ describe('EcosystemService', () => {
     });
 
     describe('captureObjectTypesForPackage', () => {
-      it('enumerates key-able struct types from MovePackage.modules.datatypes, skips non-key abilities, drains each via updateHoldersForType', async () => {
+      it('enumerates key-able struct types from MovePackage.modules.datatypes, skips non-key abilities, drains each via updateHoldersForType + countObjectsForType', async () => {
         jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
           object: {
             asMovePackage: {
@@ -4097,13 +4110,22 @@ describe('EcosystemService', () => {
           if (String(type).endsWith('::AdminCap')) return { count: 1, listedCount: 0, capped: false };
           return { count: 0, listedCount: 0, capped: false };
         });
+        const countSpy = jest.spyOn(service as any, 'countObjectsForType').mockImplementation(async (type: any) => {
+          if (String(type).endsWith('::OtterFly1NFT')) return { count: 297000, capped: true };  // outlier hits cap
+          if (String(type).endsWith('::AdminCap')) return { count: 1, capped: false };
+          return { count: 0, capped: false };
+        });
         const result = await (service as any).captureObjectTypesForPackage('0xpkg');
         expect(drainSpy).toHaveBeenCalledTimes(2);  // key-able only; NFTMinted skipped
+        expect(countSpy).toHaveBeenCalledTimes(2);
         const byType: any = Object.fromEntries(result.map((r: any) => [r.type, r]));
         expect(byType['0xpkg::otterfly_1::OtterFly1NFT']).toEqual({
-          type: '0xpkg::otterfly_1::OtterFly1NFT', objectHolderCount: 200, listedCount: 10, objectHolderCountCapped: false,
+          type: '0xpkg::otterfly_1::OtterFly1NFT',
+          objectHolderCount: 200, listedCount: 10, objectHolderCountCapped: false,
+          objectCount: 297000, objectCountCapped: true,
         });
         expect(byType['0xpkg::otterfly_1::AdminCap'].objectHolderCount).toBe(1);
+        expect(byType['0xpkg::otterfly_1::AdminCap'].objectCount).toBe(1);
       });
 
       it('returns [] when struct enumeration fails (graphql error) — capture stays resilient', async () => {
@@ -4132,10 +4154,58 @@ describe('EcosystemService', () => {
           if (String(type).endsWith('::T1')) throw new Error('drain failed');
           return { count: 7, listedCount: 0, capped: false };
         });
+        jest.spyOn(service as any, 'countObjectsForType').mockResolvedValue({ count: 9, capped: false });
         const result = await (service as any).captureObjectTypesForPackage('0xpkg');
         const byType: any = Object.fromEntries(result.map((r: any) => [r.type, r]));
-        expect(byType['0xpkg::m::T1']).toEqual({ type: '0xpkg::m::T1', objectHolderCount: 0, listedCount: 0, objectHolderCountCapped: false });
+        // T1: holders threw → whole entry zeroed (Promise.all rejects, catch fires).
+        expect(byType['0xpkg::m::T1']).toEqual({
+          type: '0xpkg::m::T1',
+          objectHolderCount: 0, listedCount: 0, objectHolderCountCapped: false,
+          objectCount: 0, objectCountCapped: false,
+        });
+        // T2: both succeed → real values flow through.
         expect(byType['0xpkg::m::T2'].objectHolderCount).toBe(7);
+        expect(byType['0xpkg::m::T2'].objectCount).toBe(9);
+      });
+    });
+
+    describe('countObjectsForType', () => {
+      it('paginates objects(filter:{type}) until hasNextPage:false, summing nodes.length — uncapped', async () => {
+        const gql = jest.spyOn(service as any, 'graphql')
+          .mockResolvedValueOnce({ objects: { nodes: new Array(50).fill({}), pageInfo: { hasNextPage: true, endCursor: 'c1' } } })
+          .mockResolvedValueOnce({ objects: { nodes: new Array(50).fill({}), pageInfo: { hasNextPage: true, endCursor: 'c2' } } })
+          .mockResolvedValueOnce({ objects: { nodes: new Array(17).fill({}), pageInfo: { hasNextPage: false, endCursor: null } } });
+        const r = await (service as any).countObjectsForType('0xpkg::m::T');
+        expect(r).toEqual({ count: 117, capped: false });
+        expect(gql).toHaveBeenCalledTimes(3);
+        // Cursor chaining: first call has no `after:`, subsequent calls carry the prior endCursor.
+        expect(String(gql.mock.calls[0][0])).not.toContain('after:');
+        expect(String(gql.mock.calls[1][0])).toContain('after: "c1"');
+        expect(String(gql.mock.calls[2][0])).toContain('after: "c2"');
+      });
+
+      it('hits the per-scan page cap and returns capped=true', async () => {
+        // maxPages=2 here for test speed; production default is 200.
+        jest.spyOn(service as any, 'graphql').mockResolvedValue({
+          objects: { nodes: new Array(50).fill({}), pageInfo: { hasNextPage: true, endCursor: 'next' } },
+        });
+        const r = await (service as any).countObjectsForType('0xpkg::m::T', 2);
+        expect(r).toEqual({ count: 100, capped: true });
+      });
+
+      it('returns 0/false on first-page graphql error — keeps the broader capture pass resilient', async () => {
+        jest.spyOn(service as any, 'graphql').mockRejectedValueOnce(new Error('graphql blew up'));
+        const r = await (service as any).countObjectsForType('0xpkg::m::T');
+        expect(r).toEqual({ count: 0, capped: false });
+      });
+
+      it('returns mid-walk total when graphql fails on a later page — partial count is honest', async () => {
+        jest.spyOn(service as any, 'graphql')
+          .mockResolvedValueOnce({ objects: { nodes: new Array(50).fill({}), pageInfo: { hasNextPage: true, endCursor: 'c1' } } })
+          .mockRejectedValueOnce(new Error('flaky network'));
+        const r = await (service as any).countObjectsForType('0xpkg::m::T');
+        // Page 1 succeeded with 50 nodes; page 2 broke the loop without hitting end-of-data → not capped, not capped-by-budget either.
+        expect(r).toEqual({ count: 50, capped: false });
       });
     });
 

@@ -90,6 +90,21 @@ export class ObjectTypeCount {
 
   /** True if the holder walk hit its per-scan page cap — `objectHolderCount` is then a floor. */
   @Prop({ required: true, default: false }) objectHolderCountCapped: boolean;
+
+  /**
+   * Live Move-object count for this type as of capture — total nodes returned
+   * by `objects(filter: { type })` across full pagination. Mirrors `events`
+   * semantics on `ModuleMetrics`: stateless re-walk every scan (object
+   * populations can shrink via burns / wraps, which a forward cursor wouldn't
+   * catch), capped at `countObjectsForType`'s per-scan page budget.
+   *
+   * Empty/undefined on snapshots predating this field — growth endpoint
+   * treats as "unknown for that interval", not zero.
+   */
+  @Prop({ required: true, default: 0 }) objectCount: number;
+
+  /** True if `countObjectsForType` hit its per-scan page cap — `objectCount` is then a floor (UI renders as `<n>+`). */
+  @Prop({ required: true, default: false }) objectCountCapped: boolean;
 }
 
 @Schema({ _id: false })
@@ -125,13 +140,16 @@ export class PackageFact {
    * holding both type A and type B counts twice); for project-level dedupe
    * see `project.uniqueHolders` (computed via aggregation over
    * `project_holder_entries` at classify time).
-   *
-   * NOTE: this field used to be misnamed `objectCount` and documented as
-   * "live Move-object count" — it never measured live objects, only holder
-   * addresses. True live-object counts are deferred to a separate field per
-   * `plans/plan_object_count.md`.
    */
   @Prop({ required: true, default: 0 }) objectHolderCount: number;
+
+  /**
+   * Sum of `objectCount` across this package's per-type entries — total live
+   * Move objects of any `key`-able struct declared by this package. Stateless
+   * recompute every scan (see `ObjectTypeCount.objectCount` for why a cursor
+   * model wouldn't work). Empty/undefined on snapshots predating Phase 2.
+   */
+  @Prop({ required: true, default: 0 }) objectCount: number;
 
   /**
    * Cumulative MoveCall TX count addressing this package since deploy.
