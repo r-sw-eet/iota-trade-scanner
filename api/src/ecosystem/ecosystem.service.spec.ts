@@ -1394,6 +1394,143 @@ describe('EcosystemService', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
+    it('reaches into wrapper structs (metadata.name, display.issuer)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{
+                asMoveObject: {
+                  contents: {
+                    type: { repr: '0xaa::wrap::Wrapped' },
+                    json: {
+                      id: '0x1',
+                      metadata: { name: 'Deep Name', other: 42 },
+                      display: { issuer: 'Deep Issuer Inc' },
+                    },
+                  },
+                },
+              }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const { identifiers } = await probe('0xaa');
+      expect(identifiers).toEqual(expect.arrayContaining([
+        'metadata.name: Deep Name',
+        'display.issuer: Deep Issuer Inc',
+      ]));
+    });
+
+    it('unwraps Option<String> (`{vec: [value]}`) and skips empty `{vec: []}`', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{
+                asMoveObject: {
+                  contents: {
+                    type: { repr: '0xaa::opt::Opt' },
+                    json: {
+                      description: { vec: ['Present Value'] },
+                      nickname: { vec: [] },
+                    },
+                  },
+                },
+              }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const { identifiers } = await probe('0xaa');
+      expect(identifiers).toContain('description.vec.0: Present Value');
+      expect(identifiers.find((s: string) => s.startsWith('nickname'))).toBeUndefined();
+    });
+
+    it('skips `{id, size}` Table/Bag stubs', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{
+                asMoveObject: {
+                  contents: {
+                    type: { repr: '0xaa::reg::Registry' },
+                    json: {
+                      name: 'Registry Label',
+                      entries: { id: '0xabc', size: 42 },
+                    },
+                  },
+                },
+              }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const { identifiers } = await probe('0xaa');
+      expect(identifiers).toContain('name: Registry Label');
+      expect(identifiers.find((s: string) => s.startsWith('entries'))).toBeUndefined();
+    });
+
+    it('caps array traversal at 5 elements', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{
+                asMoveObject: {
+                  contents: {
+                    type: { repr: '0xaa::list::List' },
+                    json: {
+                      tags: ['AlphaTag', 'BetaTag', 'GammaTag', 'DeltaTag', 'EpsilonTag', 'ZetaTag', 'EtaTag'],
+                    },
+                  },
+                },
+              }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const { identifiers } = await probe('0xaa');
+      // Only first 5 tags reachable.
+      expect(identifiers).toEqual(expect.arrayContaining([
+        'tags.0: AlphaTag', 'tags.1: BetaTag', 'tags.2: GammaTag', 'tags.3: DeltaTag', 'tags.4: EpsilonTag',
+      ]));
+      expect(identifiers.find((s: string) => s.includes('ZetaTag'))).toBeUndefined();
+      expect(identifiers.find((s: string) => s.includes('EtaTag'))).toBeUndefined();
+    });
+
+    it('truncates beyond depth 4', async () => {
+      // Leaf sits at depth 5 (a.b.c.d.deep) — must NOT surface.
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{
+                asMoveObject: {
+                  contents: {
+                    type: { repr: '0xaa::deep::Deep' },
+                    json: {
+                      a: { b: { c: { d: { deep: 'Too Far' } } } },
+                      top: 'Top Label',
+                    },
+                  },
+                },
+              }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const { identifiers } = await probe('0xaa');
+      expect(identifiers).toContain('top: Top Label');
+      expect(identifiers.find((s: string) => s.includes('Too Far'))).toBeUndefined();
+    });
+
     it('paginates beyond the first page when fewer than 3 idents collected', async () => {
       // Page 1 returns objects with no identifiable fields → 0 idents.
       // Page 2 returns one object with two idents → loop terminates after page 2.
@@ -1427,6 +1564,50 @@ describe('EcosystemService', () => {
       // sampledType is the first non-empty type seen (page 1's AdminCap).
       expect(objectType).toBe('0xaa::admin::AdminCap');
       expect(identifiers).toEqual(expect.arrayContaining(['tag: late', 'name: Late Find']));
+    });
+  });
+
+  // ---------- flattenJson ----------
+
+  describe('flattenJson', () => {
+    const flatten = (json: unknown): [string, string][] => {
+      const out: [string, string][] = [];
+      (service as any).flattenJson(json, '', 0, out);
+      return out;
+    };
+
+    it('emits top-level strings with no path prefix', () => {
+      expect(flatten({ tag: 'salus', name: 'Doc' })).toEqual([
+        ['tag', 'salus'],
+        ['name', 'Doc'],
+      ]);
+    });
+
+    it('stops emitting when the 64-leaf cap is hit from wide flat objects', () => {
+      // 100 top-level string fields → walker stops at 64.
+      const json: Record<string, string> = {};
+      for (let i = 0; i < 100; i++) json[`k${i}`] = `v${i}`;
+      const out = flatten(json);
+      expect(out.length).toBe(64);
+    });
+
+    it('stops emitting inside array iteration once the cap is hit', () => {
+      // 5 sibling objects (cap per array) × 20 string fields = 100 potential
+      // leaves nested under `big` → the array-branch inner bail-out fires.
+      const big = Array.from({ length: 5 }, (_, i) =>
+        Object.fromEntries(
+          Array.from({ length: 20 }, (_, j) => [`k${i}_${j}`, `v${i}_${j}`]),
+        ),
+      );
+      const out = flatten({ big });
+      expect(out.length).toBe(64);
+      expect(out[0][0]).toBe('big.0.k0_0');
+    });
+
+    it('skips non-string leaf types (numbers, bools, null) silently', () => {
+      expect(flatten({ n: 42, b: true, x: null, s: 'keep' })).toEqual([
+        ['s', 'keep'],
+      ]);
     });
   });
 

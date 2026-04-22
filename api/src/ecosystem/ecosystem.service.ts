@@ -1753,6 +1753,62 @@ export class EcosystemService implements OnModuleInit {
   }
 
   /**
+   * Flattens a Move object's JSON into `[dotPath, stringValue]` leaves so the
+   * identity probe can reach fields hidden inside wrapper structs, `Option`
+   * (`{vec:[T]}`), `VecMap` (`[{key,value}]`) and plain nested objects.
+   *
+   * Bounds: depth 4, first 5 elements per array, 64 leaves total. Two Move-
+   * specific stubs are pruned because they carry no identifying content — a
+   * `{id, size}` Table/Bag handle and an empty `{vec: []}` Option. Non-strings
+   * (numbers, bools, objects, arrays themselves) never hit `out`; only leaf
+   * strings do.
+   */
+  private flattenJson(
+    json: unknown,
+    path: string,
+    depth: number,
+    out: [string, string][],
+  ): void {
+    if (out.length >= 64 || depth > 4) return;
+    if (typeof json === 'string') {
+      out.push([path, json]);
+      return;
+    }
+    if (Array.isArray(json)) {
+      const cap = Math.min(json.length, 5);
+      for (let i = 0; i < cap; i++) {
+        this.flattenJson(json[i], `${path}.${i}`, depth + 1, out);
+        if (out.length >= 64) return;
+      }
+      return;
+    }
+    if (json && typeof json === 'object') {
+      const keys = Object.keys(json);
+      // Prune Table/Bag stubs: they carry only a handle + size, contents live
+      // elsewhere as dynamic fields.
+      if (keys.length === 2 && keys.includes('id') && keys.includes('size')) return;
+      // Prune empty Option<T>: `{vec: []}` is `None`, no leaf to emit.
+      if (
+        keys.length === 1 &&
+        keys[0] === 'vec' &&
+        Array.isArray((json as { vec: unknown[] }).vec) &&
+        (json as { vec: unknown[] }).vec.length === 0
+      ) {
+        return;
+      }
+      for (const k of keys) {
+        this.flattenJson(
+          (json as Record<string, unknown>)[k],
+          path ? `${path}.${k}` : k,
+          depth + 1,
+          out,
+        );
+        if (out.length >= 64) return;
+      }
+    }
+  }
+
+  /**
    * Deep identity probe for an unattributed package. Queries any Move object
    * whose type starts with `<pkg>` (GraphQL's `type` filter supports prefix
    * matching — verified empirically against `pkg` alone and `pkg::mod`).
@@ -1760,7 +1816,9 @@ export class EcosystemService implements OnModuleInit {
    * Extracts short string-valued fields from the sampled object's JSON. The
    * point is to surface self-attestation — e.g. Salus's `tag: "salus"` or an
    * `issuer`/`url`/`collection_name` — that a package-level ProjectDefinition
-   * matcher would miss because module names are generic.
+   * matcher would miss because module names are generic. JSON is walked via
+   * `flattenJson`, so identity hidden one layer deep (e.g. `metadata.name`)
+   * or inside `Option`/`VecMap` still surfaces.
    *
    * Pages through up to MAX_OBJECT_PAGES * 50 objects per package because the
    * first page is often dominated by admin caps / generic Bag wrappers / empty
@@ -1802,19 +1860,20 @@ export class EcosystemService implements OnModuleInit {
         const typeRepr = n.asMoveObject?.contents?.type?.repr as string | undefined;
         if (!json) continue;
         if (!sampledType && typeRepr) sampledType = typeRepr;
-        for (const [k, v] of Object.entries(json)) {
-          if (typeof v !== 'string') continue;
+        const leaves: [string, string][] = [];
+        this.flattenJson(json, '', 0, leaves);
+        for (const [path, v] of leaves) {
           const trimmed = v.trim();
           if (!trimmed || trimmed.length > 80) continue;
-          const keyLower = k.toLowerCase();
+          const leafKey = path.split('.').pop()!.toLowerCase();
           const looksIdentifying =
-            identifierKeys.has(keyLower) ||
+            identifierKeys.has(leafKey) ||
             /^https?:\/\//.test(trimmed) ||
             /^[A-Za-z][A-Za-z0-9 _\-.:/]{2,}$/.test(trimmed);
           if (!looksIdentifying) continue;
           // Skip fields that just echo the package address.
           if (trimmed.toLowerCase().startsWith('0x') && trimmed.length > 40) continue;
-          idents.add(`${k}: ${trimmed}`);
+          idents.add(`${path}: ${trimmed}`);
           if (idents.size >= 20) break;
         }
         if (idents.size >= 20) break;
