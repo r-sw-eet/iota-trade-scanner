@@ -1132,11 +1132,27 @@ export class EcosystemService implements OnModuleInit {
    * pagination + no-persistent-cursor. Count-of-total is served by
    * `countDocuments({packageAddress})` on the digest collection.
    *
+   * `stopOnAllDups` selects the termination semantics:
+   *   - `true` (live-cron catch-up): a page where every digest is already
+   *     stored means we've paged back into known territory, so we're caught
+   *     up — exit with `reachedEnd: true`. This is the correct signal for
+   *     the tail-scanning cron tick (newest digests re-seen = nothing new
+   *     to do).
+   *   - `false` (historical drain): re-seeing already-stored digests means
+   *     the prior run's stored range is being re-traversed; keep paging
+   *     backward via `pageInfo.startCursor` until a fresh page appears
+   *     beyond the stored tail, the page budget is exhausted, or GraphQL
+   *     signals end-of-history via `hasPreviousPage: false`. This is what
+   *     makes `backfillTxCountsForPackage` actually idempotent after the
+   *     per-address page cap is raised (re-run fills in the missing tail
+   *     rather than bailing on page 1 because the newest 50 are dups).
+   *
    * Returns `{ scanned, reachedEnd }` with the same "floor" semantics.
    */
   private async pageBackwardTxs(
     packageAddress: string,
     maxPages: number,
+    { stopOnAllDups }: { stopOnAllDups: boolean },
   ): Promise<{ scanned: number; reachedEnd: boolean }> {
     let beforeCursor: string | null = null;
     let scanned = 0;
@@ -1182,7 +1198,7 @@ export class EcosystemService implements OnModuleInit {
         }
       }
 
-      if (newlyInserted === 0 && docs.length > 0) {
+      if (stopOnAllDups && newlyInserted === 0 && docs.length > 0) {
         reachedEnd = true;
         break;
       }
@@ -1217,7 +1233,7 @@ export class EcosystemService implements OnModuleInit {
    * or end-of-history — the count is a floor until the next tick.
    */
   private async updateTxCountForPackage(packageAddress: string): Promise<{ total: number; capped: boolean }> {
-    const { reachedEnd } = await this.pageBackwardTxs(packageAddress, 100);
+    const { reachedEnd } = await this.pageBackwardTxs(packageAddress, 100, { stopOnAllDups: true });
     const total = await this.txDigestModel.countDocuments({ packageAddress });
     return { total, capped: !reachedEnd };
   }
@@ -1236,11 +1252,14 @@ export class EcosystemService implements OnModuleInit {
     // Framework packages (`0x1`/`0x2`/`0x3`) stay at the legacy 10k-page cap
     // — full drain of `0x2` alone is ~40 GB of digest storage with no
     // project-level activity signal. Every other package gets the larger
-    // 200k-page cap so project-scale totals land accurately. Dup-key
-    // silencing in `pageBackwardTxs` dedups re-inserts on re-runs so this
-    // is idempotent — a re-run after raising the cap picks up where the
-    // previous run left off and fills in the missing tail.
-    const { reachedEnd } = await this.pageBackwardTxs(packageAddress, maxBackfillPagesFor(packageAddress));
+    // 200k-page cap so project-scale totals land accurately. `stopOnAllDups:
+    // false` disables the live-cron catch-up heuristic so a re-run after
+    // raising the cap walks past the already-stored (500k-TX) zone instead
+    // of bailing on page 1; dup-key silencing keeps the re-traversal cheap
+    // on Mongo and idempotent on retries.
+    const { reachedEnd } = await this.pageBackwardTxs(packageAddress, maxBackfillPagesFor(packageAddress), {
+      stopOnAllDups: false,
+    });
     const total = await this.txDigestModel.countDocuments({ packageAddress });
     return { total, capped: !reachedEnd };
   }

@@ -2897,7 +2897,7 @@ describe('EcosystemService', () => {
           .mockResolvedValueOnce([{}])
           .mockResolvedValueOnce([{}]);
 
-        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true });
         expect(result).toEqual({ scanned: 2, reachedEnd: true });
         expect(txDigestModel.insertMany).toHaveBeenCalledTimes(2);
         const [docs, opts] = txDigestModel.insertMany.mock.calls[0];
@@ -2909,7 +2909,7 @@ describe('EcosystemService', () => {
         jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
           transactionBlocks: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } },
         });
-        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true });
         expect(result).toEqual({ scanned: 0, reachedEnd: true });
         expect(txDigestModel.insertMany).not.toHaveBeenCalled();
       });
@@ -2922,7 +2922,7 @@ describe('EcosystemService', () => {
           },
         });
         txDigestModel.insertMany.mockResolvedValueOnce([{}]);
-        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true });
         expect(result.reachedEnd).toBe(true);
       });
 
@@ -2935,7 +2935,7 @@ describe('EcosystemService', () => {
         }));
         txDigestModel.insertMany.mockResolvedValue([{}]);
 
-        const result = await (service as any).pageBackwardTxs('0xpkg', 3);
+        const result = await (service as any).pageBackwardTxs('0xpkg', 3, { stopOnAllDups: true });
         expect(result.reachedEnd).toBe(false);
         expect(result.scanned).toBe(3);
       });
@@ -2951,12 +2951,12 @@ describe('EcosystemService', () => {
         err.code = 11000;
         txDigestModel.insertMany.mockRejectedValueOnce(err);
 
-        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true });
         expect(result.reachedEnd).toBe(true);
         expect(result.scanned).toBe(1);
       });
 
-      it('silently swallows bulk writeErrors when every entry is 11000', async () => {
+      it('stopOnAllDups:true — all-dup page fires the caught-up heuristic (live-cron)', async () => {
         jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
           transactionBlocks: {
             nodes: [{ digest: 'd' }, { digest: 'e' }],
@@ -2967,9 +2967,77 @@ describe('EcosystemService', () => {
         bulk.writeErrors = [{ code: 11000 }, { err: { code: 11000 } }];
         txDigestModel.insertMany.mockRejectedValueOnce(bulk);
 
-        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
-        // All-dupes fires the caught-up heuristic.
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true });
         expect(result.reachedEnd).toBe(true);
+        expect(result.scanned).toBe(2);
+      });
+
+      it('stopOnAllDups:false — all-dup page advances the cursor instead of exiting (backfill resume)', async () => {
+        // Simulates a backfill resuming after a prior run stored the newest 2
+        // digests: page 1 is all-dup (re-traversing stored range), page 2
+        // yields a genuinely new digest, page 3 hits end-of-history.
+        let page = 0;
+        jest.spyOn(service as any, 'graphql').mockImplementation(async (q: unknown) => {
+          page += 1;
+          const body = String(q);
+          if (page === 1) {
+            expect(body).not.toMatch(/before:/);
+            return {
+              transactionBlocks: {
+                nodes: [{ digest: 'd' }, { digest: 'e' }],
+                pageInfo: { hasPreviousPage: true, startCursor: 'sc-1' },
+              },
+            };
+          }
+          if (page === 2) {
+            expect(body).toMatch(/before: "sc-1"/);
+            return {
+              transactionBlocks: {
+                nodes: [{ digest: 'f' }],
+                pageInfo: { hasPreviousPage: true, startCursor: 'sc-2' },
+              },
+            };
+          }
+          expect(body).toMatch(/before: "sc-2"/);
+          return {
+            transactionBlocks: {
+              nodes: [{ digest: 'g' }],
+              pageInfo: { hasPreviousPage: false, startCursor: 'sc-3' },
+            },
+          };
+        });
+        const bulk: any = new Error('bulk');
+        bulk.writeErrors = [{ code: 11000 }, { err: { code: 11000 } }];
+        txDigestModel.insertMany
+          .mockRejectedValueOnce(bulk)
+          .mockResolvedValueOnce([{}])
+          .mockResolvedValueOnce([{}]);
+
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: false });
+        expect(result).toEqual({ scanned: 4, reachedEnd: true });
+        expect(txDigestModel.insertMany).toHaveBeenCalledTimes(3);
+      });
+
+      it('stopOnAllDups:false — page budget caps a perpetually-dup scan (reachedEnd:false)', async () => {
+        // Every page is all-dup and hasPreviousPage:true. Backfill must not
+        // early-exit on dups, so the only exit is the page budget.
+        jest.spyOn(service as any, 'graphql').mockImplementation(async () => ({
+          transactionBlocks: {
+            nodes: [{ digest: 'd-' + Math.random() }],
+            pageInfo: { hasPreviousPage: true, startCursor: 'sc-' + Math.random() },
+          },
+        }));
+        const makeBulk = () => {
+          const bulk: any = new Error('bulk');
+          bulk.writeErrors = [{ code: 11000 }];
+          return bulk;
+        };
+        txDigestModel.insertMany.mockImplementation(async () => {
+          throw makeBulk();
+        });
+
+        const result = await (service as any).pageBackwardTxs('0xpkg', 4, { stopOnAllDups: false });
+        expect(result).toEqual({ scanned: 4, reachedEnd: false });
       });
 
       it('re-throws mixed writeErrors (one non-11000 entry)', async () => {
@@ -2983,7 +3051,9 @@ describe('EcosystemService', () => {
         bulk.writeErrors = [{ code: 11000 }, { code: 66 }];
         txDigestModel.insertMany.mockRejectedValueOnce(bulk);
 
-        await expect((service as any).pageBackwardTxs('0xpkg', 10)).rejects.toThrow(/mixed/);
+        await expect(
+          (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true }),
+        ).rejects.toThrow(/mixed/);
       });
 
       it('re-throws non-duplicate top-level insertMany errors', async () => {
@@ -2995,7 +3065,9 @@ describe('EcosystemService', () => {
         });
         txDigestModel.insertMany.mockRejectedValueOnce(new Error('network'));
 
-        await expect((service as any).pageBackwardTxs('0xpkg', 10)).rejects.toThrow(/network/);
+        await expect(
+          (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true }),
+        ).rejects.toThrow(/network/);
       });
 
       it('graphql throw breaks the loop gracefully', async () => {
@@ -3014,7 +3086,7 @@ describe('EcosystemService', () => {
         });
         txDigestModel.insertMany.mockResolvedValueOnce([{}]);
 
-        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true });
         expect(result.scanned).toBe(1);
         expect(result.reachedEnd).toBe(false);
       });
@@ -3026,7 +3098,7 @@ describe('EcosystemService', () => {
             pageInfo: { hasPreviousPage: false, startCursor: null },
           },
         });
-        const result = await (service as any).pageBackwardTxs('0xpkg', 10);
+        const result = await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true });
         // Nodes scanned (2), but nothing written. reachedEnd via hasPreviousPage=false.
         expect(result.scanned).toBe(2);
         expect(result.reachedEnd).toBe(true);
@@ -3035,7 +3107,7 @@ describe('EcosystemService', () => {
     });
 
     describe('updateTxCountForPackage', () => {
-      it('delegates to pageBackwardTxs with 100-page budget; total = countDocuments; capped = !reachedEnd (false)', async () => {
+      it('delegates to pageBackwardTxs with 100-page budget + stopOnAllDups:true; total = countDocuments; capped = !reachedEnd (false)', async () => {
         const spy = jest
           .spyOn(service as any, 'pageBackwardTxs')
           .mockResolvedValue({ scanned: 42, reachedEnd: true });
@@ -3043,7 +3115,7 @@ describe('EcosystemService', () => {
 
         const result = await (service as any).updateTxCountForPackage('0xpkg');
 
-        expect(spy).toHaveBeenCalledWith('0xpkg', 100);
+        expect(spy).toHaveBeenCalledWith('0xpkg', 100, { stopOnAllDups: true });
         expect(txDigestModel.countDocuments).toHaveBeenCalledWith({ packageAddress: '0xpkg' });
         expect(result).toEqual({ total: 142, capped: false });
       });
@@ -3059,18 +3131,18 @@ describe('EcosystemService', () => {
     });
 
     describe('backfillTxCountsForPackage', () => {
-      it('delegates to pageBackwardTxs with the default 200000-page budget for non-framework packages', async () => {
+      it('delegates to pageBackwardTxs with 200000-page budget + stopOnAllDups:false for non-framework packages', async () => {
         const spy = jest
           .spyOn(service as any, 'pageBackwardTxs')
           .mockResolvedValue({ scanned: 50, reachedEnd: true });
         txDigestModel.countDocuments.mockResolvedValue(50);
 
         const result = await service.backfillTxCountsForPackage('0xpkg');
-        expect(spy).toHaveBeenCalledWith('0xpkg', 200000);
+        expect(spy).toHaveBeenCalledWith('0xpkg', 200000, { stopOnAllDups: false });
         expect(result).toEqual({ total: 50, capped: false });
       });
 
-      it('uses the legacy 10000-page budget for framework packages (0x1 / 0x2 / 0x3)', async () => {
+      it('uses the legacy 10000-page budget for framework packages (0x1 / 0x2 / 0x3), still stopOnAllDups:false', async () => {
         const spy = jest
           .spyOn(service as any, 'pageBackwardTxs')
           .mockResolvedValue({ scanned: 500000, reachedEnd: false });
@@ -3078,7 +3150,7 @@ describe('EcosystemService', () => {
 
         const framework = '0x0000000000000000000000000000000000000000000000000000000000000002';
         await service.backfillTxCountsForPackage(framework);
-        expect(spy).toHaveBeenCalledWith(framework, 10000);
+        expect(spy).toHaveBeenCalledWith(framework, 10000, { stopOnAllDups: false });
       });
 
       it('capped=true when the drain hits the page budget', async () => {
