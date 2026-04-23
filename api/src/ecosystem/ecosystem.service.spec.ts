@@ -399,7 +399,15 @@ describe('EcosystemService', () => {
   // ---------- buildClusterInsights (insights synthesizer) ----------
 
   describe('buildClusterInsights', () => {
-    const build = (ctx: any) => (service as any).buildClusterInsights(ctx);
+    // Defaults for the new timestamp-driven inputs; individual tests override
+    // when they want to exercise those branches specifically.
+    const DEFAULTS = {
+      latestPublishedAt: null,
+      publishNeighbors: [] as { name: string; slug: string; minutesDelta: number }[],
+      now: new Date('2026-04-23T00:00:00Z'),
+    };
+    const build = (ctx: any) =>
+      (service as any).buildClusterInsights({ ...DEFAULTS, ...ctx });
 
     it('leads with "same deployer as <projects>" when deployer cross-references attributed projects', () => {
       const insights = build({
@@ -467,6 +475,51 @@ describe('EcosystemService', () => {
         deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
       });
       expect(insights).toContain('7-package footprint — likely a multi-contract protocol');
+    });
+
+    it('emits "Deployed in the last 24 h" for packages published <1 day ago', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 0, transactions: 0, events: 0,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        latestPublishedAt: new Date('2026-04-22T20:00:00Z'), // 4h before the DEFAULT `now`
+      });
+      expect(insights).toContain('Deployed in the last 24 h');
+    });
+
+    it('emits "Deployed N day(s) ago" for packages 1–7 days old', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 0, transactions: 0, events: 0,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        latestPublishedAt: new Date('2026-04-19T00:00:00Z'), // 4 days before `now`
+      });
+      expect(insights).toContain('Deployed 4 day(s) ago');
+    });
+
+    it('stays silent about age for packages older than 7 days', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 0, transactions: 0, events: 0,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        latestPublishedAt: new Date('2026-04-10T00:00:00Z'), // 13 days before `now`
+      });
+      expect(insights.find((s: string) => s.toLowerCase().includes('deployed'))).toBeUndefined();
+    });
+
+    it('reports publish-time pairing with an attributed neighbor ("Published N min after X")', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 0, transactions: 0, events: 0,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        publishNeighbors: [{ name: 'Bolt.Earth RealFi', slug: 'bolt-earth-realfi', minutesDelta: 3 }],
+      });
+      expect(insights).toContain('Published 3 min after Bolt.Earth RealFi');
+    });
+
+    it('reports publish-time pairing in the "before" direction when negative delta', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 0, transactions: 0, events: 0,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        publishNeighbors: [{ name: 'ISC Anchor', slug: 'isc-anchor', minutesDelta: -2 }],
+      });
+      expect(insights).toContain('Published 2 min before ISC Anchor');
     });
 
     it('stays silent about deployer-sender patterns when the deployer is unknown (framework packages)', () => {
@@ -622,6 +675,207 @@ describe('EcosystemService', () => {
       const unattr = view.unattributed[0];
       expect(unattr.deployerIsSender).toBe(true);
       expect(unattr.insights).toContain('Self-deployed only: deployer is the sole sender');
+    });
+
+    it('surfaces publishedAt on attributed project rows (latest across matched packages)', async () => {
+      const raw = {
+        _id: 'raw-publish-proj',
+        packages: [
+          {
+            address: '0xabcdef',
+            deployer: '0xdeployer',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0,
+            fingerprint: null,
+            publishedAt: new Date('2026-04-10T12:00:00Z'),
+          },
+          {
+            address: '0xabcdef',
+            deployer: '0xdeployer',
+            storageRebateNanos: 2_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 2, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0,
+            fingerprint: null,
+            publishedAt: new Date('2026-04-20T18:30:00Z'),
+          },
+        ],
+        totalStorageRebateNanos: 3_000_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const p = view.l1.find((row: any) => row.name === 'AddrOnly');
+      expect(p).toBeDefined();
+      expect(p.publishedAt).toBe('2026-04-20T18:30:00.000Z');
+    });
+
+    it('emits a cross-cluster "Published N min after X" insight when an attributed project published within ±10 min', async () => {
+      // AddrOnly matches 0xabcdef and will become an attributed row with
+      // publishedAt = 2026-04-20T10:00:00Z. The unattributed package
+      // 0x999aaa is published 7 min later — within the 10-min window,
+      // different deployer, so the cross-cluster pairing should fire.
+      const raw = {
+        _id: 'raw-publish-neighbor',
+        packages: [
+          {
+            address: '0xabcdef',
+            deployer: '0xdeployer1',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0,
+            fingerprint: null,
+            publishedAt: new Date('2026-04-20T10:00:00Z'),
+          },
+          {
+            address: '0x999aaa',
+            deployer: '0xdeployer2',
+            storageRebateNanos: 500_000_000,
+            modules: ['lonely'],
+            moduleMetrics: [{ module: 'lonely', events: 0, eventsCapped: false, uniqueSenders: 0 }],
+            objectCount: 0,
+            fingerprint: null,
+            publishedAt: new Date('2026-04-20T10:07:00Z'),
+          },
+        ],
+        totalStorageRebateNanos: 1_500_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const unattr = view.unattributed.find((c: any) => c.deployer === '0xdeployer2');
+      expect(unattr).toBeDefined();
+      expect(unattr.publishedAt).toBe('2026-04-20T10:07:00.000Z');
+      expect(unattr.insights.find((s: string) => /Published \d+ min after AddrOnly/.test(s))).toBeTruthy();
+    });
+
+    it('skips same-deployer projects when surfacing publish-time neighbors (avoids double-counting the "Same deployer" insight)', async () => {
+      // Two packages sharing a deployer — one attributed (0xabcdef → AddrOnly),
+      // one unattributed (0x999aaa). Their publish times are within ±10 min.
+      // The cross-cluster pairing MUST NOT fire because the cluster already
+      // carries a stronger "Same deployer as AddrOnly" insight.
+      const raw = {
+        _id: 'raw-publish-same-deployer',
+        packages: [
+          {
+            address: '0xabcdef',
+            deployer: '0xfeedbabe',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0,
+            fingerprint: null,
+            publishedAt: new Date('2026-04-20T10:00:00Z'),
+          },
+          {
+            address: '0x999aaa',
+            deployer: '0xfeedbabe',
+            storageRebateNanos: 500_000_000,
+            modules: ['lonely'],
+            moduleMetrics: [{ module: 'lonely', events: 0, eventsCapped: false, uniqueSenders: 0 }],
+            objectCount: 0,
+            fingerprint: null,
+            publishedAt: new Date('2026-04-20T10:03:00Z'),
+          },
+        ],
+        totalStorageRebateNanos: 1_500_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const unattr = view.unattributed.find((c: any) => c.deployer === '0xfeedbabe');
+      expect(unattr).toBeDefined();
+      // Same-deployer insight wins
+      expect(unattr.insights.find((s: string) => s.startsWith('Same deployer as'))).toBeTruthy();
+      // Publish-pairing insight suppressed
+      expect(unattr.insights.find((s: string) => /Published \d+ min (before|after)/.test(s))).toBeUndefined();
+    });
+
+    it('builds the attributed publish index excluding projects whose packages have no publishedAt', async () => {
+      // Two attributed projects: AddrOnly (matches 0xabcdef) has publishedAt,
+      // and we seed a second one that lands in MinMods (matches minModules:3)
+      // with NO publishedAt. The filter-callback inside attributedPublishIndex
+      // must run on both, returning true for the first and false for the
+      // second. Only the first should be eligible as a publish-neighbor for
+      // an unattributed cluster.
+      const raw = {
+        _id: 'raw-publish-filter',
+        packages: [
+          {
+            address: '0xabcdef',
+            deployer: '0xd1',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+            objectCount: 0, fingerprint: null,
+            publishedAt: new Date('2026-04-20T12:00:00Z'),
+          },
+          {
+            address: '0xdeadbeef',
+            deployer: '0xd2',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['m1', 'm2', 'm3'],
+            moduleMetrics: [
+              { module: 'm1', events: 0, eventsCapped: false, uniqueSenders: 0 },
+              { module: 'm2', events: 0, eventsCapped: false, uniqueSenders: 0 },
+              { module: 'm3', events: 0, eventsCapped: false, uniqueSenders: 0 },
+            ],
+            objectCount: 0, fingerprint: null,
+            // no publishedAt — this project contributes nothing to the neighbor index
+          },
+          {
+            address: '0xcafecafe',
+            deployer: '0xd3',
+            storageRebateNanos: 500_000_000,
+            modules: ['lonely'],
+            moduleMetrics: [{ module: 'lonely', events: 0, eventsCapped: false, uniqueSenders: 0 }],
+            objectCount: 0, fingerprint: null,
+            publishedAt: new Date('2026-04-20T12:05:00Z'), // 5 min after AddrOnly
+          },
+        ],
+        totalStorageRebateNanos: 2_500_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const addrOnly = view.l1.find((p: any) => p.name === 'AddrOnly');
+      const minMods = view.l1.find((p: any) => p.name === 'MinMods');
+      expect(addrOnly.publishedAt).toBe('2026-04-20T12:00:00.000Z');
+      expect(minMods.publishedAt).toBeNull();
+      // Only AddrOnly should have paired with the unattributed cluster via publish-time
+      const unattr = view.unattributed.find((c: any) => c.deployer === '0xd3');
+      expect(unattr).toBeDefined();
+      expect(unattr.insights.find((s: string) => /Published \d+ min after AddrOnly/.test(s))).toBeTruthy();
+      expect(unattr.insights.find((s: string) => /MinMods/.test(s))).toBeUndefined();
+    });
+
+    it('leaves publishedAt null on clusters whose packages predate the field (legacy snapshot)', async () => {
+      const raw = {
+        _id: 'raw-publish-legacy',
+        packages: [
+          {
+            address: '0x111222',
+            deployer: '0xlegacy',
+            storageRebateNanos: 100_000_000,
+            modules: ['v1'],
+            moduleMetrics: [{ module: 'v1', events: 0, eventsCapped: false, uniqueSenders: 0 }],
+            objectCount: 0,
+            fingerprint: null,
+            // publishedAt intentionally absent — mirrors pre-field snapshot docs
+          },
+        ],
+        totalStorageRebateNanos: 100_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const unattr = view.unattributed[0];
+      expect(unattr.publishedAt).toBeNull();
+      // No age-tag insight since we can't compute it
+      expect(unattr.insights.find((s: string) => /Deployed (in the last 24 h|\d+ day)/.test(s))).toBeUndefined();
     });
 
     it('skips deployer-sender patterns for unknown-deployer clusters (framework packages)', async () => {

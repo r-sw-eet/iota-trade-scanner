@@ -181,6 +181,22 @@ export class PackageFact {
    * rule added today retroactively classifies old snapshots.
    */
   @Prop({ type: FingerprintSampleDoc, default: null }) fingerprint: FingerprintSampleDoc | null;
+
+  /**
+   * ISO timestamp of the TX that published this package — derived from
+   * `previousTransactionBlock.effects.timestamp` on the `packages` query.
+   * Static per package (upgrades don't rewrite the original publish tx).
+   * Enables:
+   *   - "deployed N days ago" insight on each cluster
+   *   - cross-cluster clustering by publish time (coordinated multi-deployer
+   *     projects publish within minutes of each other)
+   *   - "brand-new package" highlighting for discovery sweeps
+   *
+   * `null` on framework packages (`0x1`/`0x2`/`0x3`) that lack a resolvable
+   * previous TX, and on snapshots predating this field — growth endpoint
+   * treats as "unknown for that interval".
+   */
+  @Prop({ type: Date, default: null }) publishedAt: Date | null;
 }
 
 @Schema({ timestamps: true, collection: 'onchainsnapshots' })

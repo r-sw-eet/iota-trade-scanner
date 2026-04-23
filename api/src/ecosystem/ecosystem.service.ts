@@ -175,6 +175,8 @@ export interface UnattributedCluster {
    * clusters.
    */
   insights: string[];
+  /** ISO-8601 timestamp of the latest package's publish TX in this cluster. `null` for framework packages / legacy snapshots. */
+  publishedAt: string | null;
 }
 
 /**
@@ -301,6 +303,8 @@ export interface Project {
   attribution: string | null;
   /** ISO-8601 date the project was first added to the registry (from `ProjectDefinition.addedAt`). `null` for defs that predate the field or for DefiLlama-synthesized L2 rows. */
   addedAt: string | null;
+  /** ISO-8601 timestamp of the latest package's publish TX (from `PackageFact.publishedAt`). `null` for framework-only projects or snapshots predating the field. Used by the unattributed discovery layer for cross-cluster "published within N min of X" pairing. */
+  publishedAt: string | null;
   /**
    * Probe-extracted string fields from one sampled Move object per project
    * (latest package first, first-non-empty wins). Exposed for the same
@@ -318,7 +322,10 @@ interface PackageInfo {
   address: string;
   storageRebate: string;
   modules: { nodes: { name: string }[] };
-  previousTransactionBlock: { sender: { address: string } | null } | null;
+  previousTransactionBlock: {
+    sender: { address: string } | null;
+    effects: { timestamp: string | null } | null;
+  } | null;
 }
 
 @Injectable()
@@ -368,7 +375,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 5;
+  private static readonly CLASSIFIER_VERSION = 6;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -1011,7 +1018,10 @@ export class EcosystemService implements OnModuleInit {
             address
             storageRebate
             modules { nodes { name } }
-            previousTransactionBlock { sender { address } }
+            previousTransactionBlock {
+              sender { address }
+              effects { timestamp }
+            }
           }
           pageInfo { hasNextPage endCursor }
         }
@@ -1941,6 +1951,12 @@ export class EcosystemService implements OnModuleInit {
     deployerAttributedProjects: { name: string; slug: string }[];
     deployerIsSender: boolean;
     deployerIsUnknown: boolean;
+    /** Latest publish date across the cluster's packages — used to age the row. */
+    latestPublishedAt: Date | null;
+    /** Cross-cluster pairing: an attributed project published within ±10 min of this cluster's latest package. Empty when no pairing was found. */
+    publishNeighbors: { name: string; slug: string; minutesDelta: number }[];
+    /** Now, injected so the age calc is deterministic in tests. */
+    now: Date;
   }): string[] {
     const out: string[] = [];
 
@@ -1951,6 +1967,17 @@ export class EcosystemService implements OnModuleInit {
           ? names.join(', ')
           : `${names.slice(0, 3).join(', ')} +${names.length - 3}`;
       out.push(`Same deployer as ${joined}`);
+    }
+
+    // Cross-cluster pairing: an attributed project published within a few
+    // minutes of the cluster's latest package is a strong "coordinated
+    // multi-deployer launch" hint. Positive minutesDelta = cluster came
+    // AFTER the attributed project; negative = before.
+    if (ctx.publishNeighbors.length > 0) {
+      const n = ctx.publishNeighbors[0];
+      const whenWord = n.minutesDelta >= 0 ? 'after' : 'before';
+      const mins = Math.abs(Math.round(n.minutesDelta));
+      out.push(`Published ${mins} min ${whenWord} ${n.name}`);
     }
 
     if (ctx.uniqueSenders === 0 && ctx.transactions === 0 && ctx.events === 0) {
@@ -1965,6 +1992,19 @@ export class EcosystemService implements OnModuleInit {
       out.push(`Deployer-driven + ${ctx.uniqueSenders - 1} other sender(s)`);
     } else if (!ctx.deployerIsSender && ctx.uniqueSenders > 0) {
       out.push(`Distributed usage: ${ctx.uniqueSenders} sender(s), deployer absent from senders`);
+    }
+
+    // Age tag — only emit for "brand new" packages (<=7 days). Older
+    // clusters would spam this insight without adding signal; the cluster
+    // row's sort/filter covers general age elsewhere.
+    if (ctx.latestPublishedAt) {
+      const ageMs = ctx.now.getTime() - ctx.latestPublishedAt.getTime();
+      const ageDays = Math.floor(ageMs / (24 * 60 * 60 * 1000));
+      if (ageDays < 1) {
+        out.push('Deployed in the last 24 h');
+      } else if (ageDays <= 7) {
+        out.push(`Deployed ${ageDays} day(s) ago`);
+      }
     }
 
     if (ctx.packageCount >= 5) {
@@ -2235,6 +2275,14 @@ export class EcosystemService implements OnModuleInit {
       const storageRebateNanos = Number(pkg.storageRebate || 0);
       totalStorageRebateNanos += storageRebateNanos;
 
+      // Publish timestamp — comes straight from the TX effects of the
+      // previous-transaction-block. Static per package (upgrades don't
+      // rewrite the original publish tx). Null for framework packages that
+      // have no resolvable previous tx — treated as "unknown" in classify,
+      // not genesis.
+      const publishedIso = pkg.previousTransactionBlock?.effects?.timestamp ?? null;
+      const publishedAt = publishedIso ? new Date(publishedIso) : null;
+
       // Per-module counters. These stay cumulative across scans so delta
       // queries are plain subtraction between any two snapshots.
       const moduleMetrics: ModuleMetrics[] = [];
@@ -2298,6 +2346,7 @@ export class EcosystemService implements OnModuleInit {
         transactionsCapped,
         objectTypeCounts,
         fingerprint,
+        publishedAt,
       } as PackageFact);
     }
 
@@ -2579,6 +2628,17 @@ export class EcosystemService implements OnModuleInit {
         }
       }
 
+      // Latest publish timestamp across matched packages — used both as a
+      // row-level field (dashboard / details) and as input to the unattributed
+      // cluster's "published within N min of X" pairing.
+      let latestPublishedMs: number | null = null;
+      for (const p of facts) {
+        if (!p.publishedAt) continue;
+        const t = new Date(p.publishedAt).getTime();
+        if (latestPublishedMs === null || t > latestPublishedMs) latestPublishedMs = t;
+      }
+      const projectPublishedAt = latestPublishedMs !== null ? new Date(latestPublishedMs).toISOString() : null;
+
       const firstPkg = facts[0]; // original deployment — address never changes
       const addrPrefix = firstPkg.address.slice(2, 8);
       projects.push({
@@ -2615,6 +2675,7 @@ export class EcosystemService implements OnModuleInit {
         uniqueWalletsReach,
         attribution: def.attribution ?? null,
         addedAt: def.addedAt ?? null,
+        publishedAt: projectPublishedAt,
         sampleIdentifiers,
         sampledObjectType,
       });
@@ -2665,6 +2726,19 @@ export class EcosystemService implements OnModuleInit {
         else deployerToAttributedProjects.set(key, [entry]);
       }
     }
+
+    // Publish-neighbor index for cross-cluster "published within N min of X"
+    // pairing. Flat array — 95 attributed rows × 56 clusters is trivial to
+    // scan linearly per cluster (~5k comparisons total) and avoids a sorted-
+    // index build that'd be overkill at this scale.
+    const attributedPublishIndex: Array<{ name: string; slug: string; publishedAtMs: number }> =
+      projects
+        .filter((p) => p.publishedAt)
+        .map((p) => ({
+          name: p.name,
+          slug: p.slug,
+          publishedAtMs: new Date(p.publishedAt as string).getTime(),
+        }));
 
     // Bulk sender probe — one Mongo query covers every (clusterPkg, deployer)
     // pair. Key the result set so the per-cluster loop below is an O(1)
@@ -2735,6 +2809,36 @@ export class EcosystemService implements OnModuleInit {
       const deployerIsSender =
         deployer !== 'unknown' &&
         facts.some((p) => deployerSenderHits.has(`${p.address.toLowerCase()}|${deployer.toLowerCase()}`));
+
+      // Latest publish date across this cluster's packages. Null when every
+      // pkg predates the publishedAt field (legacy snapshot).
+      let latestClusterPublishedMs: number | null = null;
+      for (const p of facts) {
+        if (!p.publishedAt) continue;
+        const t = new Date(p.publishedAt).getTime();
+        if (latestClusterPublishedMs === null || t > latestClusterPublishedMs) latestClusterPublishedMs = t;
+      }
+      const latestPublishedAt = latestClusterPublishedMs !== null ? new Date(latestClusterPublishedMs) : null;
+
+      // Cross-cluster publish-time pairing — find attributed projects that
+      // published within ±10 min of this cluster's latest package. Same-
+      // deployer hits via `deployerAttributedProjects` are skipped here
+      // (they're already a stronger "Same deployer as …" insight, avoid
+      // double-counting).
+      const publishNeighbors: { name: string; slug: string; minutesDelta: number }[] = [];
+      if (latestPublishedAt) {
+        const ms = latestPublishedAt.getTime();
+        const sameDeployerSlugs = new Set(deployerAttributedProjects.map((p) => p.slug));
+        for (const n of attributedPublishIndex) {
+          if (sameDeployerSlugs.has(n.slug)) continue;
+          const deltaMin = (ms - n.publishedAtMs) / 60_000;
+          if (Math.abs(deltaMin) <= 10) {
+            publishNeighbors.push({ name: n.name, slug: n.slug, minutesDelta: deltaMin });
+          }
+        }
+        publishNeighbors.sort((a, b) => Math.abs(a.minutesDelta) - Math.abs(b.minutesDelta));
+      }
+
       const insights = this.buildClusterInsights({
         packageCount: facts.length,
         uniqueSenders,
@@ -2743,6 +2847,9 @@ export class EcosystemService implements OnModuleInit {
         deployerAttributedProjects,
         deployerIsSender,
         deployerIsUnknown: deployer === 'unknown',
+        latestPublishedAt,
+        publishNeighbors,
+        now: new Date(),
       });
 
       unattributed.push({
@@ -2772,6 +2879,7 @@ export class EcosystemService implements OnModuleInit {
         deployerAttributedProjects,
         deployerIsSender,
         insights,
+        publishedAt: latestPublishedAt?.toISOString() ?? null,
       });
     }
     const totalUnattributedPackages = unattributed.reduce((s, c) => s + c.packages, 0);
@@ -2958,6 +3066,7 @@ export class EcosystemService implements OnModuleInit {
           uniqueWalletsReach: 0,
           attribution: null,
           addedAt: null,
+          publishedAt: null,
           sampleIdentifiers: [],
           sampledObjectType: null,
         });

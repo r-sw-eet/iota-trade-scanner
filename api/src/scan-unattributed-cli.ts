@@ -324,6 +324,7 @@ async function main() {
       deployerAttributedProjects: [],
       deployerIsSender: false,
       insights: [],
+      publishedAt: null,
     });
   }
   console.log(JSON.stringify(out));
