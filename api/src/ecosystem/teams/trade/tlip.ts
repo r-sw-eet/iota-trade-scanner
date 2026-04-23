@@ -9,7 +9,7 @@ export const tlip: Team = {
     { label: 'Wiki', href: 'https://wiki.tlip.io' },
     { label: 'IOTA — Trade', href: 'https://www.iota.org/solutions/trade' },
   ],
-  deployers: ['0xd7e2de659109e51191f733479891c5a2e1e46476ab4bafe1f663755f145d5176'],
+  deployers: [{ address: '0xd7e2de659109e51191f733479891c5a2e1e46476ab4bafe1f663755f145d5176', network: 'mainnet' }],
   logo: '/logos/tlip.svg',
   attribution: `
 Organizational-grade attestation: iota.org/solutions/trade, tlip.io, wiki.tlip.io, and the \`tmea-tlip\` GitHub org (TradeMark East Africa × IOTA partnership) all publicly surface TLIP as an IOTA-Foundation-partnered trade-digitization product. The TLIP deployer ships a single package (\`0xdeadee97bb146c273e9cc55ec26c1d2936133119acc1b2fc0b542e279007e108\` — note the deliberate vanity prefix) containing \`{ebl, carrier_registry, endorsement, interop_control, notarization}\`: an exact match for TLIP's documented business primitives. No other mainnet deployer ships the \`ebl\` module.

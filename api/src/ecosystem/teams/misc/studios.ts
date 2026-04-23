@@ -4,7 +4,7 @@ export const studioB30c: Team = {
   id: 'studio-b30c',
   name: 'Studio 0xb30cf677',
   description: 'Anonymous deployer running a rollup / sidechain state-root anchor on IOTA Rebased. Single `root_anchor` module posting sequential 32-byte Merkle roots keyed by `block_number` + `timestamp_ms` to a singleton `RootRegistry` object at ~6.6-second cadence. 223+ commits captured. One admin relayer wallet, zero events, zero retail senders — pure DA / checkpoint anchor shape. No public project claims the deployer as of 2026-04-22.',
-  deployers: ['0xb30cf677dde91d56aaecb8105e28941dfd5d65c50eacb1c1e47e6048619c2906'],
+  deployers: [{ address: '0xb30cf677dde91d56aaecb8105e28941dfd5d65c50eacb1c1e47e6048619c2906', network: 'mainnet' }],
   attribution: `
 Synthetic team id for an unknown off-chain chain (rollup or sidechain) posting state roots to IOTA L1 as a DA / checkpoint anchor. Single package \`0x2fb4252a3043bcc996ba15ea5b1c5a91ad80fa4e881f2f00f78f3ca4ef89dfb2\` at anonymous deployer \`0xb30cf677dde91d56aaecb8105e28941dfd5d65c50eacb1c1e47e6048619c2906\`. See the \`studioB30cRootAnchor\` project def for the full attribution prose — on-chain shape is unambiguous (sequential \`store_root(block_number, root[32], timestamp_ms)\` commits at ~6.6s cadence from one admin relayer), but no iotaledger repo, docs.iota.org page, or third-party announcement references the \`root_anchor\` module or this deployer.
 
@@ -16,7 +16,7 @@ export const studiob5fc: Team = {
   id: 'studio-b5fc',
   name: 'Studio 0xb5fca220',
   description: 'Anonymous solo-developer Carbon Credits RWA pilot on IOTA Rebased. Single package shipping a complete 4-module carbon-credit system: `credit_token` (the CREDIT_TOKEN coin-type, 6,187 in circulation), `credit_carbon_manager` (per-record accounting of available vs consumed credits), `minter_pass_nft` (permissioned-minter cap NFT — only pass-holders can mint new credits), and `certificate_nft` (proof-of-consumption NFT issued when a credit is retired). Functional architecture, real on-chain activity, but demo-scale volume (2 minted CarbonCreditRecord objects, 2 MinterPassNFTs, 2 CertificateNFTs currently).',
-  deployers: ['0xb5fca2204cfdd7541137fa247e5878ec109645893461b563a87c0aa3b36a01a0'],
+  deployers: [{ address: '0xb5fca2204cfdd7541137fa247e5878ec109645893461b563a87c0aa3b36a01a0', network: 'mainnet' }],
   attribution: `
 Synthetic team id for an anonymous dev's Carbon Credits RWA pilot — single package, full production-shaped architecture, small on-chain footprint. Package \`0xb8f25b829422bb0df7a405fc752c230c4dac6985dd6ae1e661fe7a13e8f4383b\` ships 4 modules in a clean separation-of-concerns layout:
 
@@ -38,7 +38,7 @@ export const studio457d: Team = {
   id: 'studio-457d',
   name: 'Studio 0x457dfa6b',
   description: 'Anonymous deployer behind the "IOTA Estoicos" PFP collection. 7 packages all carrying the single-module `estoicos` signature (upgrade versions of the same \\"EstoicosNFT\\" type). Only 1 NFT minted so far — `IOTA Estoicos Genesis OG NFT #1` — so the collection is in pre-launch / teaser state. No public brand presence; consistent with a solo-dev pre-launch setup.',
-  deployers: ['0x457dfa6b2594e250535af12d886f77ae3a32db63785830949927e8247f8c8a38'],
+  deployers: [{ address: '0x457dfa6b2594e250535af12d886f77ae3a32db63785830949927e8247f8c8a38', network: 'mainnet' }],
   attribution: `
 Synthetic team id for the "IOTA Estoicos" PFP pre-launch. 7 packages on this deployer, all with module set \`{estoicos}\` — 7 upgrade versions of the same codebase. Struct set is minimal: \`EstoicosNFT\` (\`key\` only — note, NOT \`store, key\`, so these tokens cannot be held in other wrapper objects) + \`NFTMinted\` event.
 
@@ -54,7 +54,7 @@ export const studiocebe: Team = {
   id: 'studio-cebe',
   name: 'Studio 0xcebec37a',
   description: 'Anonymous deployer behind a "ctrlv AI Agents" on-chain agent-registry pilot. Single package shipping `ctrlv_agent` module with `AgentNFT` + full lifecycle events (Mint / Transfer / Update / Burn). Sampled agent declares `model: "Claude"`, `role: "Assistant"`, `service: "Customer Support"` — NFT-shaped AI-agent identity primitive. Demo-scale: 1 "Demo Agent" minted. No public brand presence.',
-  deployers: ['0xcebec37ad6c05b7fa54344c0bc4dd7e0c340eab11e691f57bdf9f9ed0e75999a'],
+  deployers: [{ address: '0xcebec37ad6c05b7fa54344c0bc4dd7e0c340eab11e691f57bdf9f9ed0e75999a', network: 'mainnet' }],
   attribution: `
 Synthetic team id for a single-developer on-chain AI-agent-registry pilot. Single package at deployer \`0xcebec37ad6c05b7fa54344c0bc4dd7e0c340eab11e691f57bdf9f9ed0e75999a\` shipping module \`ctrlv_agent\` with struct set: \`AgentNFT\` (\`store, key\` — the agent identity object), \`AgentNFTMinted\` / \`AgentNFTTransferred\` / \`AgentNFTUpdated\` / \`AgentNFTBurned\` events — full CRUD lifecycle.
 
@@ -80,7 +80,7 @@ export const studio49c4: Team = {
   id: 'studio-49c4',
   name: 'Studio 0x49c4e917',
   description: 'Anonymous deployer running a phishing-spray NFT airdrop campaign on IOTA Rebased. 3 packages: `voucher::PandabyteTicket` (597 sprayed to 597 unique wallets), `ticket::KilnTicket` (Kiln-brand impersonation; the real Kiln validator service is at `kiln.fi`, not the phishing `kilnstake.net`), and an unused `my_token` OTW template. All NFTs carry `url` fields pointing at non-resolving impersonation domains (`pandabyte.org`, `kilnstake.net`) — classic mass-airdrop-to-phishing pattern: scammer sprays NFTs, recipient sees "claim your reward" metadata, visits site, wallet drains.',
-  deployers: ['0x49c4e917a0d6ca7da640b0267123e5416457e88651e06a79f99dc2fd7b88dbbf'],
+  deployers: [{ address: '0x49c4e917a0d6ca7da640b0267123e5416457e88651e06a79f99dc2fd7b88dbbf', network: 'mainnet' }],
   attribution: `
 Synthetic team id for a phishing-spray operation, not a legitimate project. Evidence:
 
@@ -104,7 +104,7 @@ export const studio5451: Team = {
   id: 'studio-5451',
   name: 'Studio 0x545160c9',
   description: 'Anonymous solo-developer deployer behind a vehicle-title RWA NFT pilot. 3 single-module `car_nft` packages shipping a sophisticated architecture: shared `Config` object with an admin address + 32-byte backend public key (for off-chain signed updates like mileage / TC / ownership transfer) + VIN registry table. Currently 1 minted NFT — a 2019 Ford Fiesta demo (VIN `WF0JXXGAHJKD30348` — the `WF0` WMI prefix = Ford Werke Germany). Probably a dev\'s demo / pilot of vehicle-title tokenization, but no public website, docs, or GitHub repo found.',
-  deployers: ['0x545160c945b6acbf1b8a295cd488294f17144b0324786d049953e168e783c8a9'],
+  deployers: [{ address: '0x545160c945b6acbf1b8a295cd488294f17144b0324786d049953e168e783c8a9', network: 'mainnet' }],
   attribution: `
 Synthetic team id pending confirmed operator identification. On-chain footprint is 3 packages at deployer \`0x545160c945b6acbf1b8a295cd488294f17144b0324786d049953e168e783c8a9\`, all single-module \`car_nft\` with a consistent 4-struct signature: \`CAR_NFT\` (OTW, \`drop\`), \`CarNFT\` (\`store, key\`, the actual NFT), \`Config\` (\`store, key\`, shared admin object), and \`NFTMinted\` event.
 
@@ -138,7 +138,7 @@ export const studio295e: Team = {
   id: 'studio-295e',
   name: 'Studio 0x295ee21b',
   description: 'Anonymous solo-developer deployer behind the on-chain "TruvID" product — 7 packages, all single-module `nft_minter2` with struct `NFT`. On-chain self-identifies as TruvID (video-authenticity / notarization). Operator identity not confirmed; circumstantial trail points at an anonymous GitHub-hosted PWA at `truvid.vercel.app` but the public frontend has zero on-chain wiring, so the link between the two is not proven by the published artifacts alone.',
-  deployers: ['0x295ee21bc224c1d2ccd8dd9ec966688bdb7d1ca3a8f2a8550694a4debe13559a'],
+  deployers: [{ address: '0x295ee21bc224c1d2ccd8dd9ec966688bdb7d1ca3a8f2a8550694a4debe13559a', network: 'mainnet' }],
   attribution: `
 Synthetic team id pending confirmed operator identification. On-chain footprint is 7 packages at deployer \`0x295ee21bc224c1d2ccd8dd9ec966688bdb7d1ca3a8f2a8550694a4debe13559a\`, all single-module \`nft_minter2\` with struct \`NFT\` — successive upgrade versions of one product that self-identifies in minted NFTs as "TruvID" / "TruvID Genesis".
 
@@ -172,7 +172,7 @@ export const studioCb69: Team = {
   id: 'studio-cb69',
   name: 'Studio 0xcb6956e9',
   description: 'Anonymous multi-collection NFT deployer — ships a handful of small hand-minted PFP collections (Healthy Gang, Ghost Lights, Tanapaz, Toma Rajadão, Tranquilidade Drops) plus ~25 keyboard-mash test-deploy modules. No public brand presence; `droppzz_test_iota` appears in the module list, possibly pointing at a "Droppzz" operator handle but unconfirmed.',
-  deployers: ['0xcb6956e9f7f2515054241b74a1c0b545b4e813d0e5e15f9bb827870b3d63724c'],
+  deployers: [{ address: '0xcb6956e9f7f2515054241b74a1c0b545b4e813d0e5e15f9bb827870b3d63724c', network: 'mainnet' }],
   attribution: `
 Synthetic team id pending a real operator identification. On-chain footprint is 33 packages from deployer \`0xcb6956e9f7f2515054241b74a1c0b545b4e813d0e5e15f9bb827870b3d63724c\`, with module names split roughly two ways:
 
@@ -192,7 +192,7 @@ export const studioB8b1: Team = {
   id: 'studio-b8b1',
   name: 'Studio 0xb8b1380e',
   description: 'Multi-brand dev-shop deployer shipping 37 packages across KrillTube (decentralized video), GiveRep (SocialFi reputation, IOTA side), an on-chain games portfolio (Chess / Tic Tac Toe / 2048), and shared infrastructure (vault, gas_station, gift drop). Single-team vs. dev-shop ownership is an open question — evidence leans single-team, not conclusive.',
-  deployers: ['0xb8b1380eb2f879440e6f568edbc3aab46b54c48b8bfe81acbc1b4cf15a2706c6'],
+  deployers: [{ address: '0xb8b1380eb2f879440e6f568edbc3aab46b54c48b8bfe81acbc1b4cf15a2706c6', network: 'mainnet' }],
   attribution: `
 Previously registered as a generic "anonymous developer." Partial identification 2026-04-17 via live-object inspection — the deployer ships code for multiple branded products, making it a dev-shop / multi-tenant infrastructure publisher rather than a single anonymous studio.
 
@@ -236,8 +236,8 @@ export const studio0a0d: Team = {
     { label: 'GitHub (Moron1337)', href: 'https://github.com/Moron1337' },
   ],
   deployers: [
-    '0x0a0d4c9a9f935dac9f9bee55ca0632c187077a04d0dffcc479402f2de9a82140',
-    '0x4468c8ddb42728fd1194033c1dd14ffd015f0d81e4b5329ddc11793c989f3f39',
+    { address: '0x0a0d4c9a9f935dac9f9bee55ca0632c187077a04d0dffcc479402f2de9a82140', network: 'mainnet' },
+    { address: '0x4468c8ddb42728fd1194033c1dd14ffd015f0d81e4b5329ddc11793c989f3f39', network: 'mainnet' },
   ],
   logo: '/logos/studio-0a0d.png',
   attribution: `

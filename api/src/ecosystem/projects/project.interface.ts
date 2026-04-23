@@ -50,6 +50,18 @@ export interface ProjectDefinition {
   name: string;
   layer: 'L1' | 'L2';
   /**
+   * IOTA network this definition targets. Classifier filters
+   * `ALL_PROJECTS.filter(d => (d.network ?? 'mainnet') === scanNetwork)`
+   * before iteration, so a mainnet scan never matches testnet definitions
+   * and vice versa. Optional with a default of `'mainnet'` so the ~600
+   * existing definitions stay unaffected. See
+   * `plans/plan_testnet_support.md § Tag matrix` for why this is singular
+   * (not an array): testnet and mainnet deploys of "the same" app are
+   * intrinsically disjoint — version-split pattern applies, two defs under
+   * one `teamId`.
+   */
+  network?: 'mainnet' | 'testnet' | 'devnet';
+  /**
    * Top-level category from the closed 10-member `CATEGORIES` set. Display
    * label combines `category` + `subcategory` as `"<Category> / <Sub>"`
    * (computed at read time; see `ecosystem.service.ts`). Use subcategory to

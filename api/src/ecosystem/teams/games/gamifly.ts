@@ -10,7 +10,7 @@ export const gamifly: Team = {
     { label: 'Aylab (developer)', href: 'https://aylab.io' },
     { label: 'IOTA × Gamifly launch coverage', href: 'https://www.ainvest.com/news/iota-launches-cricket-themed-nft-initiative-pakistan-gamifly-2508/' },
   ],
-  deployers: ['0xfe407119a75c69efebc82764e22e99429c3f5723f9b2e19c848789d8167e2cdb'],
+  deployers: [{ address: '0xfe407119a75c69efebc82764e22e99429c3f5723f9b2e19c848789d8167e2cdb', network: 'mainnet' }],
   logo: '/logos/gamifly.png',
   attribution: `
 Real-brand team, press-verified IOTA Foundation partnership, full attribution chain:

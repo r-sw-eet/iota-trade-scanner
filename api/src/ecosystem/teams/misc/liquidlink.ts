@@ -10,7 +10,7 @@ export const liquidlink: Team = {
     { label: 'Snap', href: 'https://snap.liquidlink.io' },
     { label: 'Twitter/X', href: 'https://x.com/Liquidlink_io' },
   ],
-  deployers: ['0xd6a54ff7f851b58c19729c11d210d46fd46d702b9d9caff78747de1914c934ee'],
+  deployers: [{ address: '0xd6a54ff7f851b58c19729c11d210d46fd46d702b9d9caff78747de1914c934ee', network: 'mainnet' }],
   logo: '/logos/liquidlink.ico',
   attribution: `
 Previously registered as "Points System" — a generic descriptor from before the team was identified. The real project is **LiquidLink**, modular on-chain incentive infrastructure running on both IOTA and Sui mainnet. The Points System module signature was their original loyalty-engine package; subsequent deploys evolved into a full social-profile + engagement platform.

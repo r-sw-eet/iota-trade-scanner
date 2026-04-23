@@ -5,7 +5,7 @@ export const boltEarth: Team = {
   name: 'Bolt.Earth',
   description: 'India\'s largest EV charging network (founded 2017, Bengaluru, 100,000+ chargers across 1,800+ cities). Tokenizes real-world EV charging stations on IOTA Rebased as RealFi — on-chain shares, NFT ownership, and smart-contract-driven yield distribution.',
   urls: [{ label: 'Website', href: 'https://bolt.earth' }],
-  deployers: ['0x1d4ec616351c6be450771d2b291c41579177218da6c5735f2c80af8661f36da3'],
+  deployers: [{ address: '0x1d4ec616351c6be450771d2b291c41579177218da6c5735f2c80af8661f36da3', network: 'mainnet' }],
   logo: '/logos/bolt-earth.ico',
   attribution: `
 Gold-standard attribution via real-world location names baked into module identifiers — arguably the strongest single signal in the registry, because on-chain module names literally include real-world city names that match press coverage.

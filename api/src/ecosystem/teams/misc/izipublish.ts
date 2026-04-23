@@ -9,8 +9,8 @@ export const izipublish: Team = {
     { label: 'Cars demo', href: 'https://cars.izipublish.com' },
   ],
   deployers: [
-    '0x0dce85b04ae7d67de5c6785f329aac1c429cd9321724d64ba5961d347575db97',
-    '0x7c33d09b7b6ddbfed32bd945caae96719ae07f68863d8614c4d96d6d320af429',
+    { address: '0x0dce85b04ae7d67de5c6785f329aac1c429cd9321724d64ba5961d347575db97', network: 'mainnet' },
+    { address: '0x7c33d09b7b6ddbfed32bd945caae96719ae07f68863d8614c4d96d6d320af429', network: 'mainnet' },
   ],
   logo: '/logos/izipublish.png',
   attribution: `

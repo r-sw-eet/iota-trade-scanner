@@ -9,7 +9,7 @@ export const switchboard: Team = {
     { label: 'IOTA docs', href: 'https://docs.switchboard.xyz/docs-by-chain/iota' },
     { label: 'GitHub', href: 'https://github.com/switchboard-xyz/iota' },
   ],
-  deployers: ['0x55f1256ec64d7c4eacb1a5e24932b9face3cdf9400f8d828001b2da0494e7404'],
+  deployers: [{ address: '0x55f1256ec64d7c4eacb1a5e24932b9face3cdf9400f8d828001b2da0494e7404', network: 'mainnet' }],
   logo: '/logos/switchboard.svg',
   logoWordmark: '/logos/switchboard-wordmark.svg',
   attribution: `

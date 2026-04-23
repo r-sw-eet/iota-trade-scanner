@@ -9,8 +9,8 @@ export const tokenlabs: Team = {
     { label: 'Twitter/X', href: 'https://x.com/TokenLabsX' },
   ],
   deployers: [
-    '0x9bd84e617831511634d8aca9120e90b07ba9e4fd920029e1fe4c887fc8599841',
-    '0x5555679093281ffa85c51c24b55fc45ff0f1bb6a57c0bee2c61eae3d5b54ae7c',
+    { address: '0x9bd84e617831511634d8aca9120e90b07ba9e4fd920029e1fe4c887fc8599841', network: 'mainnet' },
+    { address: '0x5555679093281ffa85c51c24b55fc45ff0f1bb6a57c0bee2c61eae3d5b54ae7c', network: 'mainnet' },
   ],
   logo: '/logos/tokenlabs.ico',
   attribution: `

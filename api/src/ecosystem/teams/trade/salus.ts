@@ -8,7 +8,7 @@ export const salus: Team = {
     { label: 'Platform', href: 'https://salusplatform.com' },
     { label: 'Beta Nexus', href: 'https://nexus-beta.salusplatform.com' },
   ],
-  deployers: ['0x4876d3fca2cb61ce39d4f920ad0705f5921995642c69201ee5adfa8f94c34225'],
+  deployers: [{ address: '0x4876d3fca2cb61ce39d4f920ad0705f5921995642c69201ee5adfa8f94c34225', network: 'mainnet' }],
   logo: '/logos/salus.png',
   attribution: `
 Strong organization-level + Move-object self-attestation. No single source publishes the specific package address the way Virtue's or Switchboard's docs do, but the chain of evidence is comprehensive:

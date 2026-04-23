@@ -2934,7 +2934,7 @@ export class EcosystemService implements OnModuleInit {
         // project; if none do, the package stays in the aggregate bucket
         // split by deployer.
         const candidateTeams = ALL_TEAMS.filter((t) =>
-          t.deployers.some((d) => d.toLowerCase() === deployer),
+          t.deployers.some((d) => d.network === 'mainnet' && d.address.toLowerCase() === deployer),
         );
         let routed = false;
         for (const team of candidateTeams) {
@@ -3084,7 +3084,11 @@ export class EcosystemService implements OnModuleInit {
       const detectedDeployers = [
         ...new Set(facts.map((p) => p.deployer).filter((a): a is string => !!a)),
       ];
-      const knownDeployers = new Set((team?.deployers ?? []).map((d) => d.toLowerCase()));
+      const knownDeployers = new Set(
+        (team?.deployers ?? [])
+          .filter((d) => d.network === 'mainnet')
+          .map((d) => d.address.toLowerCase()),
+      );
       const anomalousDeployers = detectedDeployers.filter((d) => !knownDeployers.has(d));
       if (team && anomalousDeployers.length) {
         this.logger.warn(

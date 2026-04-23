@@ -30,9 +30,9 @@ export const lostCrusader: Team = {
   ],
   deployers: [
     // Daily-claim Arcane Dust (base event token)
-    '0x6df6623e596eae138a7db195b2241398c50c4fd30d8f6a22214d42b2386a5a83',
+    { address: '0x6df6623e596eae138a7db195b2241398c50c4fd30d8f6a22214d42b2386a5a83', network: 'mainnet' },
     // Golden Arcane Dust + Revive Spells (higher-tier items + brewing stand)
-    '0x3d9ccdc73e28657eb07aeb7dbf8fbd72ef599d21bdbeb15d3215cdc8ea15e208',
+    { address: '0x3d9ccdc73e28657eb07aeb7dbf8fbd72ef599d21bdbeb15d3215cdc8ea15e208', network: 'mainnet' },
   ],
   attribution: `
 Attribution is gold-standard via on-chain brand self-labeling cross-referenced with the game's own public site. Every minted \`ArcaneDust\` NFT (struct \`<pkg>::arcane_dust::ArcaneDust\`) carries the description string:

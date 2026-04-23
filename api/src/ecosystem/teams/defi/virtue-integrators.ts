@@ -22,7 +22,7 @@ export const studio6ff4: Team = {
   id: 'studio-6ff4',
   name: 'Studio 0x6ff423cb (Virtue Points)',
   description: 'Anonymous deployer of a Virtue-adjacent points primitive. 6 packages shipping `config` + `point` (+ `point_manager`) with struct `VirtuePointWitness`. Strongest single signal: the deployer wallet was the first user of Virtue\'s CDP on mainnet (opened a test CDP at `0xf67d0193…::cdp` on 2025-06-25) — canonical insider shape. No public brand presence (no `points.virtue.money`, no Virtue-points landing page). Likely a Virtue-internal unreleased points system or a close-collaborator build.',
-  deployers: ['0x6ff423cb66243ef1fb02dff88aeed580362e2b28f59b92e10b81074b49bea4e1'],
+  deployers: [{ address: '0x6ff423cb66243ef1fb02dff88aeed580362e2b28f59b92e10b81074b49bea4e1', network: 'mainnet' }],
   attribution: `
 Synthetic team id pending a public points-program announcement. On-chain footprint is 6 upgrade-versioned packages at \`0x6ff423cb66243ef1fb02dff88aeed580362e2b28f59b92e10b81074b49bea4e1\`, all sharing a tight module signature:
 
@@ -73,7 +73,7 @@ export const studioB9cf: Team = {
   id: 'studio-b9cf',
   name: 'Studio 0xb9cf086f (Multi-Asset Bank)',
   description: 'Anonymous operator of a generic multi-asset coin-bank on IOTA Rebased. Single package, single `bank` module — permit-gated `deposit<T> / withdraw<T>` flow holding IOTA (64.9k), CERT (3,950, Virtue LST), VUSD (1,097, Virtue stablecoin), and IBTC (2.6M base units). Fewer than 5 known permit holders, including the deployer + a small circle of known-recipient wallets. Small-scale insider / LP / treasury-management shape, not a user-facing product. No public brand surfaces.',
-  deployers: ['0xb9cf086f7e5e7932901b00e13310cd4ea53fe891722deaea4fbe50b348efc92e'],
+  deployers: [{ address: '0xb9cf086f7e5e7932901b00e13310cd4ea53fe891722deaea4fbe50b348efc92e', network: 'mainnet' }],
   attribution: `
 Synthetic team id pending operator identification. On-chain footprint is 1 package at \`0xb9cf086f7e5e7932901b00e13310cd4ea53fe891722deaea4fbe50b348efc92e\` (\`0x9d2108dc73f5ebf2b35135154d0b2237a4e882b357cd901040c2cd21d9bcce86\`, module \`bank\`).
 

@@ -18,7 +18,7 @@ export const seedlot: Team = {
     { label: 'X / Twitter', href: 'https://x.com/seed_lot' },
     { label: 'LinkedIn', href: 'https://linkedin.com/company/seedlot' },
   ],
-  deployers: ['0x52f3cf3925ac74c8da644016953f0a40dfa92150f5e50f62232dc51d93256746'],
+  deployers: [{ address: '0x52f3cf3925ac74c8da644016953f0a40dfa92150f5e50f62232dc51d93256746', network: 'mainnet' }],
   attribution: `
 Gold-standard attestation — on-chain \`Collective\` object self-identifies as "Lake Toba Collective" + domain-verified IOTA DID linkage + seedlot.io publicly names IOTA as its chain of record.
 

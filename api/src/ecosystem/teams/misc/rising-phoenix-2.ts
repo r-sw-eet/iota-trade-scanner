@@ -40,7 +40,7 @@ export const risingPhoenix2: Team = {
   ],
   deployers: [
     // IOTA Names — single-product deployer, 6 packages, all `name_registration` modules.
-    '0xfc684adb479789acb754d98b952deb46dbbeeaa9cb6d431b95c8f7d72e893af1',
+    { address: '0xfc684adb479789acb754d98b952deb46dbbeeaa9cb6d431b95c8f7d72e893af1', network: 'mainnet' },
     // Spam Club — 8 packages (spam/icon engine + SpamNFT PFP + mockcoin/
     // airdrop/test_nft/rebased_nft scaffolding). Port of Polymedia's Sui
     // Spam codebase by GitHub user `trungtt198x`; RP2 is the legal operator,
@@ -48,7 +48,7 @@ export const risingPhoenix2: Team = {
     // commemorative NFT) and the `layerZeroOft` aggregate (3 OFT wrappers).
     // Per-project routing resolves via `packageAddresses` / module-set
     // rules, so packages attribute correctly despite the shared deployer.
-    '0xd3906909a7bfc50ea9f4c0772a75bc99cd0da938c90ec05a556de1b5407bd639',
+    { address: '0xd3906909a7bfc50ea9f4c0772a75bc99cd0da938c90ec05a556de1b5407bd639', network: 'mainnet' },
   ],
   // Split IOTA-mark logo — left half: black dots on white background; right
   // half: white dots on black. Visual signal that RP2 is IOTA-family but a

@@ -15,7 +15,7 @@ export const studio2cd3: Team = {
   id: 'studio-2cd3',
   name: 'Studio 0x2cd37802 (Number 1)',
   description: 'Anonymous deployer behind the "Number 1 Collection" FreeNFT — the single largest user-facing campaign on IOTA Rebased by unique-sender count (1,045,000 distinct wallets) and by raw event volume (1,484,566 `EvtMintedNFT` events). Single package, single module (`free_nft`), public `mint_for_free` function. Active 2026-02-03 through 2026-03-15 (6-week window). No public brand presence — no site, no Twitter, no showcase entry.',
-  deployers: ['0x2cd378022200c182264a4f70a7c0ae0fb3007153ab68e232d51d6b0822a88e93'],
+  deployers: [{ address: '0x2cd378022200c182264a4f70a7c0ae0fb3007153ab68e232d51d6b0822a88e93', network: 'mainnet' }],
   attribution: `
 Synthetic team id for the operator of the "Number 1 Collection" FreeNFT campaign. On-chain footprint is a single package \`0x86a84861b13936bc8f1428645743d7d2f5cf7211cec6b9e56ba079ce34444c27\` (module \`free_nft\`, struct \`FreeNFT\`, public entry \`mint_for_free\`) deployed by \`0x2cd378022200c182264a4f70a7c0ae0fb3007153ab68e232d51d6b0822a88e93\`.
 

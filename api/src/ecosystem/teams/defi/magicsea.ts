@@ -10,7 +10,7 @@ export const magicsea: Team = {
     { label: 'Medium blog', href: 'https://magicseadex.medium.com/' },
     { label: 'Lumis docs', href: 'https://docs.magicsea.finance/protocol/nft-marketplace/lumis' },
   ],
-  deployers: ['0xddcfad87825d172c5810da3989d687d860142ca007f5d64264068c6bd4267af4'],
+  deployers: [{ address: '0xddcfad87825d172c5810da3989d687d860142ca007f5d64264068c6bd4267af4', network: 'mainnet' }],
   logo: '/logos/magicsea.png',
   attribution: `
 Named-brand attribution via docs.magicsea.finance/protocol/nft-marketplace/lumis, which is the canonical MagicSea doc page for the Lumis NFT collection. The on-chain Lumis collection matches the documented shape exactly: 3,333 total supply, 3-trait PFP (\`background\`, \`body\`, \`face\`), community-distributed, governance-adjacent utility.

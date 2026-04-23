@@ -24,7 +24,7 @@ export const kamui: Team = {
     { label: 'kamuipoc.vercel.app', href: 'https://kamuipoc.vercel.app' },
     { label: 'Mangekyou Labs GitHub', href: 'https://github.com/mangekyou-labs' },
   ],
-  deployers: ['0xb5de96379d9eb22739de93b983de28b8c7cbbf8c8f0ddf1390c090f7f6eb74db'],
+  deployers: [{ address: '0xb5de96379d9eb22739de93b983de28b8c7cbbf8c8f0ddf1390c090f7f6eb74db', network: 'mainnet' }],
   attribution: `
 On-chain self-labelling via the module name \`kamui_iota_vrf\` — brand-explicit naming that follows Mangekyou Labs' cross-chain convention (\`kamui\` on Solana, \`kamui-ink\` on Ink zkEVM L2, \`kamui_iota_vrf\` here on IOTA).
 

@@ -10,7 +10,7 @@ export const iotaPunks: Team = {
     { label: 'Twitter', href: 'https://x.com/IotaPunks_71' },
     { label: 'Figment Marketplace (legacy EVM)', href: 'https://www.figment.exchange/collections/0xa29b4352c170077ced94cd4d45d1de0f519841a6' },
   ],
-  deployers: ['0x8bfa0f4ba8ab9b2849e8fb99bcd4d43b9fdab2cf84f20e5d7a117ad74ab165ea'],
+  deployers: [{ address: '0x8bfa0f4ba8ab9b2849e8fb99bcd4d43b9fdab2cf84f20e5d7a117ad74ab165ea', network: 'mainnet' }],
   logo: '/logos/iotapunks.png',
   attribution: `
 Brand attribution via \`iotapunks.com\`: the site's \`og:title\` is "IOTAPUNKS - soon is now", its \`og:description\` matches the on-chain product shape exactly ("community-driven collectibles NFT project … using Cryptopunk as base design to then combine them"), and the project's Twitter handle \`@IotaPunks_71\` + Discord invite \`discord.gg/62dMNp6HXX\` surface a live community presence.

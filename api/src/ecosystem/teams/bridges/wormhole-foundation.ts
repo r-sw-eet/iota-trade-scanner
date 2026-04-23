@@ -8,7 +8,7 @@ export const wormholeFoundation: Team = {
     { label: 'Wormhole', href: 'https://wormhole.com' },
     { label: 'Pyth', href: 'https://pyth.network' },
   ],
-  deployers: ['0x610a7c8f0e7cb73d3c93d1b4919de1b76fc30a8efa8e967ccdbb1f7862ee6d27'],
+  deployers: [{ address: '0x610a7c8f0e7cb73d3c93d1b4919de1b76fc30a8efa8e967ccdbb1f7862ee6d27', network: 'mainnet' }],
   logo: '/logos/wormhole.ico',
   attribution: `
 Gold-standard attribution via Pyth Network's official IOTA deployment page (\`docs.pyth.network/price-feeds/contract-addresses/iota\`), which publishes both IOTA mainnet package addresses verbatim:

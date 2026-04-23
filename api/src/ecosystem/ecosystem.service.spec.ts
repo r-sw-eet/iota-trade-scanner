@@ -197,21 +197,28 @@ jest.mock('./projects', () => {
 });
 
 jest.mock('./teams', () => {
+  const m = (address: string, network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet') => ({
+    address,
+    network,
+  });
   const teams = [
-    { id: 'team-solo', name: 'Solo', deployers: ['0xSOLO'], logo: '/logos/solo.svg' },
-    { id: 'team-strict', name: 'Strict', deployers: ['0xSTRICT'] },
-    { id: 'team-shared-routing', name: 'Shared Routing', deployers: ['0xSTRICT'] },
-    { id: 'team-mixed', name: 'Mixed', deployers: ['0xMIXED'] },
-    { id: 'team-multi', name: 'Multi', deployers: ['0xMULTI'] },
+    { id: 'team-solo', name: 'Solo', deployers: [m('0xSOLO')], logo: '/logos/solo.svg' },
+    { id: 'team-strict', name: 'Strict', deployers: [m('0xSTRICT')] },
+    { id: 'team-shared-routing', name: 'Shared Routing', deployers: [m('0xSTRICT')] },
+    { id: 'team-mixed', name: 'Mixed', deployers: [m('0xMIXED')] },
+    { id: 'team-multi', name: 'Multi', deployers: [m('0xMULTI')] },
   ];
   return {
     ALL_TEAMS: teams,
     getTeam: (id: string | null | undefined) => (id ? teams.find((t) => t.id === id) : undefined),
-    getTeamByDeployer: (addr: string) => {
+    getTeamByDeployer: (addr: string, network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet') => {
       const low = addr.toLowerCase();
-      return teams.find((t) => t.deployers.some((d) => d.toLowerCase() === low));
+      return teams.find((t) =>
+        t.deployers.some((d) => d.network === network && d.address.toLowerCase() === low),
+      );
     },
     Team: undefined,
+    TeamDeployer: undefined,
   };
 });
 

@@ -12,8 +12,8 @@ export const clawnera: Team = {
     { label: 'SPEC sale', href: 'https://buy.spec-coin.cc' },
   ],
   deployers: [
-    '0x0a0d4c9a9f935dac9f9bee55ca0632c187077a04d0dffcc479402f2de9a82140',
-    '0x4468c8ddb42728fd1194033c1dd14ffd015f0d81e4b5329ddc11793c989f3f39',
+    { address: '0x0a0d4c9a9f935dac9f9bee55ca0632c187077a04d0dffcc479402f2de9a82140', network: 'mainnet' },
+    { address: '0x4468c8ddb42728fd1194033c1dd14ffd015f0d81e4b5329ddc11793c989f3f39', network: 'mainnet' },
   ],
   logo: '/logos/clawnera.png',
   attribution: `

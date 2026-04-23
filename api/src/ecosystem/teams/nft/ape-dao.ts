@@ -10,7 +10,7 @@ export const apeDao: Team = {
     { label: 'Lightpaper', href: 'https://0xapedao.medium.com/all-eyes-on-the-apedao-lightpaper-45a4e88656de' },
     { label: 'REMIX! Club on OpenSea (legacy Shimmer)', href: 'https://opensea.io/collection/ape-dao-remix' },
   ],
-  deployers: ['0x03ce67aaa3f321f24c07ffd864f719c922283de2d2880a03986c217dc2a3419b'],
+  deployers: [{ address: '0x03ce67aaa3f321f24c07ffd864f719c922283de2d2880a03986c217dc2a3419b', network: 'mainnet' }],
   logo: '/logos/apedao.png',
   attribution: `
 Brand attribution via public-web presence: \`apedao.finance\` is the DAO's main site; press coverage across CoinGecko, DappRadar, OpenSea, and IOTA-community news establishes ApeDAO as a DeFi hub for the IOTA/Shimmer ecosystem, governed by Ape NFTs with voting weight for both OG Ape and Lil' Ape holders.

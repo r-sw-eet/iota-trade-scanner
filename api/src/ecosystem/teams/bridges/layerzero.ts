@@ -12,21 +12,21 @@ export const layerzero: Team = {
   ],
   deployers: [
     // Protocol contracts (Endpoint, ULN, OApp, PTB builders, ZRO token, worker libs)
-    '0x8a81a6096a81fe2b722541bc19eb30e6c025732638375c362f07ea48979fd30a',
+    { address: '0x8a81a6096a81fe2b722541bc19eb30e6c025732638375c362f07ea48979fd30a', network: 'mainnet' },
     // DVN worker package publisher (one codebase instantiated 5× — Nethermind, LZ Labs, USDT0, Luganodes, Horizen)
-    '0x622796305d71e976f19d0183f43fd225310421542d0eb62cf0e878478d535422',
+    { address: '0x622796305d71e976f19d0183f43fd225310421542d0eb62cf0e878478d535422', network: 'mainnet' },
     // Executor worker package publisher (LayerZero Labs Executor instance)
-    '0x76f89ad2e913444040485b557c0dfee9e7a868dc9527ec7a6f363490c7e63651',
+    { address: '0x76f89ad2e913444040485b557c0dfee9e7a868dc9527ec7a6f363490c7e63651', network: 'mainnet' },
     // LayerZero Labs admin / ops account — publishes per-DVN-operator
     // identity packages at the 5 operator canonical addresses (Nethermind,
     // LZ Labs, USDT0, Luganodes, Horizen). Each published package has a
     // single `dvn_layerzero` module and its address matches the
     // `cap_type.Package.pos0` field on the corresponding DVN instance.
-    '0x9004e1e4c6dcc42d1b73269db48d510192665677fcad2079a3c7d1e9e971d34e',
+    { address: '0x9004e1e4c6dcc42d1b73269db48d510192665677fcad2079a3c7d1e9e971d34e', network: 'mainnet' },
     // Executor pricing-oracle publisher. Single package (`price_feed` +
     // `price_feed_witness`) feeding the off-chain Executor's cross-chain
     // fee quotes — see `layerZeroPriceFeed` project for on-chain evidence.
-    '0x6bf30187819863e878e9be862161941b07658012130f5519e34d728c03f143be',
+    { address: '0x6bf30187819863e878e9be862161941b07658012130f5519e34d728c03f143be', network: 'mainnet' },
     // Counter-example OApp deployer — ships the canonical LayerZero V2
     // tutorial OApp (modules `counter` / `counter_ptb_builder` / `msg_codec`
     // / `options_builder`). Dev/test scale (21 TXs, 2 senders). Co-created
@@ -34,7 +34,7 @@ export const layerzero: Team = {
     // EndpointV2 (`0xb8e0cd…`) + OApp (`0x2b14fe…`) + Worker (`0xd33a7a…`)
     // + Bytes32 (`0x56a262…`) packages — this is exactly the composition
     // LayerZero's tutorial-OApp deploy script produces. Added 2026-04-22.
-    '0xbd261819c7c6fb67593a96769072bf98b1fc048ccb342208da926f69f28a8724',
+    { address: '0xbd261819c7c6fb67593a96769072bf98b1fc048ccb342208da926f69f28a8724', network: 'mainnet' },
   ],
   logo: '/logos/layerzero.png',
   attribution: `

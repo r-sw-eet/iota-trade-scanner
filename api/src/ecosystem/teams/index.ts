@@ -1,4 +1,4 @@
-import { Team } from './team.interface';
+import { Team, TeamDeployer } from './team.interface';
 
 import { poolsFinance, virtue, swirl, cyberperp, iotaroyale, magicsea, studio6ff4, studioB9cf } from './defi/_index';
 import { tlip, twinFoundation, salus, seedlot } from './trade/_index';
@@ -90,10 +90,20 @@ export function getTeam(id: string | null | undefined): Team | undefined {
   return ALL_TEAMS.find((t) => t.id === id);
 }
 
-/** Find the team that claims the given deployer address (lowercased compare). */
-export function getTeamByDeployer(address: string): Team | undefined {
+/**
+ * Find the team that claims the given deployer address on the given network
+ * (lowercased compare on address). `network` defaults to `'mainnet'` — every
+ * pre-existing call site is mainnet, and keypairs don't carry across networks
+ * (see `TeamDeployer`), so network-aware lookup is a strict extension.
+ */
+export function getTeamByDeployer(
+  address: string,
+  network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
+): Team | undefined {
   const lower = address.toLowerCase();
-  return ALL_TEAMS.find((t) => t.deployers.some((d) => d.toLowerCase() === lower));
+  return ALL_TEAMS.find((t) =>
+    t.deployers.some((d) => d.network === network && d.address.toLowerCase() === lower),
+  );
 }
 
-export { Team };
+export { Team, TeamDeployer };

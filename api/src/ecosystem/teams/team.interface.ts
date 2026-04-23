@@ -1,3 +1,17 @@
+/**
+ * A single keypair belonging to a team, scoped to one IOTA network. Keypairs
+ * don't carry across networks — a team's testnet deployer is a different
+ * keypair from their mainnet deployer (hard constraint, see
+ * `plans/plan_testnet_support.md § Tag matrix`). The `network` tag makes that
+ * boundary explicit per entry.
+ */
+export interface TeamDeployer {
+  /** Deployer address on the given network (lowercased on compare). */
+  address: string;
+  /** IOTA network this keypair publishes on. */
+  network: 'mainnet' | 'testnet' | 'devnet';
+}
+
 export interface Team {
   /** Stable slug, e.g. 'iota-foundation-identity'. Referenced by ProjectDefinition.teamId. */
   id: string;
@@ -5,8 +19,12 @@ export interface Team {
   name: string;
   description?: string;
   urls?: { label: string; href: string }[];
-  /** Mainnet addresses known to publish packages for this team (lowercased on compare). */
-  deployers: string[];
+  /**
+   * Addresses known to publish packages for this team, tagged by network.
+   * `network` is required — keypairs are single-network by construction (see
+   * `TeamDeployer`). Address is lowercased on compare in `getTeamByDeployer`.
+   */
+  deployers: TeamDeployer[];
   /**
    * Marks this team as **IOTA Foundation proper** — IF's own product lines
    * and internal operations, not IF-partnered or IF-co-founded entities.

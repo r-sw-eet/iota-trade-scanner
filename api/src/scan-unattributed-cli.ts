@@ -235,7 +235,9 @@ async function main() {
     // routed into the team's routing-only project rather than unattributed.
     const deployer = pkgDeployer?.toLowerCase() ?? null;
     if (deployer) {
-      const candidateTeams = ALL_TEAMS.filter((t) => t.deployers.some((d) => d.toLowerCase() === deployer));
+      const candidateTeams = ALL_TEAMS.filter((t) =>
+        t.deployers.some((d) => d.network === 'mainnet' && d.address.toLowerCase() === deployer),
+      );
       let routed = false;
       for (const team of candidateTeams) {
         const routingOnly = ALL_PROJECTS.find((p) => p.teamId === team.id && !hasSyncMatch(p));

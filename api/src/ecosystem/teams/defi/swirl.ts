@@ -9,9 +9,9 @@ export const swirl: Team = {
     { label: 'Docs', href: 'https://docs.swirlstake.com' },
   ],
   deployers: [
-    '0x043b7d4d89c36bfcd37510aadadb90275622cf603344f39b29648c543742351c', // V1 — {pool, riota} architecture
-    '0x119191cd04c303b5cd872868a1898fe205c1eb9eaee9fb97c1ee87c943e40066', // V2 — {cert, math, native_pool, ownership, validator_set} architecture (primary)
-    '0x13b068af67f69cc9d4f85f33af1ad5d2d5800b4e8148e3c6a9a39bb018a73040', // V2 — same architecture, secondary deployer
+    { address: '0x043b7d4d89c36bfcd37510aadadb90275622cf603344f39b29648c543742351c', network: 'mainnet' },  // V1 — {pool, riota} architecture
+    { address: '0x119191cd04c303b5cd872868a1898fe205c1eb9eaee9fb97c1ee87c943e40066', network: 'mainnet' },  // V2 — {cert, math, native_pool, ownership, validator_set} architecture (primary)
+    { address: '0x13b068af67f69cc9d4f85f33af1ad5d2d5800b4e8148e3c6a9a39bb018a73040', network: 'mainnet' },  // V2 — same architecture, secondary deployer
   ],
   logo: '/logos/swirl.svg',
   attribution: `

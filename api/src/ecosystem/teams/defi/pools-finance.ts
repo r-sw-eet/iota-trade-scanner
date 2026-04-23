@@ -6,8 +6,8 @@ export const poolsFinance: Team = {
   description: 'First native DEX on IOTA Rebased — constant-product AMM with pool staking. LP-stake / farming primitives ship inside the audited AMM package (`stake*` modules), not as a separate farming contract.',
   urls: [{ label: 'Website', href: 'https://pools.finance' }],
   deployers: [
-    '0x519ebf6b900943042259f34bb17a6782061c5b6997d6c545c95a03271956800c',
-    '0xeadab2493d7aff3ac3951e545e9c61bef93dee1915e18aff50414d72067f88e7',
+    { address: '0x519ebf6b900943042259f34bb17a6782061c5b6997d6c545c95a03271956800c', network: 'mainnet' },
+    { address: '0xeadab2493d7aff3ac3951e545e9c61bef93dee1915e18aff50414d72067f88e7', network: 'mainnet' },
   ],
   logo: '/logos/pools-finance.svg',
   logoWordmark: '/logos/pools-finance-wordmark.svg',

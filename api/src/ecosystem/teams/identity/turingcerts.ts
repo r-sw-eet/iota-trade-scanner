@@ -22,7 +22,7 @@ export const turingcerts: Team = {
     { label: 'IOTA Technology Showcase', href: 'https://www.iota.org/learn/showcases/turing-space' },
     { label: 'UNDP Digital X Solution', href: 'https://digitalx.undp.org/Turingcerts_dx3.html' },
   ],
-  deployers: ['0xb0c359fa8075619cae1dc363786773c6291311cf98511f9127cb6d8f713314de'],
+  deployers: [{ address: '0xb0c359fa8075619cae1dc363786773c6291311cf98511f9127cb6d8f713314de', network: 'mainnet' }],
   attribution: `
 Gold-standard triangulation via official IOTA Foundation partnership announcement + on-chain self-labelling + use-case-fit metrics.
 

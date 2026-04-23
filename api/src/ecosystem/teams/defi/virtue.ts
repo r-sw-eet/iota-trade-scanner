@@ -8,7 +8,7 @@ export const virtue: Team = {
     { label: 'App', href: 'https://virtue.money' },
     { label: 'Docs', href: 'https://docs.virtue.money' },
   ],
-  deployers: ['0xf67d0193e9cd65c3c8232dbfe0694eb9e14397326bdc362a4fe9d590984f5a12'],
+  deployers: [{ address: '0xf67d0193e9cd65c3c8232dbfe0694eb9e14397326bdc362a4fe9d590984f5a12', network: 'mainnet' }],
   logo: '/logos/virtue.svg',
   logoWordmark: '/logos/virtue-wordmark.svg',
   attribution: `
