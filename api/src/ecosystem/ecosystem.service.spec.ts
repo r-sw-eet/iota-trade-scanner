@@ -6250,6 +6250,69 @@ describe('EcosystemService', () => {
       expect(testnetCursorModel.create).not.toHaveBeenCalled();
     });
 
+    it('graphql() routes to the testnet URL when called inside graphqlUrlContext.run(testnet); mainnet URL outside', async () => {
+      // Regression for the Phase 4c URL-routing bug: `fetchPackagePage` and
+      // every per-package probe helper call `this.graphql(query)` with no
+      // URL param; without the AsyncLocalStorage context, they would pick
+      // `this.graphqlUrl` = the mainnet URL on the scanner host, silently
+      // writing mainnet data into testnet-tagged snapshots.
+      fetchMock.mockResolvedValue({ json: async () => ({ data: {} }) });
+
+      // Outside any context — falls through to this.graphqlUrl (mainnet default in tests).
+      await (service as any).graphql('{ ping }');
+      expect(fetchMock).toHaveBeenLastCalledWith(
+        'https://graphql.mainnet.iota.cafe',
+        expect.objectContaining({ method: 'POST' }),
+      );
+
+      // Inside an explicit testnet context — must hit testnet.
+      await (service as any).graphqlUrlContext.run('https://graphql.testnet.iota.cafe', async () => {
+        await (service as any).graphql('{ ping }');
+      });
+      expect(fetchMock).toHaveBeenLastCalledWith(
+        'https://graphql.testnet.iota.cafe',
+        expect.objectContaining({ method: 'POST' }),
+      );
+
+      // Context is scoped to the run() callback — subsequent calls outside revert.
+      await (service as any).graphql('{ ping }');
+      expect(fetchMock).toHaveBeenLastCalledWith(
+        'https://graphql.mainnet.iota.cafe',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+
+    it('captureTestnetTick wraps its body in graphqlUrlContext.run so fetchPackagePage hits the testnet endpoint', async () => {
+      // Integration-style: don't stub `this.graphql`, only stub `fetch`. The
+      // sequence of fetch URLs must be all-testnet during the tick body.
+      fetchMock.mockImplementation(async () => ({
+        json: async () => ({
+          data: {
+            packages: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            objects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+          },
+        }),
+      }));
+      ecoModel.findOne = jest.fn().mockReturnValue({
+        sort: () => ({ lean: () => ({ exec: async () => null }) }),
+      }) as any;
+      ecoModel.create.mockResolvedValue({} as any);
+      testnetCursorModel.findOne = jest.fn().mockReturnValue({
+        exec: async () => ({ _id: 'testnet', tickCounter: 0, backfillAfterCursor: null }),
+      }) as any;
+      testnetCursorModel.updateOne = jest.fn().mockReturnValue({ exec: async () => ({}) }) as any;
+
+      await (service as any).captureTestnetTick();
+
+      // Every fetch call during the tick must target testnet — not one of them
+      // should leak the mainnet URL.
+      const urls = fetchMock.mock.calls.map((c) => c[0] as string);
+      expect(urls.length).toBeGreaterThan(0);
+      for (const u of urls) {
+        expect(u).toBe('https://graphql.testnet.iota.cafe');
+      }
+    });
+
     it('fetchPackagePage builds the correct GraphQL query shape and parses pageInfo', async () => {
       const graphqlSpy = jest
         .spyOn(service as any, 'graphql')

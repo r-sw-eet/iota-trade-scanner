@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Cron } from '@nestjs/schedule';
 import { Model } from 'mongoose';
 import { createHash } from 'crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   OnchainSnapshot,
   PackageFact,
@@ -1201,8 +1202,26 @@ export class EcosystemService implements OnModuleInit {
     };
   }
 
+  /**
+   * Per-call URL override for the GraphQL client. Used exclusively by Phase 4c
+   * (testnet priority-sharded capture) to target `graphql.testnet.iota.cafe`
+   * without having to thread a URL parameter through every probe helper.
+   *
+   * When `captureTestnetTick()` enters its body it wraps the work in
+   * `graphqlUrlContext.run(testnetUrl, …)`. Every `this.graphql()` call
+   * transitively nested inside that `run()` — including the ~10 helper
+   * methods (`countEvents`, `fetchEntryFunctions`, `probeIdentityFields`,
+   * etc.) — picks up the testnet URL from the async context without any
+   * signature change. Mainnet call paths don't use `run()`, so they see
+   * `undefined` from `getStore()` and fall back to `this.graphqlUrl` as
+   * before. Parallel mainnet+testnet captures work correctly: each async
+   * execution tree carries its own context, no cross-talk.
+   */
+  private readonly graphqlUrlContext = new AsyncLocalStorage<string>();
+
   private async graphql(query: string): Promise<any> {
-    const res = await fetch(this.graphqlUrl, {
+    const url = this.graphqlUrlContext.getStore() ?? this.graphqlUrl;
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
@@ -4099,6 +4118,15 @@ export class EcosystemService implements OnModuleInit {
     const deadlineMs = startedAt + EcosystemService.TESTNET_TICK_BUDGET_MS;
     const now = new Date(startedAt);
 
+    // Scope every nested `this.graphql(...)` call to the testnet endpoint via
+    // AsyncLocalStorage. Without this, helpers like `fetchEntryFunctions`
+    // and `probeIdentityFields` (which call `this.graphql(query)`) would use
+    // `this.graphqlUrl` = the mainnet URL on the scanner host — silently
+    // writing mainnet data into testnet-tagged snapshots. Mainnet captures
+    // running in parallel keep their own (empty) context and fall through
+    // to `this.graphqlUrl`, so there is no cross-talk.
+    const testnetUrl = GRAPHQL_URL_BY_NETWORK.testnet;
+    return this.graphqlUrlContext.run(testnetUrl, async () => {
     try {
       const state = await this.loadTestnetCursor();
       const kind: 'newest' | 'backfill' = state.tickCounter % 3 === 0 ? 'newest' : 'backfill';
@@ -4189,6 +4217,7 @@ export class EcosystemService implements OnModuleInit {
     } finally {
       this.capturingByNetwork['testnet'] = false;
     }
+    });
   }
 
   /**
