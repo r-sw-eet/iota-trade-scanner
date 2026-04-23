@@ -2192,15 +2192,23 @@ export class EcosystemService implements OnModuleInit {
    * A def with no synchronous criteria (empty `match`, or `match` containing
    * only `fingerprint`) is skipped here; it's only reachable via
    * `matchByFingerprint` or team-deployer routing downstream.
+   *
+   * `network`-scoped: only defs tagged with the scan's network are considered
+   * (default `'mainnet'` when absent for back-compat). Deployer-based
+   * matching (`deployerAddresses`) is also skipped on non-mainnet scans —
+   * keypairs don't carry across networks, so the registry can't route by
+   * address off mainnet. Module/address/fingerprint matching still runs.
    */
   private matchProject(
     mods: Set<string>,
     address: string,
     deployer: string | null,
+    network: 'mainnet' | 'testnet' | 'devnet',
   ): ProjectDefinition | null {
     const lowerAddr = address.toLowerCase();
     const lowerDeployer = deployer?.toLowerCase() ?? null;
     for (const def of ALL_PROJECTS) {
+      if ((def.network ?? 'mainnet') !== network) continue;
       if (!hasSyncMatch(def)) continue;
       const { match } = def;
 
@@ -2208,6 +2216,10 @@ export class EcosystemService implements OnModuleInit {
         if (!match.packageAddresses.some((a) => a.toLowerCase() === lowerAddr)) continue;
       }
       if (match.deployerAddresses?.length) {
+        // Skip deployer-based matching off mainnet — keypairs don't carry
+        // across networks. Packages on testnet/devnet can still be claimed
+        // via packageAddresses / module matchers / fingerprints.
+        if (network !== 'mainnet') continue;
         if (!lowerDeployer) continue;
         if (!match.deployerAddresses.some((a) => a.toLowerCase() === lowerDeployer)) continue;
       }
@@ -2663,8 +2675,13 @@ export class EcosystemService implements OnModuleInit {
     return { identifiers: Array.from(idents), objectType: sampledType };
   }
 
-  private async matchByFingerprint(mods: Set<string>, address: string): Promise<ProjectDefinition | null> {
+  private async matchByFingerprint(
+    mods: Set<string>,
+    address: string,
+    network: 'mainnet' | 'testnet' | 'devnet',
+  ): Promise<ProjectDefinition | null> {
     for (const def of ALL_PROJECTS) {
+      if ((def.network ?? 'mainnet') !== network) continue;
       const fp = def.match.fingerprint;
       if (!fp) continue;
       const fpModule = fp.type.split('::')[0];
@@ -2879,6 +2896,12 @@ export class EcosystemService implements OnModuleInit {
    * A new project definition landed today retroactively re-labels every
    * historical snapshot at read time (schema independence goal), because
    * the matching lookup happens here, not at capture.
+   *
+   * `raw.network` threads through as the scan network. Only project defs
+   * with `def.network === raw.network` are considered; deployer-based
+   * matching and team-deployer routing skip on non-mainnet scans. Emits a
+   * WARN when a non-mainnet scan classifies zero packages — usually a
+   * registry gap worth investigating.
    */
   private async classifyFromRaw(raw: {
     _id?: unknown;
@@ -2887,7 +2910,10 @@ export class EcosystemService implements OnModuleInit {
     networkTxTotal: number;
     txRates: Record<string, number>;
     createdAt?: Date;
+    network?: string;
   }) {
+    const scanNetwork: 'mainnet' | 'testnet' | 'devnet' =
+      raw.network === 'testnet' || raw.network === 'devnet' ? raw.network : 'mainnet';
     const projectMap = new Map<string, { def: ProjectDefinition; facts: PackageFact[]; splitDeployer?: string }>();
     // Unmatched packages grouped by deployer. `unknown` collects packages
     // whose deployer resolves to null (framework / legacy publish records).
@@ -2895,14 +2921,14 @@ export class EcosystemService implements OnModuleInit {
     for (const pkg of raw.packages) {
       const mods = new Set(pkg.modules);
       const pkgDeployer = pkg.deployer;
-      let def = this.matchProject(mods, pkg.address, pkgDeployer);
+      let def = this.matchProject(mods, pkg.address, pkgDeployer, scanNetwork);
       // When the synchronous match is an aggregate bucket, consult fingerprint
       // first — a more-specific project may claim this package by `issuer`/`tag`.
       if (def?.splitByDeployer) {
-        const fp = await this.matchByFingerprint(mods, pkg.address);
+        const fp = await this.matchByFingerprint(mods, pkg.address, scanNetwork);
         if (fp && fp.name !== def.name) def = fp;
       }
-      if (!def) def = await this.matchByFingerprint(mods, pkg.address);
+      if (!def) def = await this.matchByFingerprint(mods, pkg.address, scanNetwork);
       if (!def) {
         const key = pkgDeployer?.toLowerCase() ?? 'unknown';
         const bucket = unattributedByDeployer.get(key);
@@ -2932,14 +2958,21 @@ export class EcosystemService implements OnModuleInit {
         // belong to multiple teams (e.g. `0x164625aa…` is on both TWIN and
         // iota-foundation). Pick the first team that exposes a routing-only
         // project; if none do, the package stays in the aggregate bucket
-        // split by deployer.
-        const candidateTeams = ALL_TEAMS.filter((t) =>
-          t.deployers.some((d) => d.network === 'mainnet' && d.address.toLowerCase() === deployer),
-        );
+        // split by deployer. Skipped on non-mainnet scans — keypairs don't
+        // carry across networks, so a testnet aggregate bucket has no
+        // team-deployer routing to apply.
+        const candidateTeams =
+          scanNetwork === 'mainnet'
+            ? ALL_TEAMS.filter((t) =>
+                t.deployers.some(
+                  (d) => d.network === 'mainnet' && d.address.toLowerCase() === deployer,
+                ),
+              )
+            : [];
         let routed = false;
         for (const team of candidateTeams) {
           const routingOnly = ALL_PROJECTS.find(
-            (p) => p.teamId === team.id && isRoutingOnly(p),
+            (p) => p.teamId === team.id && isRoutingOnly(p) && (p.network ?? 'mainnet') === scanNetwork,
           );
           if (!routingOnly) continue;
           def = routingOnly;
@@ -3086,7 +3119,7 @@ export class EcosystemService implements OnModuleInit {
       ];
       const knownDeployers = new Set(
         (team?.deployers ?? [])
-          .filter((d) => d.network === 'mainnet')
+          .filter((d) => d.network === scanNetwork)
           .map((d) => d.address.toLowerCase()),
       );
       const anomalousDeployers = detectedDeployers.filter((d) => !knownDeployers.has(d));
@@ -3448,6 +3481,15 @@ export class EcosystemService implements OnModuleInit {
       `classifyFromRaw: ${projects.length} projects, ` +
         `${unattributed.length} unattributed cluster(s) / ${totalUnattributedPackages} package(s)`,
     );
+    // Non-mainnet zero-match signal — usually a registry gap worth
+    // investigating. A mainnet snapshot with zero matches is a genuine
+    // bug; log at WARN here rather than ERROR so testnet-first iteration
+    // (registry still being built out) doesn't spam alarms.
+    if (scanNetwork !== 'mainnet' && projects.length === 0 && raw.packages.length > 0) {
+      this.logger.warn(
+        `classifyFromRaw: ${scanNetwork} snapshot with ${raw.packages.length} packages produced zero matches — registry likely missing testnet-tagged defs.`,
+      );
+    }
 
     // L1-only return. L2 projects are synthesized in `enrichWithTvl` from
     // DefiLlama; `l2: []` here is a placeholder so consumers that read from

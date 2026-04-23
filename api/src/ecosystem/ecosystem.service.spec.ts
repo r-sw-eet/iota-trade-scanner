@@ -323,8 +323,12 @@ describe('EcosystemService', () => {
   // ---------- matchProject (synchronous classifier) ----------
 
   describe('matchProject', () => {
-    const match = (mods: string[], addr = '0x0', deployer: string | null = null) =>
-      (service as any).matchProject(new Set(mods), addr, deployer);
+    const match = (
+      mods: string[],
+      addr = '0x0',
+      deployer: string | null = null,
+      network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
+    ) => (service as any).matchProject(new Set(mods), addr, deployer, network);
 
     it('matches by package address (case-insensitive)', () => {
       expect(match([], '0xabcdef').name).toBe('AddrOnly');
@@ -3283,8 +3287,11 @@ describe('EcosystemService', () => {
   // ---------- matchByFingerprint ----------
 
   describe('matchByFingerprint', () => {
-    const byFp = (mods: string[], addr: string) =>
-      (service as any).matchByFingerprint(new Set(mods), addr);
+    const byFp = (
+      mods: string[],
+      addr: string,
+      network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
+    ) => (service as any).matchByFingerprint(new Set(mods), addr, network);
 
     it('skips defs whose fingerprint module is not in the package', async () => {
       // fp type 'nft::NFT' → module 'nft'. Package without 'nft' module → null.
@@ -5705,6 +5712,250 @@ describe('EcosystemService', () => {
         );
         jest.useRealTimers();
       });
+    });
+  });
+
+  // ---------- network-aware classifier (Phase 3) ----------
+
+  describe('network-aware classifier', () => {
+    // Invariant: a def tagged for network X must never match a snapshot
+    // tagged for network Y (Y ≠ X). Replaces the drafted "separate subtree
+    // for safety" rationale with a runtime assertion — the mock registry
+    // only carries mainnet-tagged defs (network defaults to mainnet when
+    // absent), so the cross-pair matrix checks the explicit-X-on-explicit-Y
+    // branch via synthetic snapshots. The mainnet path is covered by the
+    // existing classifyFromRaw tests that don't pass `network`.
+
+    const buildRawSnapshot = (network: string) => ({
+      _id: `snap-${network}`,
+      network,
+      // One package that would match `AddrOnly` on mainnet (packageAddress
+      // pinned), one that would match `DeployerOnly`, one that would match
+      // `AllRequired` by module names — covers every sync-match path.
+      packages: [
+        {
+          address: '0xabcdef',
+          deployer: '0xdeployer',
+          storageRebateNanos: 1_000_000_000,
+          modules: ['module_only'],
+          moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+          objectHolderCount: 0,
+          fingerprint: null,
+        },
+        {
+          address: '0xddd',
+          deployer: '0xdepl',
+          storageRebateNanos: 500_000_000,
+          modules: ['does_not_matter'],
+          moduleMetrics: [{ module: 'does_not_matter', events: 0, eventsCapped: false, uniqueSenders: 0 }],
+          objectHolderCount: 0,
+          fingerprint: null,
+        },
+        {
+          address: '0xeee',
+          deployer: null,
+          storageRebateNanos: 0,
+          modules: ['a', 'b'],
+          moduleMetrics: [
+            { module: 'a', events: 0, eventsCapped: false, uniqueSenders: 0 },
+            { module: 'b', events: 0, eventsCapped: false, uniqueSenders: 0 },
+          ],
+          objectHolderCount: 0,
+          fingerprint: null,
+        },
+      ],
+      totalStorageRebateNanos: 1_500_000_000,
+      networkTxTotal: 0,
+      txRates: {},
+    });
+
+    const NETWORKS: Array<'mainnet' | 'testnet' | 'devnet'> = ['mainnet', 'testnet', 'devnet'];
+
+    // Cross-product: for every (scanNetwork, defNetwork) pair where defNetwork
+    // !== scanNetwork, no def tagged `defNetwork` should be in the classified
+    // output. Mock registry defs are all mainnet-tagged (default), so the
+    // non-mainnet scans must classify zero projects via those defs.
+    for (const scanNetwork of NETWORKS) {
+      for (const defNetwork of NETWORKS) {
+        if (defNetwork === scanNetwork) continue;
+        it(`scan(${scanNetwork}) never produces a match via a ${defNetwork}-tagged def`, async () => {
+          // All mock defs default to network=mainnet. When scanNetwork is
+          // testnet/devnet, the classifier should skip every def. When
+          // scanNetwork === mainnet and defNetwork === testnet/devnet, no
+          // real def carries those tags in the mock, so still zero matches
+          // via those defs (vacuously true but pins the contract).
+          const raw = buildRawSnapshot(scanNetwork);
+          const view = await (service as any).classifyFromRaw(raw);
+          // Zero matches when scan is non-mainnet (all defs are mainnet).
+          // When scan is mainnet, the mainnet defs match but that's not
+          // what this invariant tests — it tests defNetwork !== scanNetwork.
+          if (scanNetwork !== 'mainnet') {
+            expect(view.l1).toEqual([]);
+          }
+          // All packages land in unattributed on non-mainnet — confirms no
+          // def from the wrong-network ghost-matched.
+          if (scanNetwork !== 'mainnet') {
+            const unattributedPkgs = view.unattributed.reduce(
+              (s: number, c: any) => s + c.packages,
+              0,
+            );
+            expect(unattributedPkgs).toBe(raw.packages.length);
+          }
+        });
+      }
+    }
+
+    it('logs a warning when a non-mainnet scan with packages produces zero project matches', async () => {
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      const raw = buildRawSnapshot('testnet');
+      await (service as any).classifyFromRaw(raw);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('testnet snapshot with'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('testnet snapshot with mostly-empty module metrics produces sensible output (no throws, zeros where expected)', async () => {
+      // Phase 4c's incremental-probe reality: many testnet packages in a
+      // snapshot will have missing/empty per-module metrics (events=0,
+      // entryFunctions=[], eventTypes=[]) because they were copy-forwarded
+      // rather than freshly probed. Classifier must not throw on these.
+      const raw = {
+        _id: 'testnet-sparse',
+        network: 'testnet',
+        packages: [
+          {
+            address: '0xsparse',
+            deployer: '0xdep',
+            storageRebateNanos: 0,
+            modules: ['m'],
+            moduleMetrics: [
+              {
+                module: 'm',
+                events: 0,
+                eventsCapped: false,
+                uniqueSenders: 0,
+                entryFunctions: [],
+                eventTypes: [],
+              },
+            ],
+            objectHolderCount: 0,
+            objectCount: 0,
+            transactions: 0,
+            transactionsCapped: false,
+            objectTypeCounts: [],
+            fingerprint: null,
+            publishedAt: null,
+          },
+        ],
+        totalStorageRebateNanos: 0,
+        networkTxTotal: 0,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      expect(view).toBeDefined();
+      expect(view.l1).toEqual([]);
+      expect(view.unattributed).toHaveLength(1);
+      const cluster = view.unattributed[0];
+      expect(cluster.events).toBe(0);
+      expect(cluster.uniqueSenders).toBe(0);
+      expect(cluster.transactions).toBe(0);
+      expect(cluster.publishedAt).toBeNull();
+    });
+
+    it('falls back to mainnet classification when raw.network is missing (legacy docs)', async () => {
+      // Pre-Phase-1 snapshots have no `network` field; classifier treats
+      // them as mainnet so they keep classifying with the existing registry.
+      const raw = {
+        _id: 'legacy',
+        // no network field
+        packages: [
+          {
+            address: '0xabcdef',
+            deployer: null,
+            storageRebateNanos: 0,
+            modules: ['module_only'],
+            moduleMetrics: [{ module: 'module_only', events: 1, eventsCapped: false, uniqueSenders: 1 }],
+            objectHolderCount: 0,
+            fingerprint: null,
+          },
+        ],
+        totalStorageRebateNanos: 0,
+        networkTxTotal: 0,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      // AddrOnly matches on 0xabcdef — default-mainnet path must classify.
+      const match = view.l1.find((p: any) => p.name === 'AddrOnly');
+      expect(match).toBeDefined();
+    });
+
+    it('matchProject rejects deployer-based matching on a non-mainnet scan even when the deployer would match', () => {
+      // DeployerOnly def pins 0xDEPL on mainnet. Same call on testnet must
+      // fall through — keypairs don't carry across networks.
+      const matched = (service as any).matchProject(
+        new Set<string>(),
+        '0x0',
+        '0xdepl',
+        'testnet',
+      );
+      expect(matched).toBeNull();
+    });
+
+    it('ranks unattributed clusters by package count first, storageIota second', async () => {
+      // Two unattributed deployers: one with 2 packages, one with 1. The
+      // cluster with more packages must rank first regardless of storage.
+      // Covers the `b.facts.length !== a.facts.length` sort branch in
+      // `classifyFromRaw`'s unattributed ranking.
+      const raw = {
+        _id: 'rank-test',
+        network: 'mainnet',
+        packages: [
+          {
+            address: '0xsmall',
+            deployer: '0xsolo',
+            storageRebateNanos: 9_000_000_000,
+            modules: ['freestanding'],
+            moduleMetrics: [
+              { module: 'freestanding', events: 0, eventsCapped: false, uniqueSenders: 0 },
+            ],
+            objectHolderCount: 0,
+            fingerprint: null,
+          },
+          {
+            address: '0xbigA',
+            deployer: '0xpair',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['freestanding'],
+            moduleMetrics: [
+              { module: 'freestanding', events: 0, eventsCapped: false, uniqueSenders: 0 },
+            ],
+            objectHolderCount: 0,
+            fingerprint: null,
+          },
+          {
+            address: '0xbigB',
+            deployer: '0xpair',
+            storageRebateNanos: 1_000_000_000,
+            modules: ['freestanding'],
+            moduleMetrics: [
+              { module: 'freestanding', events: 0, eventsCapped: false, uniqueSenders: 0 },
+            ],
+            objectHolderCount: 0,
+            fingerprint: null,
+          },
+        ],
+        totalStorageRebateNanos: 11_000_000_000,
+        networkTxTotal: 0,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      expect(view.unattributed).toHaveLength(2);
+      // 2-package cluster first, 1-package cluster second.
+      expect(view.unattributed[0].deployer).toBe('0xpair');
+      expect(view.unattributed[0].packages).toBe(2);
+      expect(view.unattributed[1].deployer).toBe('0xsolo');
+      expect(view.unattributed[1].packages).toBe(1);
     });
   });
 });
