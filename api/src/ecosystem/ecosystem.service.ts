@@ -321,7 +321,14 @@ export interface Project {
 interface PackageInfo {
   address: string;
   storageRebate: string;
-  modules: { nodes: { name: string }[] };
+  modules: {
+    nodes: {
+      name: string;
+      functions?: {
+        nodes: { name: string; visibility: string; isEntry: boolean }[];
+      } | null;
+    }[];
+  };
   previousTransactionBlock: {
     sender: { address: string } | null;
     effects: { timestamp: string | null } | null;
@@ -375,7 +382,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 6;
+  private static readonly CLASSIFIER_VERSION = 7;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -1017,7 +1024,14 @@ export class EcosystemService implements OnModuleInit {
           nodes {
             address
             storageRebate
-            modules { nodes { name } }
+            modules(first: 50) {
+              nodes {
+                name
+                functions(first: 50) {
+                  nodes { name visibility isEntry }
+                }
+              }
+            }
             previousTransactionBlock {
               sender { address }
               effects { timestamp }
@@ -1943,6 +1957,38 @@ export class EcosystemService implements OnModuleInit {
    * highest-specificity / strongest-signal first so a reader can scan the
    * first entry and stop when satisfied.
    */
+  /**
+   * Classify a module's entry-function set into coarse domain hints. Matches
+   * on prefix / substring patterns; a package's hint is the first category
+   * whose signature functions all show up in the combined entry-fn list.
+   * Returns null when no hint applies (unknown shape / too sparse).
+   *
+   * Patterns come from common Move DeFi/NFT idioms — `swap` + `add_liquidity`
+   * is nearly pathognomonic for DEXes; `mint` + `burn` for NFTs, etc.
+   * Deliberately conservative — false "could be a DEX" is worse than silence.
+   */
+  private inferDomainFromEntryFunctions(entryFns: string[]): string | null {
+    if (entryFns.length === 0) return null;
+    const set = new Set(entryFns.map((n) => n.toLowerCase()));
+    const has = (pat: string) => {
+      for (const n of set) if (n === pat || n.includes(pat)) return true;
+      return false;
+    };
+    // DEX — swap + liquidity pair. Covers Uniswap-style, Balancer-style.
+    if (has('swap') && (has('add_liquidity') || has('remove_liquidity'))) return 'DEX-shaped (swap + liquidity entry fns)';
+    // Lending / CDP — borrow/repay or liquidate.
+    if ((has('borrow') && has('repay')) || has('liquidate')) return 'Lending-shaped (borrow/repay/liquidate)';
+    // Staking — stake + unstake.
+    if (has('stake') && (has('unstake') || has('withdraw'))) return 'Staking-shaped (stake/unstake)';
+    // NFT mint/burn. The `mint` check is scoped to avoid matching `mint_admin_cap`.
+    if (has('mint') && has('burn')) return 'NFT-shaped (mint + burn entry fns)';
+    // Bridge / cross-chain.
+    if (has('lock') && (has('unlock') || has('redeem'))) return 'Bridge-shaped (lock/unlock)';
+    // Identity / credentials.
+    if (has('issue') && (has('revoke') || has('verify'))) return 'Credential-shaped (issue/verify)';
+    return null;
+  }
+
   private buildClusterInsights(ctx: {
     packageCount: number;
     uniqueSenders: number;
@@ -1955,6 +2001,8 @@ export class EcosystemService implements OnModuleInit {
     latestPublishedAt: Date | null;
     /** Cross-cluster pairing: an attributed project published within ±10 min of this cluster's latest package. Empty when no pairing was found. */
     publishNeighbors: { name: string; slug: string; minutesDelta: number }[];
+    /** Union of public entry-function names across the cluster's modules — fed to `inferDomainFromEntryFunctions`. */
+    entryFunctions: string[];
     /** Now, injected so the age calc is deterministic in tests. */
     now: Date;
   }): string[] {
@@ -2010,6 +2058,9 @@ export class EcosystemService implements OnModuleInit {
     if (ctx.packageCount >= 5) {
       out.push(`${ctx.packageCount}-package footprint — likely a multi-contract protocol`);
     }
+
+    const domain = this.inferDomainFromEntryFunctions(ctx.entryFunctions);
+    if (domain) out.push(domain);
 
     return out;
   }
@@ -2283,6 +2334,23 @@ export class EcosystemService implements OnModuleInit {
       const publishedIso = pkg.previousTransactionBlock?.effects?.timestamp ?? null;
       const publishedAt = publishedIso ? new Date(publishedIso) : null;
 
+      // Build a per-module `entryFunctions` index upfront. Public entry
+      // functions are static per deployed module (they don't change between
+      // scans — they only shift on upgrade), so we read them from the
+      // `packages` response we already paid for in `getAllPackages` rather
+      // than making a second round-trip. Filter to `visibility=PUBLIC` +
+      // `isEntry=true` because non-public fns are internal plumbing and
+      // non-entry public fns don't receive TX calls — only entry fns
+      // contribute to the "what does this package do" signal.
+      const entryFunctionsByModule = new Map<string, string[]>();
+      for (const modNode of pkg.modules?.nodes ?? []) {
+        const names: string[] = [];
+        for (const f of modNode.functions?.nodes ?? []) {
+          if (f.visibility === 'PUBLIC' && f.isEntry) names.push(f.name);
+        }
+        entryFunctionsByModule.set(modNode.name, names);
+      }
+
       // Per-module counters. These stay cumulative across scans so delta
       // queries are plain subtraction between any two snapshots.
       const moduleMetrics: ModuleMetrics[] = [];
@@ -2294,6 +2362,7 @@ export class EcosystemService implements OnModuleInit {
           events,
           eventsCapped,
           uniqueSenders,
+          entryFunctions: entryFunctionsByModule.get(mod) ?? [],
         });
       }
 
@@ -2839,6 +2908,18 @@ export class EcosystemService implements OnModuleInit {
         publishNeighbors.sort((a, b) => Math.abs(a.minutesDelta) - Math.abs(b.minutesDelta));
       }
 
+      // Flatten the cluster's entry-function set for domain-hint matching.
+      // Deduped in a Set so a repeated `swap` across 5 modules doesn't get
+      // counted five times; the matcher only cares about presence.
+      const clusterEntryFunctions = new Set<string>();
+      for (const pkg of facts) {
+        for (const mm of pkg.moduleMetrics) {
+          for (const fn of (mm as any).entryFunctions ?? []) {
+            clusterEntryFunctions.add(fn);
+          }
+        }
+      }
+
       const insights = this.buildClusterInsights({
         packageCount: facts.length,
         uniqueSenders,
@@ -2849,6 +2930,7 @@ export class EcosystemService implements OnModuleInit {
         deployerIsUnknown: deployer === 'unknown',
         latestPublishedAt,
         publishNeighbors,
+        entryFunctions: Array.from(clusterEntryFunctions),
         now: new Date(),
       });
 

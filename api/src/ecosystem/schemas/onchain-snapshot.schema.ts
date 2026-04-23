@@ -47,6 +47,18 @@ export class ModuleMetrics {
    * every scan's `ProjectSenders` state.
    */
   @Prop({ required: true, default: 0 }) uniqueSenders: number;
+
+  /**
+   * Public entry-function names exposed by this module (filtered to
+   * `visibility=PUBLIC` + `isEntry=true` at capture time). Orders of
+   * magnitude more informative than the bare module name for classifying
+   * logic-only packages — `swap`/`add_liquidity`/`remove_liquidity` is
+   * "DEX" regardless of module name, `mint_nft`/`burn_nft` is "NFT", etc.
+   *
+   * Empty array on snapshots predating this field and on modules with no
+   * public entry functions.
+   */
+  @Prop({ type: [String], default: [] }) entryFunctions: string[];
 }
 
 /**

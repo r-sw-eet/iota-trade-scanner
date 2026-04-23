@@ -404,6 +404,7 @@ describe('EcosystemService', () => {
     const DEFAULTS = {
       latestPublishedAt: null,
       publishNeighbors: [] as { name: string; slug: string; minutesDelta: number }[],
+      entryFunctions: [] as string[],
       now: new Date('2026-04-23T00:00:00Z'),
     };
     const build = (ctx: any) =>
@@ -520,6 +521,123 @@ describe('EcosystemService', () => {
         publishNeighbors: [{ name: 'ISC Anchor', slug: 'isc-anchor', minutesDelta: -2 }],
       });
       expect(insights).toContain('Published 2 min before ISC Anchor');
+    });
+
+    it('tags DEX-shape when entry functions include swap + liquidity ops', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 10, transactions: 20, events: 5,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['swap_exact_tokens_for_iota', 'add_liquidity', 'remove_liquidity'],
+      });
+      expect(insights).toContain('DEX-shaped (swap + liquidity entry fns)');
+    });
+
+    it('tags NFT-shape when entry functions include mint + burn', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 5, transactions: 8, events: 3,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['mint_nft', 'burn_nft', 'transfer'],
+      });
+      expect(insights).toContain('NFT-shaped (mint + burn entry fns)');
+    });
+
+    it('tags Lending-shape on liquidate alone (borrow/repay optional)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 3,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['liquidate_position', 'update_oracle'],
+      });
+      expect(insights).toContain('Lending-shaped (borrow/repay/liquidate)');
+    });
+
+    it('tags Staking-shape on stake + unstake', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 4, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['stake_iota', 'unstake_iota'],
+      });
+      expect(insights).toContain('Staking-shaped (stake/unstake)');
+    });
+
+    it('tags Staking-shape on stake + withdraw', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 4, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['stake', 'withdraw'],
+      });
+      expect(insights).toContain('Staking-shaped (stake/unstake)');
+    });
+
+    it('tags Bridge-shape on lock + unlock', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 4, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['lock_tokens', 'unlock_tokens'],
+      });
+      expect(insights).toContain('Bridge-shaped (lock/unlock)');
+    });
+
+    it('tags Bridge-shape on lock + redeem', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 4, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['lock', 'redeem'],
+      });
+      expect(insights).toContain('Bridge-shaped (lock/unlock)');
+    });
+
+    it('tags Credential-shape on issue + verify', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 4, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['issue_vc', 'verify_vc'],
+      });
+      expect(insights).toContain('Credential-shaped (issue/verify)');
+    });
+
+    it('tags Credential-shape on issue + revoke', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 4, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['issue', 'revoke'],
+      });
+      expect(insights).toContain('Credential-shaped (issue/verify)');
+    });
+
+    it('tags Lending-shape on borrow + repay (liquidate absent)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 4, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['borrow', 'repay'],
+      });
+      expect(insights).toContain('Lending-shaped (borrow/repay/liquidate)');
+    });
+
+    it('tags DEX-shape on swap + remove_liquidity alone (add absent)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 5, transactions: 10, events: 3,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['swap', 'remove_liquidity'],
+      });
+      expect(insights).toContain('DEX-shaped (swap + liquidity entry fns)');
+    });
+
+    it('returns no domain hint when entryFunctions is empty', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 0, transactions: 0, events: 0,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: [],
+      });
+      expect(insights.find((s: string) => s.includes('shaped'))).toBeUndefined();
+    });
+
+    it('stays silent about domain when entry functions do not match any pattern', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 2, transactions: 2, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['do_the_thing', 'other_thing'],
+      });
+      expect(insights.find((s: string) => s.includes('shaped'))).toBeUndefined();
     });
 
     it('stays silent about deployer-sender patterns when the deployer is unknown (framework packages)', () => {
@@ -876,6 +994,32 @@ describe('EcosystemService', () => {
       expect(unattr.publishedAt).toBeNull();
       // No age-tag insight since we can't compute it
       expect(unattr.insights.find((s: string) => /Deployed (in the last 24 h|\d+ day)/.test(s))).toBeUndefined();
+    });
+
+    it('feeds the cluster-level entry-function union into the domain matcher (NFT-shape hint)', async () => {
+      const raw = {
+        _id: 'raw-entryfn',
+        packages: [
+          {
+            address: '0x777777',
+            deployer: '0xnftguy',
+            storageRebateNanos: 500_000_000,
+            modules: ['collection'],
+            moduleMetrics: [{
+              module: 'collection',
+              events: 10, eventsCapped: false, uniqueSenders: 3,
+              entryFunctions: ['mint_nft', 'burn_nft', 'transfer_nft'],
+            }],
+            objectCount: 0, fingerprint: null,
+          },
+        ],
+        totalStorageRebateNanos: 500_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const c = view.unattributed[0];
+      expect(c.insights).toContain('NFT-shaped (mint + burn entry fns)');
     });
 
     it('skips deployer-sender patterns for unknown-deployer clusters (framework packages)', async () => {
