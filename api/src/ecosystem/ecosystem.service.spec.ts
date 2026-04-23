@@ -3454,6 +3454,20 @@ describe('EcosystemService', () => {
           if (body.includes('events(filter:') && body.includes('last: 1')) {
             return { json: async () => ({ data: { events: { pageInfo: { endCursor: null } } } }) };
           }
+          // Per-package entry-function probe from `fetchEntryFunctions`.
+          // Distinguishable from the datatypes query below by `functions(` in
+          // the selection set. Rehydrates the inline `pkg()` shape built in
+          // this test — the real `packages(...)` paginator no longer returns
+          // functions (cap violation), so the mock looks them up from the
+          // script and reserves them for this second-pass query instead.
+          if (body.includes('asMovePackage') && body.includes('functions(first')) {
+            const unescaped = body.replace(/\\/g, '');
+            const m = /address: "([^"]+)"/.exec(unescaped);
+            const addr = m?.[1] ?? '';
+            const pkgNode = script.packages.find((p: any) => p.address === addr);
+            const nodes = pkgNode?.modules?.nodes ?? [];
+            return { json: async () => ({ data: { object: { asMovePackage: { modules: { nodes } } } } }) };
+          }
           // MovePackage module/datatypes enumeration from `captureObjectTypesForPackage`.
           // Return an empty module list so `updateHoldersForType` is never reached via capture.
           if (body.includes('asMovePackage') && body.includes('datatypes(')) {
@@ -5322,6 +5336,53 @@ describe('EcosystemService', () => {
         const r = await (service as any).countObjectsForType('0xpkg::m::T');
         // Page 1 succeeded with 50 nodes; page 2 broke the loop without hitting end-of-data → not capped, not capped-by-budget either.
         expect(r).toEqual({ count: 50, capped: false });
+      });
+    });
+
+    describe('fetchEntryFunctions', () => {
+      it('returns a per-module map of PUBLIC + isEntry function names; filters out non-public and non-entry', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          object: {
+            asMovePackage: {
+              modules: {
+                nodes: [
+                  {
+                    name: 'amm',
+                    functions: {
+                      nodes: [
+                        { name: 'swap', visibility: 'PUBLIC', isEntry: true },
+                        { name: 'add_liquidity', visibility: 'PUBLIC', isEntry: true },
+                        { name: '_internal_helper', visibility: 'FRIEND', isEntry: false },
+                        { name: 'public_view', visibility: 'PUBLIC', isEntry: false },
+                        { name: 'private_entry', visibility: 'PRIVATE', isEntry: true },
+                      ],
+                    },
+                  },
+                  { name: 'empty_module', functions: { nodes: [] } },
+                ],
+              },
+            },
+          },
+        });
+        const r: Map<string, string[]> = await (service as any).fetchEntryFunctions('0xpkg');
+        expect([...r.entries()]).toEqual([
+          ['amm', ['swap', 'add_liquidity']],
+          ['empty_module', []],
+        ]);
+      });
+
+      it('returns an empty map on graphql error — capture stays resilient, classifier treats missing as "no hint"', async () => {
+        const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+        jest.spyOn(service as any, 'graphql').mockRejectedValueOnce(new Error('100k output cap'));
+        const r: Map<string, string[]> = await (service as any).fetchEntryFunctions('0xpkg');
+        expect(r.size).toBe(0);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('fetchEntryFunctions: 0xpkg'));
+      });
+
+      it('treats a missing asMovePackage payload (non-MovePackage object at the address) as empty', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({ object: { asMovePackage: null } });
+        const r: Map<string, string[]> = await (service as any).fetchEntryFunctions('0xpkg');
+        expect(r.size).toBe(0);
       });
     });
 

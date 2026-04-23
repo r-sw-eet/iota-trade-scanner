@@ -321,14 +321,7 @@ export interface Project {
 interface PackageInfo {
   address: string;
   storageRebate: string;
-  modules: {
-    nodes: {
-      name: string;
-      functions?: {
-        nodes: { name: string; visibility: string; isEntry: boolean }[];
-      } | null;
-    }[];
-  };
+  modules: { nodes: { name: string }[] };
   previousTransactionBlock: {
     sender: { address: string } | null;
     effects: { timestamp: string | null } | null;
@@ -1019,19 +1012,16 @@ export class EcosystemService implements OnModuleInit {
     // mainnet ever has more, bump this; never let it cut the scan silently.
     for (let page = 0; page < 2000; page++) {
       const afterClause: string = cursor ? `, after: "${cursor}"` : '';
+      // Keep this query lean. IOTA GraphQL rejects any query whose estimated
+      // output nodes crosses 100k; inlining `modules { functions(first: 50) }`
+      // here multiplies to 50×50×50 = 125 000 and gets rejected at parse time
+      // — functions must come from a per-package second pass (fetchEntryFunctions).
       const data: any = await this.graphql(`{
         packages(first: 50${afterClause}) {
           nodes {
             address
             storageRebate
-            modules(first: 50) {
-              nodes {
-                name
-                functions(first: 50) {
-                  nodes { name visibility isEntry }
-                }
-              }
-            }
+            modules { nodes { name } }
             previousTransactionBlock {
               sender { address }
               effects { timestamp }
@@ -1049,6 +1039,52 @@ export class EcosystemService implements OnModuleInit {
     }
     this.logger.log(`Fetched ${packages.length} mainnet packages`);
     return packages;
+  }
+
+  /**
+   * Per-package entry-function probe. Returns `Map<moduleName, names[]>`
+   * listing every module's PUBLIC + isEntry function names.
+   *
+   * Lives in its own query for a single reason: inlining `modules { functions }`
+   * into the `packages(first: 50, ...)` paginator overshoots IOTA GraphQL's
+   * 100k estimated-output-nodes cap (50×50×50=125 000) and the endpoint
+   * rejects the whole query at parse time. Scoping to one package drops the
+   * estimate to 1×50×50=2500 which passes.
+   *
+   * On GraphQL error returns an empty map — classification treats missing
+   * per-module entries identically to "no public entry fns" (no hint).
+   */
+  private async fetchEntryFunctions(pkgAddress: string): Promise<Map<string, string[]>> {
+    const byModule = new Map<string, string[]>();
+    let data: any;
+    try {
+      data = await this.graphql(`{
+        object(address: "${pkgAddress}") {
+          asMovePackage {
+            modules(first: 50) {
+              nodes {
+                name
+                functions(first: 50) {
+                  nodes { name visibility isEntry }
+                }
+              }
+            }
+          }
+        }
+      }`);
+    } catch (e) {
+      this.logger.warn(`fetchEntryFunctions: ${pkgAddress} — ${(e as Error).message}`);
+      return byModule;
+    }
+    const mods = data?.object?.asMovePackage?.modules?.nodes ?? [];
+    for (const mod of mods) {
+      const names: string[] = [];
+      for (const f of mod?.functions?.nodes ?? []) {
+        if (f?.visibility === 'PUBLIC' && f?.isEntry) names.push(f.name);
+      }
+      byModule.set(mod.name, names);
+    }
+    return byModule;
   }
 
   /**
@@ -2533,22 +2569,13 @@ export class EcosystemService implements OnModuleInit {
       const publishedIso = pkg.previousTransactionBlock?.effects?.timestamp ?? null;
       const publishedAt = publishedIso ? new Date(publishedIso) : null;
 
-      // Build a per-module `entryFunctions` index upfront. Public entry
-      // functions are static per deployed module (they don't change between
-      // scans — they only shift on upgrade), so we read them from the
-      // `packages` response we already paid for in `getAllPackages` rather
-      // than making a second round-trip. Filter to `visibility=PUBLIC` +
-      // `isEntry=true` because non-public fns are internal plumbing and
-      // non-entry public fns don't receive TX calls — only entry fns
-      // contribute to the "what does this package do" signal.
-      const entryFunctionsByModule = new Map<string, string[]>();
-      for (const modNode of pkg.modules?.nodes ?? []) {
-        const names: string[] = [];
-        for (const f of modNode.functions?.nodes ?? []) {
-          if (f.visibility === 'PUBLIC' && f.isEntry) names.push(f.name);
-        }
-        entryFunctionsByModule.set(modNode.name, names);
-      }
+      // Public entry functions come from a scoped second-pass query per
+      // package — inlining them in `getAllPackages` overshoots IOTA GraphQL's
+      // 100k output-node cap. Filter to `visibility=PUBLIC` + `isEntry=true`
+      // inside the helper: non-public fns are internal plumbing and non-entry
+      // public fns don't receive TX calls, so only entry fns contribute to
+      // the "what does this package do" signal.
+      const entryFunctionsByModule = await this.fetchEntryFunctions(pkg.address);
 
       // Per-module counters. These stay cumulative across scans so delta
       // queries are plain subtraction between any two snapshots.
