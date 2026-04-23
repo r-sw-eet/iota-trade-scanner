@@ -33,7 +33,12 @@ jobs:
           files: ./api/coverage/lcov.info
           flags: api
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+          # Coverage upload is nice-to-have telemetry, not a merge gate.
+          # Codecov's CDN has served mismatched binary/SHA256SUM pairs multiple
+          # times this week, killing deploys with a SHASUM / GPG BAD-signature
+          # error. The local `cov:check` step above is the real coverage
+          # ratchet; Codecov is just for the web UI.
+          fail_ci_if_error: false
 
   web-test:
     runs-on: ubuntu-latest
@@ -57,7 +62,12 @@ jobs:
           files: ./website/coverage/lcov.info
           flags: web
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+          # Coverage upload is nice-to-have telemetry, not a merge gate.
+          # Codecov's CDN has served mismatched binary/SHA256SUM pairs multiple
+          # times this week, killing deploys with a SHASUM / GPG BAD-signature
+          # error. The local `cov:check` step above is the real coverage
+          # ratchet; Codecov is just for the web UI.
+          fail_ci_if_error: false
 
   web-e2e:
     runs-on: ubuntu-latest
