@@ -17,6 +17,7 @@ import { ProjectHolders } from './schemas/project-holders.schema';
 import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
 import { ProjectTxDigest } from './schemas/project-tx-digest.schema';
 import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
+import { TestnetCursor } from './schemas/testnet-cursor.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ALL_PROJECTS, ProjectDefinition, Category, Subcategory } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
@@ -349,9 +350,23 @@ export class EcosystemService implements OnModuleInit {
    */
   private capturing = false;
 
-  /** Returns true while a capture is actively running. */
+  /**
+   * Per-network capture guard for the testnet priority-sharded tick
+   * (Phase 4c). Separate from `capturing` because mainnet and testnet
+   * talk to different GraphQL endpoints at different tick cadences and
+   * must be able to run in parallel — a mainnet capture in flight
+   * should never block a testnet tick from starting, and vice versa.
+   */
+  private capturingByNetwork: Record<string, boolean> = {};
+
+  /** Returns true while the mainnet capture is actively running. */
   isCapturing(): boolean {
     return this.capturing;
+  }
+
+  /** Returns true while a testnet tick is actively running. */
+  isCapturingTestnet(): boolean {
+    return this.capturingByNetwork['testnet'] === true;
   }
 
   /**
@@ -420,6 +435,24 @@ export class EcosystemService implements OnModuleInit {
   private static readonly CAPTURE_CRITICAL_MS = 100 * 60 * 1000;
   private static readonly CAPTURE_HARD_TIMEOUT_MS = 125 * 60 * 1000;
 
+  // ----- Phase 4c constants (testnet priority-sharded capture) -----
+
+  /**
+   * Newest-tick freshness window. When the newest paginator hits a
+   * package whose stored `lastProbedAt > now - 18h`, the algorithm has
+   * caught up with recent work and stops. 18h = 3 ticks × 6h interval,
+   * so we never miss newly-published packages for more than one tick.
+   * See `plans/plan_testnet_support.md § Phase 4c`.
+   */
+  private static readonly TESTNET_FRESHNESS_WINDOW_MS = 18 * 60 * 60 * 1000;
+
+  /**
+   * Per-tick wall-clock budget. Leaves headroom inside the 2h cron slot
+   * so the next mainnet run (every even UTC hour) starts on a clean
+   * scheduler even if this tick was CPU-tight.
+   */
+  private static readonly TESTNET_TICK_BUDGET_MS = 90 * 60 * 1000;
+
   /**
    * Which IOTA network this process is scanning/serving. Resolved once at
    * construction from `IOTA_NETWORK` (default `mainnet`). Every write stamps
@@ -447,6 +480,7 @@ export class EcosystemService implements OnModuleInit {
     @InjectModel(ProjectHolderEntry.name) private holderEntryModel: Model<ProjectHolderEntry>,
     @InjectModel(ProjectTxDigest.name) private txDigestModel: Model<ProjectTxDigest>,
     @InjectModel(ClassifiedSnapshot.name) private classifiedModel: Model<ClassifiedSnapshot>,
+    @InjectModel(TestnetCursor.name) private testnetCursorModel: Model<TestnetCursor>,
     private alerts: AlertsService,
   ) {
     const env = process.env.IOTA_NETWORK;
@@ -3766,5 +3800,417 @@ export class EcosystemService implements OnModuleInit {
     const durationMs = Date.now() - t0;
     await this.persistClassified(snap._id, view, durationMs, snap.network);
     return view;
+  }
+
+  // ===================== Phase 4c — testnet priority-sharded capture =====================
+  //
+  // See `plans/plan_testnet_support.md § Phase 4c` for the full design. Summary:
+  //   - Every 3rd tick is a **newest** pass (paginate from null, probe until a
+  //     package's `lastProbedAt > now - 18h` signals we've caught up).
+  //   - The 2 intervening ticks are **backfill** passes (resume from the
+  //     persistent `backfillAfterCursor`; wrap to null on `hasNextPage: false`).
+  //   - Each tick writes one new `OnchainSnapshot` doc: fresh probes this tick
+  //     + copy-forward of un-touched packages from the previous testnet snapshot.
+  //   - 90-min tick budget; 1-of-3 ratio gives backfill 66% of ticks.
+  //
+  // Non-goal: atomic point-in-time — testnet GraphQL is ~40× slower than
+  // mainnet (12s vs 0.3s per `packages(first:50)` page), so full-fleet atomic
+  // capture doesn't fit a cron cycle. Growth queries on testnet reflect what
+  // was re-probed in between two snapshots, not literal on-chain change.
+
+  /**
+   * Load or create the singleton `TestnetCursor` state doc. The `_id` is the
+   * network literal (`'testnet'` today). `upsert: true` handles first boot;
+   * subsequent ticks read the doc via `findById`.
+   */
+  private async loadTestnetCursor(): Promise<TestnetCursor> {
+    const id = 'testnet';
+    const existing = await this.testnetCursorModel.findById(id).exec();
+    if (existing) return existing;
+    const created = await this.testnetCursorModel.create({
+      _id: id,
+      tickCounter: 0,
+      backfillAfterCursor: null,
+      lastTickKind: null,
+      lastTickAt: null,
+      lastTickPackagesProbed: 0,
+    });
+    return created;
+  }
+
+  /**
+   * Probe one package — the full probe set `captureRaw` runs per-package.
+   * Extracted so the testnet priority-sharded ticks can reuse the exact
+   * shape without cloning the whole paginator. Returns a `PackageFact` with
+   * `lastProbedAt: now` so the newest-tick freshness heuristic has an
+   * explicit per-package watermark.
+   */
+  private async probeOnePackage(
+    pkg: PackageInfo,
+    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
+    now: Date = new Date(),
+  ): Promise<PackageFact> {
+    const deployer = pkg.previousTransactionBlock?.sender?.address?.toLowerCase() ?? null;
+    const modules = (pkg.modules?.nodes || []).map((m) => m.name);
+    const storageRebateNanos = Number(pkg.storageRebate || 0);
+    const publishedIso = pkg.previousTransactionBlock?.effects?.timestamp ?? null;
+    const publishedAt = publishedIso ? new Date(publishedIso) : null;
+
+    const entryFunctionsByModule = await this.fetchEntryFunctions(pkg.address);
+    const moduleMetrics: ModuleMetrics[] = [];
+    for (const mod of modules) {
+      const emittingModule = `${pkg.address}::${mod}`;
+      const { count: events, capped: eventsCapped } = await this.countEvents(emittingModule);
+      const uniqueSenders = await this.updateSendersForModule(pkg.address, mod);
+      const eventTypes = events > 0 ? await this.sampleEventTypes(emittingModule) : [];
+      moduleMetrics.push({
+        module: mod,
+        events,
+        eventsCapped,
+        uniqueSenders,
+        entryFunctions: entryFunctionsByModule.get(mod) ?? [],
+        eventTypes,
+      });
+    }
+
+    const ident = await this.probeIdentityFields(pkg.address);
+    let identifiers = ident.identifiers;
+    let objectType: string | null = ident.objectType;
+    if (identifiers.length === 0) {
+      const tx = await this.probeTxEffects(pkg.address);
+      if (tx.identifiers.length) {
+        identifiers = tx.identifiers;
+        if (!objectType) objectType = tx.objectType;
+      }
+    }
+    const displayEntries = displayByPackage.get(pkg.address.toLowerCase()) ?? [];
+    if (displayEntries.length > 0) {
+      const seen = new Set(identifiers);
+      for (const { key, value } of displayEntries) {
+        const line = `display.${key}: ${value}`;
+        if (!seen.has(line)) {
+          identifiers = [...identifiers, line];
+          seen.add(line);
+        }
+      }
+    }
+    const fingerprint: FingerprintSampleDoc | null =
+      identifiers.length > 0 || objectType
+        ? { sampledObjectType: objectType, identifiers }
+        : null;
+
+    const { total: transactions, capped: transactionsCapped } =
+      await this.updateTxCountForPackage(pkg.address);
+
+    const objectTypeCounts = await this.captureObjectTypesForPackage(pkg.address);
+    const summedObjectHolderCount = objectTypeCounts.reduce((s, e) => s + e.objectHolderCount, 0);
+    const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.objectCount, 0);
+
+    return {
+      address: pkg.address,
+      deployer,
+      storageRebateNanos,
+      modules,
+      moduleMetrics,
+      objectHolderCount: summedObjectHolderCount,
+      objectCount: summedObjectCount,
+      transactions,
+      transactionsCapped,
+      objectTypeCounts,
+      fingerprint,
+      publishedAt,
+      lastProbedAt: now,
+    } as PackageFact;
+  }
+
+  /**
+   * Fetch one page of packages from the GraphQL paginator. Lean shape —
+   * mirrors `getAllPackages`'s inner query — plus the paginator info so
+   * the caller can feed it back as the next `after` cursor.
+   *
+   * Exposed as a separate helper for the testnet ticks because they page
+   * incrementally rather than draining the full list up-front.
+   */
+  private async fetchPackagePage(
+    cursor: string | null,
+    first = 50,
+  ): Promise<{ nodes: PackageInfo[]; hasNextPage: boolean; endCursor: string | null }> {
+    const afterClause: string = cursor ? `, after: "${cursor}"` : '';
+    const data: any = await this.graphql(`{
+      packages(first: ${first}${afterClause}) {
+        nodes {
+          address
+          storageRebate
+          modules { nodes { name } }
+          previousTransactionBlock {
+            sender { address }
+            effects { timestamp }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }`);
+    return {
+      nodes: data.packages.nodes as PackageInfo[],
+      hasNextPage: Boolean(data.packages.pageInfo?.hasNextPage),
+      endCursor: (data.packages.pageInfo?.endCursor as string | null) ?? null,
+    };
+  }
+
+  /**
+   * Run one newest-tick pass. Paginate from `cursor=null` and probe each
+   * package with the full captureRaw probe set, stopping when we hit a
+   * package whose stored `lastProbedAt > now - FRESHNESS_WINDOW_MS` (caught
+   * up to recent work). Respects the 90-min tick budget.
+   *
+   * Returns `{ probed, hitFreshWindow, deadlineHit }`. `hitFreshWindow:
+   * true` means the 18h optimization fired; `deadlineHit: true` means we
+   * ran out of budget before reaching either fresh territory or
+   * `hasNextPage: false`. `probed` has `lastProbedAt: <now>` stamped.
+   */
+  private async runNewestTick(
+    previousByAddress: Map<string, PackageFact>,
+    now: Date,
+    deadlineMs: number,
+    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
+  ): Promise<{ probed: PackageFact[]; hitFreshWindow: boolean; deadlineHit: boolean }> {
+    const probed: PackageFact[] = [];
+    const freshCutoff = now.getTime() - EcosystemService.TESTNET_FRESHNESS_WINDOW_MS;
+    let cursor: string | null = null;
+    let hitFreshWindow = false;
+    let hasNextPage = true;
+
+    while (hasNextPage) {
+      if (Date.now() >= deadlineMs) {
+        return { probed, hitFreshWindow, deadlineHit: true };
+      }
+      const page = await this.fetchPackagePage(cursor);
+      for (const info of page.nodes) {
+        const prev = previousByAddress.get(info.address.toLowerCase());
+        if (prev && prev.lastProbedAt && new Date(prev.lastProbedAt).getTime() > freshCutoff) {
+          hitFreshWindow = true;
+          return { probed, hitFreshWindow, deadlineHit: false };
+        }
+        const fact = await this.probeOnePackage(info, displayByPackage, now);
+        probed.push(fact);
+        if (Date.now() >= deadlineMs) {
+          return { probed, hitFreshWindow, deadlineHit: true };
+        }
+      }
+      hasNextPage = page.hasNextPage;
+      cursor = page.endCursor;
+      if (!cursor) break;
+    }
+    return { probed, hitFreshWindow, deadlineHit: false };
+  }
+
+  /**
+   * Run one backfill-tick pass. Resume from `state.backfillAfterCursor`,
+   * probe every package the paginator returns, stop on `hasNextPage:
+   * false` (wrap — cursor resets to null for next cycle) or budget
+   * exhaustion. Unlike newest-tick this does NOT check the freshness
+   * window; the point of backfill is to refresh the long tail of stale
+   * entries regardless of how recently they were seen.
+   *
+   * Returns `{ probed, nextCursor, wrapped, deadlineHit }`. Caller writes
+   * `nextCursor` back to `state.backfillAfterCursor`; when `wrapped`,
+   * `nextCursor` is null (full scan cycle completed).
+   */
+  private async runBackfillTick(
+    startCursor: string | null,
+    now: Date,
+    deadlineMs: number,
+    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
+  ): Promise<{ probed: PackageFact[]; nextCursor: string | null; wrapped: boolean; deadlineHit: boolean }> {
+    const probed: PackageFact[] = [];
+    let cursor = startCursor;
+    let wrapped = false;
+
+    while (true) {
+      if (Date.now() >= deadlineMs) {
+        return { probed, nextCursor: cursor, wrapped: false, deadlineHit: true };
+      }
+      const page = await this.fetchPackagePage(cursor);
+      for (const info of page.nodes) {
+        const fact = await this.probeOnePackage(info, displayByPackage, now);
+        probed.push(fact);
+        if (Date.now() >= deadlineMs) {
+          return { probed, nextCursor: page.endCursor, wrapped: false, deadlineHit: true };
+        }
+      }
+      if (!page.hasNextPage) {
+        wrapped = true;
+        cursor = null;
+        break;
+      }
+      cursor = page.endCursor;
+      if (!cursor) {
+        wrapped = true;
+        break;
+      }
+    }
+    return { probed, nextCursor: cursor, wrapped, deadlineHit: false };
+  }
+
+  /**
+   * Merge freshly-probed packages this tick with copy-forwards from the
+   * previous testnet snapshot. Copy-forward preserves the older
+   * `lastProbedAt` (invariant 7 — never rewinds to null). Packages that
+   * appear in both are represented once, using the fresh probe.
+   */
+  private buildTestnetSnapshotPackages(
+    freshlyProbed: PackageFact[],
+    previous: PackageFact[],
+  ): PackageFact[] {
+    const byAddress = new Map<string, PackageFact>();
+    for (const p of previous) byAddress.set(p.address.toLowerCase(), p);
+    for (const p of freshlyProbed) byAddress.set(p.address.toLowerCase(), p);
+    return Array.from(byAddress.values());
+  }
+
+  /**
+   * Run one testnet priority-sharded capture tick. Decides `newest` vs
+   * `backfill` based on `tickCounter % 3`, dispatches, writes a new
+   * `OnchainSnapshot` with `network: 'testnet'`, updates the cursor doc.
+   * Public for CLI/test access; cron hook below invokes it via
+   * `testnetCron()` with the scanner-host guard.
+   *
+   * No Mongo write / no guard acquisition happens if the service is bound
+   * to a non-mainnet network — meaning the testnet scanner process would
+   * run this method; the mainnet-bound process's cron hook is guarded by
+   * `this.network === 'mainnet'` so only the scanner host fires it.
+   * (Web-host `API_ROLE=serve` gates schedule registration out entirely.)
+   */
+  public async captureTestnetTick(): Promise<{
+    kind: 'newest' | 'backfill';
+    packagesProbed: number;
+    totalPackagesInSnapshot: number;
+    durationMs: number;
+    wrapped: boolean;
+    deadlineHit: boolean;
+    hitFreshWindow: boolean;
+  } | { skipped: true; reason: string }> {
+    if (this.capturingByNetwork['testnet']) {
+      this.logger.log('Testnet capture already in flight, skipping duplicate trigger');
+      return { skipped: true, reason: 'in-flight' };
+    }
+    this.capturingByNetwork['testnet'] = true;
+    const startedAt = Date.now();
+    const deadlineMs = startedAt + EcosystemService.TESTNET_TICK_BUDGET_MS;
+    const now = new Date(startedAt);
+
+    try {
+      const state = await this.loadTestnetCursor();
+      const kind: 'newest' | 'backfill' = state.tickCounter % 3 === 0 ? 'newest' : 'backfill';
+      this.logger.log(`Testnet tick starting: kind=${kind} tickCounter=${state.tickCounter}`);
+
+      // Load previous testnet snapshot so we can (a) check freshness in
+      // newest-tick, (b) copy-forward un-touched packages into the new doc.
+      const previousDoc = await this.ecoModel
+        .findOne({ network: 'testnet' })
+        .sort({ createdAt: -1 })
+        .lean()
+        .exec();
+      const previousPackages: PackageFact[] = (previousDoc?.packages ?? []) as PackageFact[];
+      const previousByAddress = new Map<string, PackageFact>();
+      for (const p of previousPackages) previousByAddress.set(p.address.toLowerCase(), p);
+
+      // Display metadata pre-pass — same rationale as `captureRaw`. Cheap
+      // compared to per-package probes and gets us `display.*` identifiers
+      // for free.
+      const displayByPackage = await this.collectDisplayMetadata();
+
+      let freshlyProbed: PackageFact[] = [];
+      let hitFreshWindow = false;
+      let wrapped = false;
+      let deadlineHit = false;
+      let nextBackfillCursor: string | null = state.backfillAfterCursor;
+
+      if (kind === 'newest') {
+        const result = await this.runNewestTick(previousByAddress, now, deadlineMs, displayByPackage);
+        freshlyProbed = result.probed;
+        hitFreshWindow = result.hitFreshWindow;
+        deadlineHit = result.deadlineHit;
+      } else {
+        const result = await this.runBackfillTick(
+          state.backfillAfterCursor,
+          now,
+          deadlineMs,
+          displayByPackage,
+        );
+        freshlyProbed = result.probed;
+        wrapped = result.wrapped;
+        deadlineHit = result.deadlineHit;
+        nextBackfillCursor = result.nextCursor;
+      }
+
+      // Build merged package set (fresh + copy-forward).
+      const merged = this.buildTestnetSnapshotPackages(freshlyProbed, previousPackages);
+
+      const totalStorageRebateNanos = merged.reduce((s, p) => s + Number(p.storageRebateNanos || 0), 0);
+      const durationMs = Date.now() - startedAt;
+
+      await this.ecoModel.create({
+        network: 'testnet',
+        packages: merged,
+        totalStorageRebateNanos,
+        networkTxTotal: previousDoc?.networkTxTotal ?? 0,
+        txRates: previousDoc?.txRates ?? {},
+        captureDurationMs: durationMs,
+      });
+
+      // Update cursor state for the next tick.
+      const cursorUpdate: Partial<TestnetCursor> = {
+        tickCounter: state.tickCounter + 1,
+        lastTickKind: kind,
+        lastTickAt: new Date(),
+        lastTickPackagesProbed: freshlyProbed.length,
+      };
+      if (kind === 'backfill') {
+        cursorUpdate.backfillAfterCursor = wrapped ? null : nextBackfillCursor;
+      }
+      await this.testnetCursorModel
+        .updateOne({ _id: 'testnet' }, { $set: cursorUpdate }, { upsert: true })
+        .exec();
+
+      this.logger.log(
+        `Testnet tick done: kind=${kind} probed=${freshlyProbed.length} total=${merged.length} wrapped=${wrapped} hitFreshWindow=${hitFreshWindow} deadlineHit=${deadlineHit} durationMs=${durationMs}`,
+      );
+
+      return {
+        kind,
+        packagesProbed: freshlyProbed.length,
+        totalPackagesInSnapshot: merged.length,
+        durationMs,
+        wrapped,
+        deadlineHit,
+        hitFreshWindow,
+      };
+    } finally {
+      this.capturingByNetwork['testnet'] = false;
+    }
+  }
+
+  /**
+   * Cron entrypoint for the testnet priority-sharded tick. Fires every
+   * odd UTC hour (between the mainnet even-hour runs) so neither network
+   * blocks the other. Only the scanner-host process runs this — the
+   * web-host's `API_ROLE=serve` gates all cron registration out via
+   * `app.module.ts`'s conditional `ScheduleModule` wiring.
+   *
+   * The mainnet `capture()` cron and this one are independently guarded
+   * (`this.capturing` vs `this.capturingByNetwork['testnet']`), so a
+   * long-running mainnet scan never blocks testnet and vice versa.
+   */
+  @Cron('0 1-23/2 * * *', { name: 'testnet-capture' })
+  async testnetCron() {
+    if (process.env.NODE_ENV === 'test') return;
+    if (process.env.API_ROLE === 'serve') return;
+    try {
+      await this.captureTestnetTick();
+    } catch (e) {
+      // Invariant 5: testnet failures never break mainnet. Log + swallow.
+      this.logger.error(`Testnet cron tick failed: ${(e as Error).message}`, e);
+    }
   }
 }

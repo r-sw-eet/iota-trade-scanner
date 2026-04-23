@@ -227,6 +227,20 @@ export class PackageFact {
    * treats as "unknown for that interval".
    */
   @Prop({ type: Date, default: null }) publishedAt: Date | null;
+
+  /**
+   * Testnet-only: when this package was last freshly probed by the
+   * priority-sharded capture tick (see Phase 4c in
+   * `plans/plan_testnet_support.md`). The newest-tick heuristic reads
+   * this field to decide when it's hit "fresh territory" (18h window);
+   * the copy-forward path preserves the older value when a package is
+   * carried over from the previous snapshot without re-probing.
+   *
+   * `null` on mainnet snapshots (their capture is atomic — the snapshot's
+   * `createdAt` already answers "when last probed") and on pre-4c
+   * snapshots. Invariant: never rewinds to null once set (plan invariant 7).
+   */
+  @Prop({ type: Date, default: null }) lastProbedAt: Date | null;
 }
 
 @Schema({ timestamps: true, collection: 'onchainsnapshots' })
