@@ -231,6 +231,19 @@ export class PackageFact {
 
 @Schema({ timestamps: true, collection: 'onchainsnapshots' })
 export class OnchainSnapshot extends Document {
+  /**
+   * Which IOTA network this snapshot was captured from. Tagged at write time
+   * so non-mainnet captures can share the `onchainsnapshots` collection
+   * without ambiguity at read time. Every production read filters by
+   * `network` so a later testnet capture worker is a pure additive change.
+   *
+   * Docs predating this field decode with `network: undefined`; readers use a
+   * transitional `{ $or: [{ network }, { network: { $exists: false } }] }`
+   * filter until the one-shot backfill sets `'mainnet'` on all existing rows.
+   */
+  @Prop({ type: String, enum: ['mainnet', 'testnet', 'devnet'], default: 'mainnet', required: true, index: true })
+  network: string;
+
   @Prop({ type: [PackageFact], default: [] }) packages: PackageFact[];
 
   /** Summed storageRebateNanos across every package. Convenience for network-total queries. */
@@ -267,3 +280,12 @@ export const OnchainSnapshotSchema = SchemaFactory.createForClass(OnchainSnapsho
  * `createdAt` index plays better with `$gte/$lte` windowed queries.
  */
 OnchainSnapshotSchema.index({ createdAt: -1 });
+
+/**
+ * Compound index for the hot `findOne({ network }).sort({ createdAt: -1 })`
+ * pattern used by `getLatest`/`getLatestRaw` and the growth endpoints. The
+ * single-field `createdAt` index above covers range queries that don't filter
+ * by network (legacy/transitional); this one keeps the network-filtered reads
+ * O(log N) once prod docs carry the `network` field.
+ */
+OnchainSnapshotSchema.index({ network: 1, createdAt: -1 });

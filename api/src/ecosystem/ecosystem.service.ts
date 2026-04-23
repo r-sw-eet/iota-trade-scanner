@@ -411,6 +411,17 @@ export class EcosystemService implements OnModuleInit {
   private static readonly CAPTURE_CRITICAL_MS = 100 * 60 * 1000;
   private static readonly CAPTURE_HARD_TIMEOUT_MS = 125 * 60 * 1000;
 
+  /**
+   * Which IOTA network this process is scanning/serving. Resolved once at
+   * construction from `IOTA_NETWORK` (default `mainnet`). Every write stamps
+   * this onto the persisted doc; every read filters by it (with a transitional
+   * `$exists: false` branch for pre-tagging prod docs — see `networkFilter`).
+   *
+   * This PR only tags snapshots; the GraphQL endpoint stays mainnet-hardcoded
+   * (`GRAPHQL_URL`). Endpoint selection is a separate follow-up.
+   */
+  private readonly network: 'mainnet' | 'testnet' | 'devnet';
+
   constructor(
     @InjectModel(OnchainSnapshot.name) private ecoModel: Model<OnchainSnapshot>,
     @InjectModel(ProjectSenders.name) private senderModel: Model<ProjectSenders>,
@@ -421,13 +432,26 @@ export class EcosystemService implements OnModuleInit {
     @InjectModel(ProjectTxDigest.name) private txDigestModel: Model<ProjectTxDigest>,
     @InjectModel(ClassifiedSnapshot.name) private classifiedModel: Model<ClassifiedSnapshot>,
     private alerts: AlertsService,
-  ) {}
+  ) {
+    const env = process.env.IOTA_NETWORK;
+    this.network = env === 'testnet' || env === 'devnet' ? env : 'mainnet';
+  }
+
+  /**
+   * Transitional read filter for `onchainsnapshots` / `classifiedsnapshots`.
+   * Matches docs tagged with this process's network OR docs predating the
+   * `network` field (prod history written before this PR). Drop the `$exists`
+   * branch in a follow-up once the one-shot backfill has stamped every row.
+   */
+  private networkFilter(): Record<string, unknown> {
+    return { $or: [{ network: this.network }, { network: { $exists: false } }] };
+  }
 
   async onModuleInit() {
     if (process.env.NODE_ENV === 'test') return;
     const isServeOnly = process.env.API_ROLE === 'serve';
     if (!isServeOnly) {
-      const count = await this.ecoModel.countDocuments();
+      const count = await this.ecoModel.countDocuments(this.networkFilter());
       if (count === 0) {
         this.logger.log('No ecosystem snapshot found, capturing in background...');
         this.capture().catch((e) => this.logger.error('Initial ecosystem capture failed', e));
@@ -452,10 +476,10 @@ export class EcosystemService implements OnModuleInit {
    * upserts and `classifyOrLoad` short-circuits when the hash already matches.
    */
   private async selfHealLatestClassified(): Promise<void> {
-    const latest = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    const latest = await this.ecoModel.findOne(this.networkFilter()).sort({ createdAt: -1 }).lean().exec();
     if (!latest) return;
     const cached = await this.classifiedModel
-      .findOne({ snapshotId: latest._id })
+      .findOne({ snapshotId: latest._id, ...this.networkFilter() })
       .lean()
       .exec();
     const currentHash = this.computeRegistryHash();
@@ -467,7 +491,7 @@ export class EcosystemService implements OnModuleInit {
     );
     const t0 = Date.now();
     const view = await this.classifyFromRaw(latest);
-    await this.persistClassified(latest._id, view, Date.now() - t0);
+    await this.persistClassified(latest._id, view, Date.now() - t0, (latest as { network?: string }).network);
     this.logger.log(`Boot self-heal classified view persisted in ${Date.now() - t0}ms`);
   }
 
@@ -487,7 +511,7 @@ export class EcosystemService implements OnModuleInit {
    * before enrichment so repeated reads don't mutate the cached value.
    */
   async getLatest() {
-    const snap = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    const snap = await this.ecoModel.findOne(this.networkFilter()).sort({ createdAt: -1 }).lean().exec();
     if (!snap) return null;
     const view = await this.classifyCached(snap);
     // `enrichWithTvl` mutates in place. The classified view comes from either
@@ -501,13 +525,13 @@ export class EcosystemService implements OnModuleInit {
 
   /** Fetch the raw latest snapshot without classification. Used by the growth endpoint. */
   async getLatestRaw() {
-    return this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    return this.ecoModel.findOne(this.networkFilter()).sort({ createdAt: -1 }).lean().exec();
   }
 
   /** Fetch raw snapshots in a `[from, to]` `createdAt` window. Used by the growth endpoint. */
   async findSnapshotsBetween(from: Date, to: Date) {
     return this.ecoModel
-      .find({ createdAt: { $gte: from, $lte: to } })
+      .find({ createdAt: { $gte: from, $lte: to }, ...this.networkFilter() })
       .sort({ createdAt: 1 })
       .lean()
       .exec();
@@ -587,12 +611,12 @@ export class EcosystemService implements OnModuleInit {
     }>;
   } | null> {
     const baselineSnap = await this.ecoModel
-      .findOne({ createdAt: { $lte: from } })
+      .findOne({ createdAt: { $lte: from }, ...this.networkFilter() })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
     const latestSnap = await this.ecoModel
-      .findOne({ createdAt: { $lte: to } })
+      .findOne({ createdAt: { $lte: to }, ...this.networkFilter() })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
@@ -742,12 +766,12 @@ export class EcosystemService implements OnModuleInit {
     }>;
   } | null> {
     const baseline = await this.ecoModel
-      .findOne({ createdAt: { $lte: from } })
+      .findOne({ createdAt: { $lte: from }, ...this.networkFilter() })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
     const latest = await this.ecoModel
-      .findOne({ createdAt: { $lte: to } })
+      .findOne({ createdAt: { $lte: to }, ...this.networkFilter() })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
@@ -922,7 +946,7 @@ export class EcosystemService implements OnModuleInit {
       const captureWork = (async () => {
         const raw = await this.captureRaw();
         const durationMs = Date.now() - startedAt;
-        const created = await this.ecoModel.create({ ...raw, captureDurationMs: durationMs });
+        const created = await this.ecoModel.create({ ...raw, network: this.network, captureDurationMs: durationMs });
         // Precompute + persist the classified view so the first read after
         // this capture is O(1). Failures here are non-fatal — readers fall
         // back to classify-on-demand via `classifyOrLoad`. Keeps the
@@ -930,7 +954,7 @@ export class EcosystemService implements OnModuleInit {
         try {
           const t0 = Date.now();
           const view = await this.classifyFromRaw(created);
-          await this.persistClassified(created._id, view, Date.now() - t0);
+          await this.persistClassified(created._id, view, Date.now() - t0, (created as { network?: string }).network);
         } catch (err) {
           this.logger.warn('Post-capture classify/persist failed; readers will classify on demand', err);
         }
@@ -1318,7 +1342,7 @@ export class EcosystemService implements OnModuleInit {
   async backfillAllSenders(
     onProgress?: (info: { project: string; module: string; senders: number }) => void,
   ): Promise<{ totalProjects: number; totalModules: number; totalSenders: number }> {
-    const snapshot = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    const snapshot = await this.ecoModel.findOne(this.networkFilter()).sort({ createdAt: -1 }).lean().exec();
     if (!snapshot) {
       throw new Error('No ecosystem snapshot exists yet — run a scan first.');
     }
@@ -1613,7 +1637,7 @@ export class EcosystemService implements OnModuleInit {
     onProgress?: (info: { packageAddress: string; total: number; capped: boolean }) => void,
     concurrency: number = 20,
   ): Promise<{ totalPackages: number; totalTxs: number; cappedPackages: number }> {
-    const snapshot = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    const snapshot = await this.ecoModel.findOne(this.networkFilter()).sort({ createdAt: -1 }).lean().exec();
     if (!snapshot) {
       throw new Error('No ecosystem snapshot exists yet — run a scan first.');
     }
@@ -1878,7 +1902,7 @@ export class EcosystemService implements OnModuleInit {
     onProgress?: (info: { packageAddress: string; type: string; count: number; listedCount: number; capped: boolean }) => void,
     concurrency: number = 20,
   ): Promise<{ totalPairs: number; totalHolders: number; cappedPairs: number }> {
-    const snapshot = await this.ecoModel.findOne().sort({ createdAt: -1 }).lean().exec();
+    const snapshot = await this.ecoModel.findOne(this.networkFilter()).sort({ createdAt: -1 }).lean().exec();
     if (!snapshot) {
       throw new Error('No ecosystem snapshot exists yet — run a scan first.');
     }
@@ -3497,6 +3521,11 @@ export class EcosystemService implements OnModuleInit {
     snapshotId: unknown,
     view: Awaited<ReturnType<EcosystemService['classifyFromRaw']>>,
     classifyDurationMs: number,
+    // Propagated from the raw snapshot (`OnchainSnapshot.network`), not the
+    // env — re-classifying an old mainnet snapshot after testnet capture
+    // lands still writes `mainnet`. Falls back to `this.network` only when
+    // the raw doc predates the field (backfill migrates those separately).
+    network: string = this.network,
   ): Promise<void> {
     await this.classifiedModel
       .updateOne(
@@ -3504,6 +3533,7 @@ export class EcosystemService implements OnModuleInit {
         {
           $set: {
             snapshotId,
+            network,
             registryHash: this.computeRegistryHash(),
             classifiedAt: new Date(),
             classifyDurationMs,
@@ -3528,7 +3558,7 @@ export class EcosystemService implements OnModuleInit {
    */
   private async classifyOrLoad(snap: any): Promise<Awaited<ReturnType<EcosystemService['classifyFromRaw']>>> {
     const cached = await this.classifiedModel
-      .findOne({ snapshotId: snap._id })
+      .findOne({ snapshotId: snap._id, ...this.networkFilter() })
       .lean()
       .exec();
     const currentHash = this.computeRegistryHash();
@@ -3538,7 +3568,7 @@ export class EcosystemService implements OnModuleInit {
     const t0 = Date.now();
     const view = await this.classifyFromRaw(snap);
     const durationMs = Date.now() - t0;
-    await this.persistClassified(snap._id, view, durationMs);
+    await this.persistClassified(snap._id, view, durationMs, snap.network);
     return view;
   }
 }

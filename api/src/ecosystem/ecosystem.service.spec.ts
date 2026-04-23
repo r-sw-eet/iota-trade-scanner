@@ -1594,7 +1594,10 @@ describe('EcosystemService', () => {
       const from = new Date('2026-04-01');
       const to = new Date('2026-04-20');
       await expect(service.findSnapshotsBetween(from, to)).resolves.toBe(snaps);
-      expect(find).toHaveBeenCalledWith({ createdAt: { $gte: from, $lte: to } });
+      expect(find).toHaveBeenCalledWith({
+        createdAt: { $gte: from, $lte: to },
+        $or: [{ network: 'mainnet' }, { network: { $exists: false } }],
+      });
       expect(sort).toHaveBeenCalledWith({ createdAt: 1 });
     });
   });
@@ -1771,6 +1774,121 @@ describe('EcosystemService', () => {
       jest.spyOn(service as any, 'classifyFromRaw').mockRejectedValue(new Error('boom'));
       await expect(service.capture()).resolves.toBeUndefined();
       expect(ecoModel.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ---------- network tagging (Decision 1) ----------
+
+  describe('network tagging', () => {
+    const rawStub = { packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
+    const origNetwork = process.env.IOTA_NETWORK;
+    afterEach(() => {
+      if (origNetwork === undefined) delete process.env.IOTA_NETWORK;
+      else process.env.IOTA_NETWORK = origNetwork;
+    });
+
+    /**
+     * Construct a fresh EcosystemService bound to the current model mocks —
+     * needed because `this.network` is resolved once in the constructor. The
+     * outer `beforeEach` already did this with IOTA_NETWORK=unset; these
+     * tests override the env and rebuild to exercise the non-default branch.
+     */
+    const buildServiceWithEnv = async (env: string | undefined) => {
+      if (env === undefined) delete process.env.IOTA_NETWORK;
+      else process.env.IOTA_NETWORK = env;
+      const alertsMock = { notifyCaptureAlarm: jest.fn().mockResolvedValue(undefined) };
+      const mod = await Test.createTestingModule({
+        providers: [
+          EcosystemService,
+          { provide: getModelToken(OnchainSnapshot.name), useValue: ecoModel },
+          { provide: getModelToken(ProjectSenders.name), useValue: senderModel },
+          { provide: getModelToken(ProjectSender.name), useValue: senderDocModel },
+          { provide: getModelToken(ProjectTxCounts.name), useValue: txCountModel },
+          { provide: getModelToken(ProjectTxDigest.name), useValue: txDigestModel },
+          { provide: getModelToken(ProjectHolders.name), useValue: holdersStateModel },
+          { provide: getModelToken(ProjectHolderEntry.name), useValue: holderEntryModel },
+          { provide: getModelToken(ClassifiedSnapshot.name), useValue: classifiedModel },
+          { provide: AlertsService, useValue: alertsMock },
+        ],
+      }).compile();
+      return mod.get(EcosystemService);
+    };
+
+    it('captured snapshot is stamped network=mainnet when IOTA_NETWORK is unset', async () => {
+      const s = await buildServiceWithEnv(undefined);
+      jest.spyOn(s as any, 'captureRaw').mockResolvedValue(rawStub);
+      await s.capture();
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ network: 'mainnet' }),
+      );
+    });
+
+    it('captured snapshot is stamped network=testnet when IOTA_NETWORK=testnet', async () => {
+      const s = await buildServiceWithEnv('testnet');
+      jest.spyOn(s as any, 'captureRaw').mockResolvedValue(rawStub);
+      await s.capture();
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ network: 'testnet' }),
+      );
+    });
+
+    it('unknown IOTA_NETWORK value falls back to mainnet (guards against typos)', async () => {
+      const s = await buildServiceWithEnv('nonsense');
+      jest.spyOn(s as any, 'captureRaw').mockResolvedValue(rawStub);
+      await s.capture();
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ network: 'mainnet' }),
+      );
+    });
+
+    it('persisted classified doc carries network propagated from the raw doc', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      // `ecoModel.create` returns the persisted raw shape — test that the
+      // persisted classified doc uses the `network` from the raw result,
+      // NOT this.network (so re-classifies of old mainnet docs stay mainnet
+      // even when a process is bound to testnet).
+      ecoModel.create.mockResolvedValue({ _id: 'new-snap', network: 'mainnet', ...rawStub });
+      const view = { l1: [], l2: [], totalProjects: 0 };
+      jest.spyOn(service as any, 'classifyFromRaw').mockResolvedValue(view);
+      await service.capture();
+      expect(classifiedModel.updateOne).toHaveBeenCalledWith(
+        { snapshotId: 'new-snap' },
+        expect.objectContaining({
+          $set: expect.objectContaining({ network: 'mainnet', view }),
+        }),
+        { upsert: true },
+      );
+    });
+
+    it('reads use a transitional $or that matches tagged docs AND legacy docs with no network field', async () => {
+      // Grab the filter passed to `ecoModel.findOne` by any read path —
+      // `getLatestRaw` is the simplest. The `$or` shape is what lets prod's
+      // 8 pre-tag docs keep serving until the backfill runs.
+      const chainRet = {
+        sort: () => ({ lean: () => ({ exec: async () => null }) }),
+      };
+      ecoModel.findOne.mockReturnValue(chainRet);
+      await service.getLatestRaw();
+      expect(ecoModel.findOne).toHaveBeenCalledWith({
+        $or: [{ network: 'mainnet' }, { network: { $exists: false } }],
+      });
+    });
+
+    it('classifyOrLoad findOne scopes by snapshotId AND the transitional network $or', async () => {
+      ecoModel.findOne.mockReturnValue({
+        sort: () => ({ lean: () => ({ exec: async () => ({ _id: 'abc', network: 'mainnet', packages: [] }) }) }),
+      });
+      const seenFilter: any[] = [];
+      classifiedModel.findOne.mockImplementation((f: any) => {
+        seenFilter.push(f);
+        return { lean: () => ({ exec: async () => null }) };
+      });
+      jest.spyOn(service as any, 'classifyFromRaw').mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
+      await service.getLatest();
+      expect(seenFilter[0]).toEqual({
+        snapshotId: 'abc',
+        $or: [{ network: 'mainnet' }, { network: { $exists: false } }],
+      });
     });
   });
 

@@ -25,6 +25,16 @@ import { Document, Schema as MongooseSchema, Types } from 'mongoose';
  */
 @Schema({ timestamps: true, collection: 'classifiedsnapshots' })
 export class ClassifiedSnapshot extends Document {
+  /**
+   * Which IOTA network the underlying raw snapshot was captured from —
+   * propagated from `OnchainSnapshot.network` at persist time, not read from
+   * env. Re-classifying an old mainnet snapshot after testnet capture lands
+   * still writes `mainnet` here. Docs predating this field decode with
+   * `network: undefined`; readers carry a transitional `$or` filter.
+   */
+  @Prop({ type: String, enum: ['mainnet', 'testnet', 'devnet'], default: 'mainnet', required: true, index: true })
+  network: string;
+
   /** References `OnchainSnapshot._id`. Unique — one classified doc per raw snapshot. */
   @Prop({ type: MongooseSchema.Types.ObjectId, required: true })
   snapshotId: Types.ObjectId;
@@ -55,3 +65,11 @@ export class ClassifiedSnapshot extends Document {
 
 export const ClassifiedSnapshotSchema = SchemaFactory.createForClass(ClassifiedSnapshot);
 ClassifiedSnapshotSchema.index({ snapshotId: 1 }, { unique: true });
+
+/**
+ * Compound index for the `findOne({ snapshotId, network })` pattern used by
+ * `classifyOrLoad` and `selfHealLatestClassified`. The unique-on-`snapshotId`
+ * index above already makes that lookup O(1); the compound shape keeps it so
+ * once every doc carries a `network` field.
+ */
+ClassifiedSnapshotSchema.index({ network: 1, snapshotId: 1 });
