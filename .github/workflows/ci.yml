@@ -85,14 +85,32 @@ jobs:
       group: deploy-main
       cancel-in-progress: false
     runs-on: ubuntu-latest
+    strategy:
+      # Deploy to both hosts; the deploy script adapts based on the compose
+      # services defined on each host (web → api+website, scanner → api only).
+      # fail-fast: false so a flaky host doesn't skip the other.
+      fail-fast: false
+      matrix:
+        host:
+          - name: web
+            secret: DEPLOY_HOST_WEB
+          - name: scanner
+            secret: DEPLOY_HOST_SCANNER
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve host for this matrix entry
+        id: host
+        run: |
+          case "${{ matrix.host.name }}" in
+            web) echo "addr=${{ secrets.DEPLOY_HOST_WEB }}" >> "$GITHUB_OUTPUT" ;;
+            scanner) echo "addr=${{ secrets.DEPLOY_HOST_SCANNER }}" >> "$GITHUB_OUTPUT" ;;
+          esac
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
-      - name: Run deploy script on server
+          ssh-keyscan -H ${{ steps.host.outputs.addr }} >> ~/.ssh/known_hosts
+      - name: Run deploy script on ${{ matrix.host.name }} (${{ steps.host.outputs.addr }})
         run: |
-          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'bash -s' < scripts/deploy.sh
+          ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ steps.host.outputs.addr }} 'bash -s' < scripts/deploy.sh
