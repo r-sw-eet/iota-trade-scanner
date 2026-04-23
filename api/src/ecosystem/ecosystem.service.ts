@@ -54,7 +54,16 @@ function isRoutingOnly(def: ProjectDefinition): boolean {
   return !hasSyncMatch(def) && !def.match.fingerprint;
 }
 
-const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
+/**
+ * GraphQL endpoint per IOTA network. Resolved once at service construction
+ * from `this.network` into `this.graphqlUrl` — resolving per-call would burn
+ * a map lookup on every one of the ~3000 GraphQL round-trips a capture does.
+ */
+const GRAPHQL_URL_BY_NETWORK: Record<string, string> = {
+  mainnet: 'https://graphql.mainnet.iota.cafe',
+  testnet: 'https://graphql.testnet.iota.cafe',
+  devnet: 'https://graphql.devnet.iota.cafe',
+};
 
 /**
  * Chain-primitive framework packages — `0x1` (move-stdlib), `0x2` (iota system
@@ -416,11 +425,18 @@ export class EcosystemService implements OnModuleInit {
    * construction from `IOTA_NETWORK` (default `mainnet`). Every write stamps
    * this onto the persisted doc; every read filters by it (with a transitional
    * `$exists: false` branch for pre-tagging prod docs — see `networkFilter`).
-   *
-   * This PR only tags snapshots; the GraphQL endpoint stays mainnet-hardcoded
-   * (`GRAPHQL_URL`). Endpoint selection is a separate follow-up.
    */
   private readonly network: 'mainnet' | 'testnet' | 'devnet';
+
+  /**
+   * GraphQL endpoint bound to this process's network. Resolved once at
+   * construction rather than per-call — `captureRaw()` fires thousands of
+   * GraphQL requests per cycle and the indirection adds no value once the
+   * network is known. Public via `getGraphqlUrl()` so the HTTP controller
+   * (which does its own direct `fetch` for a few project-detail endpoints)
+   * hits the same endpoint without duplicating the network→URL map.
+   */
+  private readonly graphqlUrl: string;
 
   constructor(
     @InjectModel(OnchainSnapshot.name) private ecoModel: Model<OnchainSnapshot>,
@@ -435,6 +451,24 @@ export class EcosystemService implements OnModuleInit {
   ) {
     const env = process.env.IOTA_NETWORK;
     this.network = env === 'testnet' || env === 'devnet' ? env : 'mainnet';
+    // Map is exhaustive over the three valid network literals above, so no
+    // fallback branch is needed here.
+    this.graphqlUrl = GRAPHQL_URL_BY_NETWORK[this.network];
+  }
+
+  /**
+   * GraphQL endpoint bound to this process's network (e.g. mainnet →
+   * `https://graphql.mainnet.iota.cafe`). Exposed for the HTTP controller's
+   * direct-fetch endpoints so one source of truth governs both the scanner
+   * and the request-time GraphQL reads.
+   */
+  getGraphqlUrl(): string {
+    return this.graphqlUrl;
+  }
+
+  /** Which IOTA network this process is bound to. */
+  getNetwork(): 'mainnet' | 'testnet' | 'devnet' {
+    return this.network;
   }
 
   /**
@@ -1017,8 +1051,124 @@ export class EcosystemService implements OnModuleInit {
     }
   }
 
+  /**
+   * Observe-only counterpart to `capture()`. Runs `captureRaw()` against
+   * `this.graphqlUrl` (whichever network the service is bound to) and
+   * returns aggregate stats in-memory — nothing is persisted, no classify
+   * runs, no cache is invalidated. Used by the `dry-run-testnet` CLI to
+   * smoke-test a testnet/devnet scan from the workstation before committing
+   * to a persisted cron. Hard timeout via `Promise.race` — mirrors
+   * `capture()`'s pattern so a hung GraphQL promise can't orphan the caller.
+   */
+  public async dryRunCapture(
+    opts: { maxMinutes?: number } = {},
+  ): Promise<{
+    durationMs: number;
+    network: string;
+    graphqlUrl: string;
+    packages: number;
+    deployers: number;
+    modules: number;
+    events: number;
+    uniqueSenders: number;
+    txs: number;
+    liveObjects: number;
+    publishedAtCount: number;
+    entryFunctionTotal: number;
+    eventTypeTotal: number;
+    displayCount: number;
+    cappedPackages: number;
+    cappedTypes: number;
+  }> {
+    const maxMinutes = opts.maxMinutes ?? 20;
+    const startedAt = Date.now();
+    this.logger.log(`[dry-run] starting capture against ${this.graphqlUrl} (timeout ${maxMinutes}min)…`);
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutMs = maxMinutes * 60 * 1000;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new Error(`dry-run exceeded ${maxMinutes}min timeout`)),
+        timeoutMs,
+      );
+      timeoutHandle.unref();
+    });
+
+    let raw: Awaited<ReturnType<EcosystemService['captureRaw']>>;
+    try {
+      raw = await Promise.race([this.captureRaw(), timeout]);
+    } catch (e) {
+      throw new Error(`[dry-run] capture against ${this.graphqlUrl} failed: ${(e as Error).message}`);
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+
+    const durationMs = Date.now() - startedAt;
+
+    // Aggregate counters — mirror the summary line that `capture()` logs so
+    // a dry-run and a real cron produce comparable numbers. `deployers` is
+    // the distinct-count (lowercased) to match how `fetchFull` clusters.
+    // `liveObjects` sums `objectCount` across every per-type entry; the
+    // `cappedPackages` / `cappedTypes` floors surface when the scanner hit
+    // its per-scan page cap so the operator knows the totals are lower
+    // bounds rather than ground truth.
+    const deployers = new Set<string>();
+    let modules = 0;
+    let events = 0;
+    let uniqueSenders = 0;
+    let txs = 0;
+    let liveObjects = 0;
+    let publishedAtCount = 0;
+    let entryFunctionTotal = 0;
+    let eventTypeTotal = 0;
+    let displayCount = 0;
+    let cappedPackages = 0;
+    let cappedTypes = 0;
+    for (const p of raw.packages) {
+      if (p.deployer) deployers.add(p.deployer.toLowerCase());
+      modules += p.modules.length;
+      if (p.publishedAt) publishedAtCount += 1;
+      if (p.transactionsCapped) cappedPackages += 1;
+      for (const m of p.moduleMetrics) {
+        events += m.events;
+        uniqueSenders += m.uniqueSenders;
+        entryFunctionTotal += m.entryFunctions.length;
+        eventTypeTotal += m.eventTypes.length;
+      }
+      for (const t of p.objectTypeCounts) {
+        liveObjects += t.objectCount;
+        if (t.objectCountCapped || t.objectHolderCountCapped) cappedTypes += 1;
+      }
+      if (p.fingerprint) {
+        for (const s of p.fingerprint.identifiers) {
+          if (s.startsWith('display.')) displayCount += 1;
+        }
+      }
+      txs += p.transactions;
+    }
+
+    return {
+      durationMs,
+      network: this.network,
+      graphqlUrl: this.graphqlUrl,
+      packages: raw.packages.length,
+      deployers: deployers.size,
+      modules,
+      events,
+      uniqueSenders,
+      txs,
+      liveObjects,
+      publishedAtCount,
+      entryFunctionTotal,
+      eventTypeTotal,
+      displayCount,
+      cappedPackages,
+      cappedTypes,
+    };
+  }
+
   private async graphql(query: string): Promise<any> {
-    const res = await fetch(GRAPHQL_URL, {
+    const res = await fetch(this.graphqlUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),

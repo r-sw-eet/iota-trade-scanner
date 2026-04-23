@@ -2,8 +2,6 @@ import { BadRequestException, Controller, Get, Post, Param, Query, NotFoundExcep
 import { EcosystemService } from './ecosystem.service';
 import { ALL_TEAMS } from './teams';
 
-const GRAPHQL_URL = 'https://graphql.mainnet.iota.cafe';
-
 @Controller('ecosystem')
 export class EcosystemController {
   constructor(private ecosystemService: EcosystemService) {}
@@ -224,7 +222,7 @@ export class EcosystemController {
     const emittingModule = `${pkgAddr}::${mod}`;
     const n = Math.min(Number(limit) || 20, 50);
 
-    const res = await fetch(GRAPHQL_URL, {
+    const res = await fetch(this.ecosystemService.getGraphqlUrl(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -285,7 +283,7 @@ export class EcosystemController {
         for (let page = 0; page < 10; page++) {
           const afterClause = cursor ? `, after: "${cursor}"` : '';
           try {
-            const res = await fetch(GRAPHQL_URL, {
+            const res = await fetch(this.ecosystemService.getGraphqlUrl(), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({

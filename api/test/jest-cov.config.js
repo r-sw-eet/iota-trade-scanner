@@ -23,6 +23,7 @@ module.exports = {
     '!src/backfill-holders.ts',
     '!src/scan-unattributed-cli.ts',
     '!src/scan-other-nets-cli.ts',
+    '!src/dry-run-testnet.ts',
     '!src/app.module.ts',
     '!src/**/*.module.ts',
     '!src/**/schemas/**',

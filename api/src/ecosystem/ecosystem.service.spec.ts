@@ -1841,6 +1841,30 @@ describe('EcosystemService', () => {
       );
     });
 
+    it('getGraphqlUrl returns the mainnet endpoint by default', async () => {
+      const s = await buildServiceWithEnv(undefined);
+      expect(s.getGraphqlUrl()).toBe('https://graphql.mainnet.iota.cafe');
+      expect(s.getNetwork()).toBe('mainnet');
+    });
+
+    it('getGraphqlUrl returns the testnet endpoint when IOTA_NETWORK=testnet', async () => {
+      const s = await buildServiceWithEnv('testnet');
+      expect(s.getGraphqlUrl()).toBe('https://graphql.testnet.iota.cafe');
+      expect(s.getNetwork()).toBe('testnet');
+    });
+
+    it('getGraphqlUrl returns the devnet endpoint when IOTA_NETWORK=devnet', async () => {
+      const s = await buildServiceWithEnv('devnet');
+      expect(s.getGraphqlUrl()).toBe('https://graphql.devnet.iota.cafe');
+      expect(s.getNetwork()).toBe('devnet');
+    });
+
+    it('getGraphqlUrl falls back to the mainnet endpoint on an unknown network value', async () => {
+      const s = await buildServiceWithEnv('nonsense');
+      expect(s.getGraphqlUrl()).toBe('https://graphql.mainnet.iota.cafe');
+      expect(s.getNetwork()).toBe('mainnet');
+    });
+
     it('persisted classified doc carries network propagated from the raw doc', async () => {
       jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
       // `ecoModel.create` returns the persisted raw shape — test that the
@@ -1889,6 +1913,140 @@ describe('EcosystemService', () => {
         snapshotId: 'abc',
         $or: [{ network: 'mainnet' }, { network: { $exists: false } }],
       });
+    });
+  });
+
+  // ---------- dryRunCapture (Phase 4b) ----------
+
+  describe('dryRunCapture', () => {
+    const rawStub = () => ({
+      packages: [
+        {
+          address: '0xpkgA',
+          deployer: '0xDEPLOY1',
+          storageRebateNanos: 0,
+          modules: ['mod_a', 'mod_b'],
+          moduleMetrics: [
+            {
+              module: 'mod_a',
+              events: 10,
+              eventsCapped: false,
+              uniqueSenders: 3,
+              entryFunctions: ['foo', 'bar'],
+              eventTypes: ['Foo'],
+            },
+            {
+              module: 'mod_b',
+              events: 5,
+              eventsCapped: false,
+              uniqueSenders: 2,
+              entryFunctions: [],
+              eventTypes: ['Bar', 'Baz'],
+            },
+          ],
+          objectHolderCount: 0,
+          objectCount: 0,
+          transactions: 100,
+          transactionsCapped: true,
+          objectTypeCounts: [
+            { type: 'a::A', objectHolderCount: 4, listedCount: 0, objectHolderCountCapped: false, objectCount: 7, objectCountCapped: true },
+            { type: 'a::B', objectHolderCount: 2, listedCount: 0, objectHolderCountCapped: true, objectCount: 1, objectCountCapped: false },
+          ],
+          fingerprint: { sampledObjectType: 'a::A', identifiers: ['tag: foo', 'display.name: Foo', 'display.project_url: https://example.com'] },
+          publishedAt: new Date(),
+        },
+        {
+          address: '0xpkgB',
+          deployer: '0xdeploy1', // same deployer as pkgA, different case — dedupe check
+          storageRebateNanos: 0,
+          modules: ['only_one'],
+          moduleMetrics: [
+            {
+              module: 'only_one',
+              events: 0,
+              eventsCapped: false,
+              uniqueSenders: 0,
+              entryFunctions: ['do_thing'],
+              eventTypes: [],
+            },
+          ],
+          objectHolderCount: 0,
+          objectCount: 0,
+          transactions: 7,
+          transactionsCapped: false,
+          objectTypeCounts: [],
+          fingerprint: null,
+          publishedAt: null,
+        },
+        {
+          address: '0xpkgC',
+          deployer: null, // framework-style — no deployer, no publishedAt
+          storageRebateNanos: 0,
+          modules: [],
+          moduleMetrics: [],
+          objectHolderCount: 0,
+          objectCount: 0,
+          transactions: 0,
+          transactionsCapped: false,
+          objectTypeCounts: [],
+          fingerprint: null,
+          publishedAt: null,
+        },
+      ],
+      totalStorageRebateNanos: 0,
+      networkTxTotal: 12345,
+      txRates: {},
+    });
+
+    it('returns aggregate stats computed from the raw snapshot (no Mongo write)', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub());
+      const stats = await service.dryRunCapture();
+
+      expect(stats.network).toBe('mainnet');
+      expect(stats.graphqlUrl).toBe('https://graphql.mainnet.iota.cafe');
+      expect(stats.packages).toBe(3);
+      // pkgA + pkgB share deployer (case-folded); pkgC has no deployer.
+      expect(stats.deployers).toBe(1);
+      expect(stats.modules).toBe(3);
+      expect(stats.events).toBe(15);
+      expect(stats.uniqueSenders).toBe(5);
+      expect(stats.txs).toBe(107);
+      expect(stats.liveObjects).toBe(8);
+      expect(stats.publishedAtCount).toBe(1);
+      expect(stats.entryFunctionTotal).toBe(3);
+      expect(stats.eventTypeTotal).toBe(3);
+      expect(stats.displayCount).toBe(2);
+      expect(stats.cappedPackages).toBe(1);
+      // Two `objectTypeCounts` entries, one capped via objectCountCapped and
+      // one via objectHolderCountCapped — covers both sides of the OR.
+      expect(stats.cappedTypes).toBe(2);
+      expect(stats.durationMs).toBeGreaterThanOrEqual(0);
+
+      // Critically: nothing persisted. Phase 4b is observe-only.
+      expect(ecoModel.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects with a timeout error when captureRaw exceeds maxMinutes', async () => {
+      jest.useFakeTimers();
+      // A captureRaw that never resolves — only the dry-run timeout can end
+      // this promise chain.
+      jest.spyOn(service as any, 'captureRaw').mockImplementation(
+        () => new Promise(() => {}),
+      );
+      const p = service.dryRunCapture({ maxMinutes: 1 });
+      // Swallow the unhandledRejection that surfaces on the microtask queue
+      // before we attach `.catch` below — assertion is via expect().rejects.
+      p.catch(() => {});
+      jest.advanceTimersByTime(61 * 1000);
+      await expect(p).rejects.toThrow('dry-run exceeded 1min timeout');
+      jest.useRealTimers();
+    });
+
+    it('wraps captureRaw errors with the graphqlUrl for operator legibility', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockRejectedValue(new Error('graphql 500'));
+      await expect(service.dryRunCapture()).rejects.toThrow(
+        /\[dry-run\] capture against https:\/\/graphql\.mainnet\.iota\.cafe failed: graphql 500/,
+      );
     });
   });
 

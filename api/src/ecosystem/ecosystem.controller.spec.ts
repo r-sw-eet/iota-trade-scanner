@@ -12,7 +12,12 @@ jest.mock('./teams', () => ({
 
 describe('EcosystemController', () => {
   let controller: EcosystemController;
-  let service: { getLatest: jest.Mock; capture: jest.Mock; isCapturing: jest.Mock };
+  let service: {
+    getLatest: jest.Mock;
+    capture: jest.Mock;
+    isCapturing: jest.Mock;
+    getGraphqlUrl: jest.Mock;
+  };
   let fetchMock: jest.Mock;
 
   beforeEach(async () => {
@@ -20,6 +25,7 @@ describe('EcosystemController', () => {
       getLatest: jest.fn(),
       capture: jest.fn().mockResolvedValue(undefined),
       isCapturing: jest.fn().mockReturnValue(false),
+      getGraphqlUrl: jest.fn().mockReturnValue('https://graphql.mainnet.iota.cafe'),
     };
     const module = await Test.createTestingModule({
       controllers: [EcosystemController],
