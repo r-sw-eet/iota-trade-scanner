@@ -2093,6 +2093,269 @@ describe('EcosystemService', () => {
     });
   });
 
+  // ---------- collectDisplayMetadata ----------
+
+  describe('collectDisplayMetadata', () => {
+    const collect = () => (service as any).collectDisplayMetadata();
+
+    it('groups concrete Display metadata by the inner-type package address', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [
+                {
+                  asMoveObject: {
+                    contents: {
+                      type: { repr: '0x2::display::Display<0xdeadbeef::nft::NFT>' },
+                      json: {
+                        fields: {
+                          contents: [
+                            { key: 'name', value: 'My Collection' },
+                            { key: 'description', value: '{description}' }, // templated — dropped
+                            { key: 'project_url', value: 'https://example.com' },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                },
+                {
+                  asMoveObject: {
+                    contents: {
+                      type: { repr: '0x2::display::Display<0xcafebabe::token::Tok>' },
+                      json: {
+                        fields: {
+                          contents: [
+                            { key: 'name', value: 'Tok' },
+                            { key: 'image_url', value: '{image_url}' }, // templated — dropped
+                          ],
+                        },
+                      },
+                    },
+                  },
+                },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const map = await collect();
+      expect(map.get('0xdeadbeef')).toEqual([
+        { key: 'name', value: 'My Collection' },
+        { key: 'project_url', value: 'https://example.com' },
+      ]);
+      expect(map.get('0xcafebabe')).toEqual([{ key: 'name', value: 'Tok' }]);
+    });
+
+    it('skips Display objects with no concrete values (all templated)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [
+                {
+                  asMoveObject: {
+                    contents: {
+                      type: { repr: '0x2::display::Display<0xabc::m::T>' },
+                      json: { fields: { contents: [
+                        { key: 'name', value: '{name}' },
+                        { key: 'description', value: '{description}' },
+                      ] } },
+                    },
+                  },
+                },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const map = await collect();
+      expect(map.size).toBe(0);
+    });
+
+    it('returns an empty map gracefully on GraphQL error', async () => {
+      fetchMock.mockResolvedValue({ json: async () => ({ errors: [{ message: 'boom' }] }) });
+      const map = await collect();
+      expect(map.size).toBe(0);
+    });
+
+    it('returns empty when the first page is defensively missing objects (malformed response)', async () => {
+      fetchMock.mockResolvedValue({ json: async () => ({ data: {} }) });
+      const map = await collect();
+      expect(map.size).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops when hasNextPage=true but endCursor is null (defensive)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [{ asMoveObject: { contents: {
+                type: { repr: '0x2::display::Display<0xaa::m::T>' },
+                json: { fields: { contents: [{ key: 'name', value: 'A' }] } },
+              } } }],
+              pageInfo: { hasNextPage: true, endCursor: null },
+            },
+          },
+        }),
+      });
+      const map = await collect();
+      expect(map.get('0xaa')).toEqual([{ key: 'name', value: 'A' }]);
+      // Stopped at null cursor — not re-queried.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns empty when `data.objects` is present but `nodes` is absent', async () => {
+      fetchMock.mockResolvedValue({ json: async () => ({ data: { objects: { pageInfo: { hasNextPage: false, endCursor: null } } } }) });
+      const map = await collect();
+      expect(map.size).toBe(0);
+    });
+
+    it('returns empty when the first page returns zero nodes', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: { objects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+        }),
+      });
+      const map = await collect();
+      expect(map.size).toBe(0);
+    });
+
+    it('paginates across pages and stops at hasNextPage=false', async () => {
+      fetchMock
+        .mockResolvedValueOnce({
+          json: async () => ({
+            data: {
+              objects: {
+                nodes: [{ asMoveObject: { contents: {
+                  type: { repr: '0x2::display::Display<0xaa::m::T>' },
+                  json: { fields: { contents: [{ key: 'name', value: 'A' }] } },
+                } } }],
+                pageInfo: { hasNextPage: true, endCursor: 'C1' },
+              },
+            },
+          }),
+        })
+        .mockResolvedValueOnce({
+          json: async () => ({
+            data: {
+              objects: {
+                nodes: [{ asMoveObject: { contents: {
+                  type: { repr: '0x2::display::Display<0xbb::m::T>' },
+                  json: { fields: { contents: [{ key: 'name', value: 'B' }] } },
+                } } }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        });
+      const map = await collect();
+      expect(map.get('0xaa')).toEqual([{ key: 'name', value: 'A' }]);
+      expect(map.get('0xbb')).toEqual([{ key: 'name', value: 'B' }]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('merges Display metadata from two Display<T> objects sharing the same inner package', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [
+                { asMoveObject: { contents: {
+                  type: { repr: '0x2::display::Display<0xshared::m::T1>' },
+                  json: { fields: { contents: [{ key: 'name', value: 'First' }] } },
+                } } },
+                { asMoveObject: { contents: {
+                  type: { repr: '0x2::display::Display<0xshared::m::T2>' },
+                  json: { fields: { contents: [{ key: 'description', value: 'Second' }] } },
+                } } },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const map = await collect();
+      expect(map.get('0xshared')).toEqual([
+        { key: 'name', value: 'First' },
+        { key: 'description', value: 'Second' },
+      ]);
+    });
+
+    it('skips Display entries whose `contents` field is not an array (non-array / null)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [
+                { asMoveObject: { contents: {
+                  type: { repr: '0x2::display::Display<0xabc::m::T>' },
+                  json: { fields: { contents: null } }, // not an array → skip
+                } } },
+                { asMoveObject: { contents: {
+                  type: { repr: '0x2::display::Display<0xabc::m::T>' },
+                  json: { fields: { contents: 'oops' } }, // not an array → skip
+                } } },
+                { asMoveObject: { contents: {
+                  type: { repr: '0x2::display::Display<0xabc::m::T>' },
+                  json: { fields: { contents: [{ key: 'name', value: 'Keep' }] } },
+                } } },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const map = await collect();
+      expect(map.get('0xabc')).toEqual([{ key: 'name', value: 'Keep' }]);
+    });
+
+    it('skips Display entries with missing type.repr or json (defensive)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [
+                { asMoveObject: { contents: { type: { repr: '' }, json: { fields: { contents: [{ key: 'name', value: 'A' }] } } } } }, // empty repr
+                { asMoveObject: { contents: { type: { repr: '0x2::display::Display<0xaa::m::T>' }, json: null } } },                    // null json
+                { asMoveObject: { contents: { type: { repr: '0x2::display::Display<0xaa::m::T>' }, json: { fields: { contents: [{ key: 'name', value: 'B' }] } } } } },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const map = await collect();
+      expect(map.get('0xaa')).toEqual([{ key: 'name', value: 'B' }]);
+    });
+
+    it('skips malformed entries (non-string key/value, missing contents array, no inner type)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            objects: {
+              nodes: [
+                { asMoveObject: { contents: { type: { repr: 'no-inner-type-here' }, json: { fields: { contents: [] } } } } },
+                { asMoveObject: { contents: { type: { repr: '0x2::display::Display<0xcc::m::T>' }, json: { fields: { contents: [
+                  { key: 'name', value: 42 }, // non-string value — dropped
+                  { key: null, value: 'x' },  // non-string key — dropped
+                  { key: 'name', value: 'Keep' },
+                ] } } } } },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const map = await collect();
+      expect(map.get('0xcc')).toEqual([{ key: 'name', value: 'Keep' }]);
+    });
+  });
+
   // ---------- sampleEventTypes ----------
 
   describe('sampleEventTypes', () => {
@@ -3036,6 +3299,8 @@ describe('EcosystemService', () => {
       eventsByPackage?: Record<string, number>;
       /** Per-package event-type short names returned by `sampleEventTypes`. Synthesized as `<pkg>::<mod>::Name` reprs in the mocked GraphQL response. */
       eventTypesByPackage?: Record<string, string[]>;
+      /** Display-object entries — each yields one `Display<inner>` object with the given fields. */
+      displayByPackage?: Array<{ inner: string; fields: Array<{ key: string; value: string }> }>;
     }) => {
       return jest.fn(async (url: string, opts: any) => {
         const body: string = opts?.body || '';
@@ -3057,6 +3322,20 @@ describe('EcosystemService', () => {
             const count = script.eventsByPackage?.[pkgAddr] ?? 0;
             const nodes = Array.from({ length: count }, () => ({ __typename: 'MoveEvent' }));
             return { json: async () => ({ data: { events: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }) };
+          }
+          // collectDisplayMetadata — `objects(filter: { type: "0x2::display::Display" })`.
+          // Matched before the generic objects handler below so it doesn't
+          // fall through to the empty-default path.
+          if (body.includes('objects(filter:') && body.includes('::display::Display')) {
+            const nodes = (script.displayByPackage ?? []).map(({ inner, fields }) => ({
+              asMoveObject: {
+                contents: {
+                  type: { repr: `0x2::display::Display<${inner}>` },
+                  json: { fields: { contents: fields } },
+                },
+              },
+            }));
+            return { json: async () => ({ data: { objects: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }) };
           }
           // sampleEventTypes — `events(filter:) { nodes { type { repr } } }`.
           // Uses `eventTypesByPackage` script entry keyed on pkgAddr; returns
@@ -3205,6 +3484,30 @@ describe('EcosystemService', () => {
       expect(cluster).toBeDefined();
       expect(cluster.insights).toContain('DEX-shaped (swap + liquidity entry fns)');
       expect(cluster.publishedAt).toBe('2026-04-22T12:00:00.000Z');
+    });
+
+    it('end-to-end: Display metadata surfaces as display.<key>: <value> entries in the cluster identifiers', async () => {
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({ address: '0xdeadbeef', modules: ['m1'] }),
+        ],
+        displayByPackage: [
+          {
+            inner: '0xdeadbeef::m1::NFT',
+            fields: [
+              { key: 'name', value: 'My Collection' },
+              { key: 'image_url', value: '{image_url}' }, // templated — dropped
+              { key: 'project_url', value: 'https://example.com' },
+            ],
+          },
+        ],
+      });
+      const snap = await runCapture();
+      const cluster = snap.unattributed.find((c: any) => c.deployer === '0xdeployer');
+      expect(cluster).toBeDefined();
+      expect(cluster.sampleIdentifiers).toContain('display.name: My Collection');
+      expect(cluster.sampleIdentifiers).toContain('display.project_url: https://example.com');
+      expect(cluster.sampleIdentifiers.find((s: string) => s.includes('image_url'))).toBeUndefined();
     });
 
     it('end-to-end: event-type-only (no matching entry fns) falls back to event-domain matcher', async () => {

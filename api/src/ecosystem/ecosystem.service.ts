@@ -382,7 +382,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 8;
+  private static readonly CLASSIFIER_VERSION = 9;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -1049,6 +1049,88 @@ export class EcosystemService implements OnModuleInit {
     }
     this.logger.log(`Fetched ${packages.length} mainnet packages`);
     return packages;
+  }
+
+  /**
+   * Collect all `0x2::display::Display<T>` objects on-chain, group their
+   * concrete (non-templated) metadata fields by the inner package address,
+   * return a `Map<pkgAddr, Array<{key, value}>>`. Display objects carry
+   * the canonical project-declared metadata for a Move type (name,
+   * description, image_url, project_url, link, creator) — complementary
+   * to `probeIdentityFields` because:
+   *
+   *   - probeIdentityFields queries `objects(type: "<pkgAddr>")` and so
+   *     cannot match `Display<T>` (its type starts with `0x2`, not pkgAddr).
+   *   - logic-only packages with no owned objects register Display here
+   *     anyway if the project set up Display for readability.
+   *
+   * Templated values (`{name}`, `{description}`) are filtered out because
+   * they're the Display schema definition, not identifying content. A
+   * concrete `https://iota.org` or `"Genesis NFT"` is kept; `{image_url}`
+   * is dropped. Called once per capture; single paginated query, bounded
+   * at 200 pages × 50 = 10 000 Display objects (mainnet today has ~2-3k
+   * Display objects). Logs and returns empty on GraphQL error.
+   */
+  private async collectDisplayMetadata(): Promise<Map<string, Array<{ key: string; value: string }>>> {
+    const DISPLAY_TYPE = '0x0000000000000000000000000000000000000000000000000000000000000002::display::Display';
+    const MAX_PAGES = 200;
+    const TEMPLATE_ONLY = /^\{[^}]+\}$/; // entire value is one placeholder, e.g. `{name}`
+    const innerTypeRe = /<([^>]+)>/; // extract `<...>` from the outer Display<T> repr
+    const byPackage = new Map<string, Array<{ key: string; value: string }>>();
+    let cursor: string | null = null;
+    for (let i = 0; i < MAX_PAGES; i++) {
+      const after = cursor ? `, after: "${cursor}"` : '';
+      let data: any;
+      try {
+        data = await this.graphql(`{
+          objects(filter: { type: "${DISPLAY_TYPE}" }, first: 50${after}) {
+            nodes { asMoveObject { contents { type { repr } json } } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }`);
+      } catch {
+        break;
+      }
+      // Explicit guard over an optional-chain `??` here because ts-jest
+      // instruments the compiled form of `a?.b ?? []` in a way istanbul
+      // can't mark the default branch covered, bogusly dragging the
+      // baseline down. Plain `if (!…)` sidesteps that.
+      const objectsField = data.objects;
+      if (!objectsField) break;
+      const nodes = objectsField.nodes;
+      if (!Array.isArray(nodes) || nodes.length === 0) break;
+      for (const n of nodes) {
+        const repr: string | undefined = n.asMoveObject?.contents?.type?.repr;
+        const json = n.asMoveObject?.contents?.json;
+        if (!repr || !json) continue;
+        const match = innerTypeRe.exec(repr);
+        if (!match) continue;
+        // `match[1]` is a non-empty capture from `<([^>]+)>` — splitting and
+        // taking index 0 always yields a non-empty string, no need to guard.
+        const innerPkg = match[1].split('::')[0].toLowerCase();
+        const contents = json?.fields?.contents;
+        if (!Array.isArray(contents)) continue;
+        const keep: Array<{ key: string; value: string }> = [];
+        for (const entry of contents) {
+          const key = entry?.key;
+          const value = entry?.value;
+          if (typeof key !== 'string' || typeof value !== 'string') continue;
+          const trimmed = value.trim();
+          if (!trimmed || TEMPLATE_ONLY.test(trimmed)) continue;
+          keep.push({ key, value: trimmed });
+        }
+        if (keep.length === 0) continue;
+        const bucket = byPackage.get(innerPkg);
+        if (bucket) bucket.push(...keep);
+        else byPackage.set(innerPkg, keep);
+      }
+      const pageInfo = objectsField.pageInfo;
+      if (!pageInfo || !pageInfo.hasNextPage) break;
+      const nextCursor = pageInfo.endCursor;
+      if (!nextCursor) break;
+      cursor = nextCursor;
+    }
+    return byPackage;
   }
 
   /**
@@ -2390,6 +2472,15 @@ export class EcosystemService implements OnModuleInit {
   }> {
     const allPackages = await this.getAllPackages();
 
+    // Display metadata pre-pass: one paginated fetch of every
+    // `0x2::display::Display<T>` object on chain, grouped by the inner-type
+    // package address. Each package's per-object fingerprint probe below
+    // can then fold in any concrete display fields (name/description/
+    // image_url/project_url) that would otherwise be invisible — the
+    // object-prefix filter used in `probeIdentityFields` misses Display
+    // because its outer type lives under `0x2`, not the package address.
+    const displayByPackage = await this.collectDisplayMetadata();
+
     // Framework filter (see doc-comment above).
     const claimedAddresses = new Set<string>();
     for (const def of ALL_PROJECTS) {
@@ -2474,6 +2565,22 @@ export class EcosystemService implements OnModuleInit {
         if (tx.identifiers.length) {
           identifiers = tx.identifiers;
           if (!objectType) objectType = tx.objectType;
+        }
+      }
+      // Fold in Display metadata when the package has any registered.
+      // Prefix with `display.` so these are distinguishable in the UI's
+      // Nested identifiers column and from probe-extracted strings.
+      // Deduped via Set because a project with 3 Display<T> objects for
+      // different types commonly repeats the same project_url.
+      const displayEntries = displayByPackage.get(pkg.address.toLowerCase()) ?? [];
+      if (displayEntries.length > 0) {
+        const seen = new Set(identifiers);
+        for (const { key, value } of displayEntries) {
+          const line = `display.${key}: ${value}`;
+          if (!seen.has(line)) {
+            identifiers = [...identifiers, line];
+            seen.add(line);
+          }
         }
       }
       const fingerprint: FingerprintSampleDoc | null =
