@@ -27,6 +27,17 @@ export class ProjectTxDigest extends Document {
 
   @Prop({ required: true })
   digest: string;
+
+  /**
+   * Sender address of the TX (lowercased) when the capture/backfill walk
+   * fetched it. Forward-only — docs predating the addition of this field
+   * carry `null` and are never back-patched (a full re-scan would replay
+   * all digests via the unique index's dup-silencing, which `insertMany`
+   * already does). Classify-time sender aggregations filter out `null`
+   * before ranking.
+   */
+  @Prop({ type: String, default: null })
+  sender: string | null;
 }
 
 export const ProjectTxDigestSchema = SchemaFactory.createForClass(ProjectTxDigest);

@@ -269,6 +269,9 @@ describe('EcosystemService', () => {
     txDigestModel = {
       insertMany: jest.fn().mockResolvedValue([]),
       countDocuments: jest.fn().mockResolvedValue(0),
+      // classifyFromRaw aggregates unattributed packages' TX digests by
+      // sender for the top-sender-concentration insight. Default: no hits.
+      aggregate: jest.fn().mockResolvedValue([]),
       collection: { name: 'project_tx_digests' },
     };
     holdersStateModel = {
@@ -406,6 +409,7 @@ describe('EcosystemService', () => {
       publishNeighbors: [] as { name: string; slug: string; minutesDelta: number }[],
       entryFunctions: [] as string[],
       eventTypes: [] as string[],
+      topSender: null as { address: string; count: number; totalCount: number } | null,
       now: new Date('2026-04-23T00:00:00Z'),
     };
     const build = (ctx: any) =>
@@ -732,6 +736,43 @@ describe('EcosystemService', () => {
         eventTypes: ['Minted'],
       });
       expect(insights.find((s: string) => s.startsWith('NFT-shaped'))).toBeUndefined();
+    });
+
+    it('emits "Top sender … drove N% of sampled TX" when concentration is ≥20% on ≥10 samples', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 5, transactions: 50, events: 10,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        topSender: { address: '0xabcdef1234567890abcdef12', count: 15, totalCount: 30 },
+      });
+      expect(insights.find((s: string) => /Top sender 0xabcdef…ef12 drove 50% of sampled TX/.test(s))).toBeTruthy();
+    });
+
+    it('leaves the "Top sender" insight silent when sampled volume is below 10 (too noisy)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        topSender: { address: '0xabc', count: 5, totalCount: 9 },
+      });
+      expect(insights.find((s: string) => s.startsWith('Top sender'))).toBeUndefined();
+    });
+
+    it('leaves the "Top sender" insight silent when concentration is below 20%', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 30, transactions: 120, events: 30,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        topSender: { address: '0xabc', count: 15, totalCount: 100 }, // 15% — too diffuse to insight
+      });
+      expect(insights.find((s: string) => s.startsWith('Top sender'))).toBeUndefined();
+    });
+
+    it('renders short-address form when the top sender is a full 64-hex string', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 5, transactions: 50, events: 10,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        topSender: { address: '0x' + 'a'.repeat(64), count: 20, totalCount: 40 },
+      });
+      const note = insights.find((s: string) => s.startsWith('Top sender'));
+      expect(note).toMatch(/0xaaaaaa…aaaa/);
     });
 
     it('prefers entry-fn domain hint over event-based when both match', () => {
@@ -1126,6 +1167,61 @@ describe('EcosystemService', () => {
       const view = await (service as any).classifyFromRaw(raw);
       const c = view.unattributed[0];
       expect(c.insights).toContain('NFT-shaped (mint + burn entry fns)');
+    });
+
+    it('propagates eventsCapped up to the unattributed cluster row when any matched ModuleMetrics is capped', async () => {
+      const raw = {
+        _id: 'raw-ev-capped',
+        packages: [
+          {
+            address: '0xabc123',
+            deployer: '0xdeployer',
+            storageRebateNanos: 1,
+            modules: ['m1'],
+            moduleMetrics: [{ module: 'm1', events: 2500000, eventsCapped: true, uniqueSenders: 0 }],
+            objectCount: 0,
+            fingerprint: null,
+          },
+        ],
+        totalStorageRebateNanos: 1,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const cluster = view.unattributed.find((c: any) => c.deployer === '0xdeployer');
+      expect(cluster.eventsCapped).toBe(true);
+    });
+
+    it('aggregates per-sender TX volume from project_tx_digests into a Top-sender insight (skips deployer)', async () => {
+      // Two senders recorded against the unattributed package, one of them
+      // is the deployer (gets skipped so the "top EXTERNAL sender" story
+      // dominates) and the other drove 15 of 30 TXs (50% — above the 20%
+      // threshold, 30 samples — above the 10-sample floor).
+      txDigestModel.aggregate = jest.fn().mockResolvedValue([
+        { _id: { pkg: '0x999aaa', sender: '0xexternal' }, count: 15 },
+        { _id: { pkg: '0x999aaa', sender: '0xfeedbabe' }, count: 15 }, // deployer — skipped
+      ]);
+      const raw = {
+        _id: 'raw-top-sender',
+        packages: [
+          {
+            address: '0x999aaa',
+            deployer: '0xfeedbabe',
+            storageRebateNanos: 500_000_000,
+            modules: ['m1'],
+            moduleMetrics: [{ module: 'm1', events: 5, eventsCapped: false, uniqueSenders: 2 }],
+            objectCount: 0,
+            fingerprint: null,
+          },
+        ],
+        totalStorageRebateNanos: 500_000_000,
+        networkTxTotal: 1,
+        txRates: {},
+      };
+      const view = await (service as any).classifyFromRaw(raw);
+      const cluster = view.unattributed.find((c: any) => c.deployer === '0xfeedbabe');
+      expect(cluster).toBeDefined();
+      expect(cluster.insights.find((s: string) => s.includes('Top sender 0xexternal drove 50%'))).toBeTruthy();
     });
 
     it('skips deployer-sender patterns for unknown-deployer clusters (framework packages)', async () => {
@@ -4395,7 +4491,20 @@ describe('EcosystemService', () => {
         expect(txDigestModel.insertMany).toHaveBeenCalledTimes(2);
         const [docs, opts] = txDigestModel.insertMany.mock.calls[0];
         expect(opts).toEqual({ ordered: false });
-        expect((docs as any[])[0]).toEqual({ packageAddress: '0xpkg', digest: 'd1' });
+        expect((docs as any[])[0]).toEqual({ packageAddress: '0xpkg', digest: 'd1', sender: null });
+      });
+
+      it('captures sender address on the digest row (lowercased) when present on the node', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValue({
+          transactionBlocks: {
+            nodes: [{ digest: 'd1', sender: { address: '0xABCDEF' } }],
+            pageInfo: { hasPreviousPage: false, startCursor: null },
+          },
+        });
+        txDigestModel.insertMany.mockResolvedValueOnce([{}]);
+        await (service as any).pageBackwardTxs('0xpkg', 10, { stopOnAllDups: true });
+        const [docs] = txDigestModel.insertMany.mock.calls[0];
+        expect((docs as any[])[0]).toEqual({ packageAddress: '0xpkg', digest: 'd1', sender: '0xabcdef' });
       });
 
       it('reachedEnd=true on empty nodes', async () => {

@@ -382,7 +382,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 9;
+  private static readonly CLASSIFIER_VERSION = 10;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -1458,7 +1458,7 @@ export class EcosystemService implements OnModuleInit {
       try {
         data = await this.graphql(`{
           transactionBlocks(filter: { function: "${packageAddress}" }, last: 50${before}) {
-            nodes { digest }
+            nodes { digest sender { address } }
             pageInfo { hasPreviousPage startCursor }
           }
         }`);
@@ -1475,7 +1475,11 @@ export class EcosystemService implements OnModuleInit {
 
       const docs = nodes
         .filter((n: any) => typeof n?.digest === 'string' && n.digest.length > 0)
-        .map((n: any) => ({ packageAddress, digest: n.digest }));
+        .map((n: any) => ({
+          packageAddress,
+          digest: n.digest,
+          sender: typeof n.sender?.address === 'string' ? n.sender.address.toLowerCase() : null,
+        }));
 
       let newlyInserted = 0;
       if (docs.length > 0) {
@@ -2129,6 +2133,8 @@ export class EcosystemService implements OnModuleInit {
     entryFunctions: string[];
     /** Union of distinct event-struct type names sampled from the cluster's modules — feeds both the domain matcher and an "Emits X, Y events" fallback insight. */
     eventTypes: string[];
+    /** Top sender by TX count across the cluster's packages, with total sampled volume. `null` when no digests carry sender metadata (legacy / very new package). */
+    topSender: { address: string; count: number; totalCount: number } | null;
     /** Now, injected so the age calc is deterministic in tests. */
     now: Date;
   }): string[] {
@@ -2183,6 +2189,20 @@ export class EcosystemService implements OnModuleInit {
 
     if (ctx.packageCount >= 5) {
       out.push(`${ctx.packageCount}-package footprint — likely a multi-contract protocol`);
+    }
+
+    // Top-sender concentration — surfaces "one wallet drove N% of TX"
+    // insights that the presence-only deployerIsSender check can't. Only
+    // emitted when we have a meaningful volume (≥10 TXs with recorded
+    // sender) and the top wallet is ≥20% of that — otherwise the
+    // concentration is too weak to be an insight vs noise.
+    if (ctx.topSender && ctx.topSender.totalCount >= 10) {
+      const pct = Math.round((ctx.topSender.count / ctx.topSender.totalCount) * 100);
+      if (pct >= 20) {
+        const addr = ctx.topSender.address;
+        const short = addr.length > 14 ? `${addr.slice(0, 8)}…${addr.slice(-4)}` : addr;
+        out.push(`Top sender ${short} drove ${pct}% of sampled TX`);
+      }
     }
 
     const domain =
@@ -3010,6 +3030,29 @@ export class EcosystemService implements OnModuleInit {
           publishedAtMs: new Date(p.publishedAt as string).getTime(),
         }));
 
+    // Bulk TX-volume-by-sender aggregation for unattributed clusters. One
+    // pipeline per classify: match every unattributed package, group by
+    // sender, count digests, then sort top-5 per package. At the cluster
+    // level we merge across packages and pick the top concentration for an
+    // "X drove N% of TX" insight. Forward-only-populated sender field means
+    // pre-rollout digests are excluded via `$ne: null`; pct is computed
+    // against the non-null denominator so the insight is honest.
+    const unattributedPkgAddrs = unattributedRanked.flatMap((e) => e.facts.map((p) => p.address));
+    const senderVolumeByPkg = new Map<string, Array<{ address: string; count: number }>>();
+    if (unattributedPkgAddrs.length > 0) {
+      const agg = await this.txDigestModel.aggregate([
+        { $match: { packageAddress: { $in: unattributedPkgAddrs }, sender: { $ne: null } } },
+        { $group: { _id: { pkg: '$packageAddress', sender: '$sender' }, count: { $sum: 1 } } },
+        { $sort: { '_id.pkg': 1, count: -1 } },
+      ]);
+      for (const row of agg as Array<{ _id: { pkg: string; sender: string }; count: number }>) {
+        const bucket = senderVolumeByPkg.get(row._id.pkg);
+        const entry = { address: row._id.sender, count: row.count };
+        if (bucket) bucket.push(entry);
+        else senderVolumeByPkg.set(row._id.pkg, [entry]);
+      }
+    }
+
     // Bulk sender probe — one Mongo query covers every (clusterPkg, deployer)
     // pair. Key the result set so the per-cluster loop below is an O(1)
     // lookup rather than a per-cluster round-trip. Senders store the deployer
@@ -3125,6 +3168,30 @@ export class EcosystemService implements OnModuleInit {
         }
       }
 
+      // Aggregate per-sender TX counts across the cluster's packages. The
+      // bulk aggregation above already grouped by sender per package; merge
+      // across packages here to get the cluster-level top. Skip the deployer
+      // itself when computing "top external sender" — it gets its own
+      // deployerIsSender insight already.
+      const senderTotals = new Map<string, number>();
+      for (const pkg of facts) {
+        const rows = senderVolumeByPkg.get(pkg.address) ?? [];
+        for (const r of rows) {
+          senderTotals.set(r.address, (senderTotals.get(r.address) ?? 0) + r.count);
+        }
+      }
+      let topSender: { address: string; count: number; totalCount: number } | null = null;
+      if (senderTotals.size > 0) {
+        let best: [string, number] | null = null;
+        let total = 0;
+        for (const [addr, cnt] of senderTotals) {
+          total += cnt;
+          if (deployer !== 'unknown' && addr === deployer.toLowerCase()) continue;
+          if (!best || cnt > best[1]) best = [addr, cnt];
+        }
+        if (best) topSender = { address: best[0], count: best[1], totalCount: total };
+      }
+
       const insights = this.buildClusterInsights({
         packageCount: facts.length,
         uniqueSenders,
@@ -3137,6 +3204,7 @@ export class EcosystemService implements OnModuleInit {
         publishNeighbors,
         entryFunctions: Array.from(clusterEntryFunctions),
         eventTypes: Array.from(clusterEventTypes),
+        topSender,
         now: new Date(),
       });
 
