@@ -59,6 +59,24 @@ export class ModuleMetrics {
    * public entry functions.
    */
   @Prop({ type: [String], default: [] }) entryFunctions: string[];
+
+  /**
+   * Short names of distinct event-struct types this module emits, sampled
+   * from the first few pages of `events(filter: { emittingModule })`.
+   * Complementary to `entryFunctions`:
+   *   - entry fns say what a caller *can do*
+   *   - event types say what actually *happened on-chain*
+   * For heuristics: `Swapped` alone is nearly pathognomonic for a DEX
+   * regardless of entry-function naming discipline.
+   *
+   * Short names (trailing `::Event` segment), not full type reprs — the
+   * module name is already known from the parent record, so storing the
+   * full `<pkg>::<mod>::Event` string every time is wasteful.
+   *
+   * Empty array on snapshots predating this field and on modules that
+   * emit no events or whose event sample page failed.
+   */
+  @Prop({ type: [String], default: [] }) eventTypes: string[];
 }
 
 /**

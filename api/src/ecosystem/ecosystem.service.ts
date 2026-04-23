@@ -382,7 +382,7 @@ export class EcosystemService implements OnModuleInit {
    * Registry-only edits (adding a project, renaming a team) do NOT need a
    * bump — `ALL_PROJECTS` / `ALL_TEAMS` are already in the hash input.
    */
-  private static readonly CLASSIFIER_VERSION = 7;
+  private static readonly CLASSIFIER_VERSION = 8;
 
   /**
    * In-process 10-min TTL cache for DefiLlama's `/protocols` response. The
@@ -1049,6 +1049,48 @@ export class EcosystemService implements OnModuleInit {
     }
     this.logger.log(`Fetched ${packages.length} mainnet packages`);
     return packages;
+  }
+
+  /**
+   * Lightweight sample of distinct event-struct type names emitted by a
+   * module. Reads up to 3 pages × 50 = 150 events and extracts the
+   * trailing segment of each `type.repr` (so `<pkg>::<mod>::Swapped`
+   * becomes `Swapped`). Used to enrich the Insights column with
+   * "Emits Swapped, PoolCreated events"-style hints.
+   *
+   * Kept separate from `countEvents` because `countEvents` walks up to
+   * 50k pages for totals; we only need a handful of pages to learn the
+   * distinct-type vocabulary. The added call is ~1 round-trip per module;
+   * at ~750 packages × ~3 modules avg it's low-cost against the cron's
+   * overall budget. Short-circuits on GraphQL error (returns []).
+   */
+  private async sampleEventTypes(emittingModule: string, maxPages = 3): Promise<string[]> {
+    const found = new Set<string>();
+    let cursor: string | null = null;
+    for (let i = 0; i < maxPages; i++) {
+      const afterClause: string = cursor ? `, after: "${cursor}"` : '';
+      let data: any;
+      try {
+        data = await this.graphql(`{
+          events(filter: { emittingModule: "${emittingModule}" }, first: 50${afterClause}) {
+            nodes { type { repr } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }`);
+      } catch {
+        break;
+      }
+      for (const n of data.events?.nodes ?? []) {
+        const repr = n.type?.repr as string | undefined;
+        if (!repr) continue;
+        const short = repr.split('::').pop();
+        if (short) found.add(short);
+      }
+      if (!data.events?.pageInfo?.hasNextPage) break;
+      cursor = data.events?.pageInfo?.endCursor ?? null;
+      if (!cursor) break;
+    }
+    return Array.from(found);
   }
 
   private async countEvents(emittingModule: string, maxPages = 50000): Promise<{ count: number; capped: boolean }> {
@@ -2003,6 +2045,8 @@ export class EcosystemService implements OnModuleInit {
     publishNeighbors: { name: string; slug: string; minutesDelta: number }[];
     /** Union of public entry-function names across the cluster's modules — fed to `inferDomainFromEntryFunctions`. */
     entryFunctions: string[];
+    /** Union of distinct event-struct type names sampled from the cluster's modules — feeds both the domain matcher and an "Emits X, Y events" fallback insight. */
+    eventTypes: string[];
     /** Now, injected so the age calc is deterministic in tests. */
     now: Date;
   }): string[] {
@@ -2059,10 +2103,54 @@ export class EcosystemService implements OnModuleInit {
       out.push(`${ctx.packageCount}-package footprint — likely a multi-contract protocol`);
     }
 
-    const domain = this.inferDomainFromEntryFunctions(ctx.entryFunctions);
-    if (domain) out.push(domain);
+    const domain =
+      this.inferDomainFromEntryFunctions(ctx.entryFunctions) ??
+      this.inferDomainFromEventTypes(ctx.eventTypes);
+    if (domain) {
+      out.push(domain);
+    } else if (ctx.eventTypes.length > 0) {
+      // Fallback — no matched domain pattern, but the cluster still emits
+      // events. Surface the top few names verbatim so a human can
+      // recognize project-specific tokens (`Swapped` immediately reads
+      // DEX even when the full pattern didn't match).
+      const sampled = ctx.eventTypes.slice(0, 4).join(', ');
+      out.push(`Emits ${sampled} event(s)`);
+    }
 
     return out;
+  }
+
+  /**
+   * Second-pass domain matcher keyed on event-struct type names instead of
+   * entry-function names. Event names self-attest domain even more
+   * reliably than entry fns — a project may have idiosyncratic public
+   * fn naming but still emit the canonical `Swapped`/`Minted`/`Staked`.
+   * Returns the same set of human-readable category strings as
+   * `inferDomainFromEntryFunctions` so the Insights column stays uniform.
+   */
+  private inferDomainFromEventTypes(eventTypes: string[]): string | null {
+    if (eventTypes.length === 0) return null;
+    const set = new Set(eventTypes.map((n) => n.toLowerCase()));
+    const hasAny = (...pats: string[]) => pats.some((p) => set.has(p));
+    if (hasAny('swapped', 'swap', 'swapevent') && hasAny('liquidityadded', 'liquidityremoved', 'poolcreated')) {
+      return 'DEX-shaped (swap + pool/liquidity events)';
+    }
+    if (hasAny('borrowevent', 'borrow', 'borrowed', 'liquidationevent', 'liquidated')) {
+      return 'Lending-shaped (borrow/liquidation events)';
+    }
+    if (hasAny('staked', 'stakeevent') && hasAny('unstaked', 'unstakeevent', 'withdrawn')) {
+      return 'Staking-shaped (stake/unstake events)';
+    }
+    if (hasAny('minted', 'mintevent', 'nftminted') && hasAny('burned', 'burnevent', 'nftburned')) {
+      return 'NFT-shaped (mint/burn events)';
+    }
+    if (hasAny('locked', 'lockevent', 'tokenlocked') && hasAny('unlocked', 'unlockevent', 'redeemed')) {
+      return 'Bridge-shaped (lock/unlock events)';
+    }
+    if (hasAny('issued', 'issueevent', 'credentialissued') && hasAny('revoked', 'verified', 'verifyevent')) {
+      return 'Credential-shaped (issue/verify events)';
+    }
+    return null;
   }
 
   /**
@@ -2355,14 +2443,20 @@ export class EcosystemService implements OnModuleInit {
       // queries are plain subtraction between any two snapshots.
       const moduleMetrics: ModuleMetrics[] = [];
       for (const mod of modules) {
-        const { count: events, capped: eventsCapped } = await this.countEvents(`${pkg.address}::${mod}`);
+        const emittingModule = `${pkg.address}::${mod}`;
+        const { count: events, capped: eventsCapped } = await this.countEvents(emittingModule);
         const uniqueSenders = await this.updateSendersForModule(pkg.address, mod);
+        // Only probe event types when there's at least one event — skips a
+        // GraphQL round-trip on modules that never emit (~40% of registered
+        // modules by a rough sample).
+        const eventTypes = events > 0 ? await this.sampleEventTypes(emittingModule) : [];
         moduleMetrics.push({
           module: mod,
           events,
           eventsCapped,
           uniqueSenders,
           entryFunctions: entryFunctionsByModule.get(mod) ?? [],
+          eventTypes,
         });
       }
 
@@ -2908,14 +3002,18 @@ export class EcosystemService implements OnModuleInit {
         publishNeighbors.sort((a, b) => Math.abs(a.minutesDelta) - Math.abs(b.minutesDelta));
       }
 
-      // Flatten the cluster's entry-function set for domain-hint matching.
-      // Deduped in a Set so a repeated `swap` across 5 modules doesn't get
-      // counted five times; the matcher only cares about presence.
+      // Flatten the cluster's entry-function + event-type sets for domain-
+      // hint matching. Deduped in Sets so repeats across modules don't
+      // skew the matcher; presence is all that matters.
       const clusterEntryFunctions = new Set<string>();
+      const clusterEventTypes = new Set<string>();
       for (const pkg of facts) {
         for (const mm of pkg.moduleMetrics) {
           for (const fn of (mm as any).entryFunctions ?? []) {
             clusterEntryFunctions.add(fn);
+          }
+          for (const et of (mm as any).eventTypes ?? []) {
+            clusterEventTypes.add(et);
           }
         }
       }
@@ -2931,6 +3029,7 @@ export class EcosystemService implements OnModuleInit {
         latestPublishedAt,
         publishNeighbors,
         entryFunctions: Array.from(clusterEntryFunctions),
+        eventTypes: Array.from(clusterEventTypes),
         now: new Date(),
       });
 

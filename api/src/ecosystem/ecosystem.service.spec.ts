@@ -405,6 +405,7 @@ describe('EcosystemService', () => {
       latestPublishedAt: null,
       publishNeighbors: [] as { name: string; slug: string; minutesDelta: number }[],
       entryFunctions: [] as string[],
+      eventTypes: [] as string[],
       now: new Date('2026-04-23T00:00:00Z'),
     };
     const build = (ctx: any) =>
@@ -638,6 +639,111 @@ describe('EcosystemService', () => {
         entryFunctions: ['do_the_thing', 'other_thing'],
       });
       expect(insights.find((s: string) => s.includes('shaped'))).toBeUndefined();
+    });
+
+    it('tags DEX-shape from events alone when entry fns are silent', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 5, transactions: 10, events: 30,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['execute', 'init'],
+        eventTypes: ['Swapped', 'LiquidityAdded'],
+      });
+      expect(insights).toContain('DEX-shaped (swap + pool/liquidity events)');
+    });
+
+    it('tags Lending-shape from events alone (liquidated)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 10,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['run'],
+        eventTypes: ['Liquidated', 'PriceUpdated'],
+      });
+      expect(insights).toContain('Lending-shaped (borrow/liquidation events)');
+    });
+
+    it('tags Staking-shape from events (Staked + Unstaked)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 10,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        eventTypes: ['Staked', 'Unstaked'],
+      });
+      expect(insights).toContain('Staking-shaped (stake/unstake events)');
+    });
+
+    it('tags NFT-shape from events (Minted + Burned)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 10,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        eventTypes: ['Minted', 'Burned'],
+      });
+      expect(insights).toContain('NFT-shaped (mint/burn events)');
+    });
+
+    it('tags Bridge-shape from events (Locked + Unlocked)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 10,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        eventTypes: ['Locked', 'Unlocked'],
+      });
+      expect(insights).toContain('Bridge-shaped (lock/unlock events)');
+    });
+
+    it('tags Credential-shape from events (Issued + Verified)', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 10,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        eventTypes: ['Issued', 'Verified'],
+      });
+      expect(insights).toContain('Credential-shaped (issue/verify events)');
+    });
+
+    it('falls back to "Emits X, Y event(s)" when no domain pattern matches but events exist', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        eventTypes: ['OracleUpdated', 'ParameterChanged'],
+      });
+      expect(insights.find((s: string) => s.startsWith('Emits OracleUpdated, ParameterChanged'))).toBeTruthy();
+    });
+
+    it('truncates the "Emits …" fallback to 4 event names when more are present', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 3, transactions: 5, events: 2,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        eventTypes: ['A', 'B', 'C', 'D', 'E', 'F'],
+      });
+      const emits = insights.find((s: string) => s.startsWith('Emits '));
+      expect(emits).toBe('Emits A, B, C, D event(s)');
+    });
+
+    it('does not tag DEX-shape from a single Swapped event without a liquidity event', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 1, transactions: 1, events: 1,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        eventTypes: ['Swapped'],
+      });
+      expect(insights.find((s: string) => s.startsWith('DEX-shaped'))).toBeUndefined();
+    });
+
+    it('does not tag NFT-shape from a single Minted event without a Burned event', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 1, transactions: 1, events: 1,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        eventTypes: ['Minted'],
+      });
+      expect(insights.find((s: string) => s.startsWith('NFT-shaped'))).toBeUndefined();
+    });
+
+    it('prefers entry-fn domain hint over event-based when both match', () => {
+      const insights = build({
+        packageCount: 1, uniqueSenders: 5, transactions: 10, events: 30,
+        deployerAttributedProjects: [], deployerIsSender: false, deployerIsUnknown: false,
+        entryFunctions: ['swap', 'add_liquidity'],
+        eventTypes: ['Swapped', 'LiquidityAdded'],
+      });
+      // entry-fn version wins
+      expect(insights).toContain('DEX-shaped (swap + liquidity entry fns)');
+      expect(insights.find((s: string) => s.includes('pool/liquidity events'))).toBeUndefined();
     });
 
     it('stays silent about deployer-sender patterns when the deployer is unknown (framework packages)', () => {
@@ -1987,6 +2093,113 @@ describe('EcosystemService', () => {
     });
   });
 
+  // ---------- sampleEventTypes ----------
+
+  describe('sampleEventTypes', () => {
+    const sample = (mod: string) => (service as any).sampleEventTypes(mod);
+
+    it('extracts the trailing segment of each event type repr and dedups', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [
+                { type: { repr: '0xabc::dex::Swapped' } },
+                { type: { repr: '0xabc::dex::LiquidityAdded' } },
+                { type: { repr: '0xabc::dex::Swapped' } }, // dup
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const out = await sample('0xabc::dex');
+      expect(out.sort()).toEqual(['LiquidityAdded', 'Swapped']);
+    });
+
+    it('paginates across up to 3 pages when hasNextPage is true', async () => {
+      fetchMock
+        .mockResolvedValueOnce({
+          json: async () => ({
+            data: {
+              events: {
+                nodes: [{ type: { repr: '0xabc::dex::A' } }],
+                pageInfo: { hasNextPage: true, endCursor: 'C1' },
+              },
+            },
+          }),
+        })
+        .mockResolvedValueOnce({
+          json: async () => ({
+            data: {
+              events: {
+                nodes: [{ type: { repr: '0xabc::dex::B' } }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        });
+      const out = await sample('0xabc::dex');
+      expect(out.sort()).toEqual(['A', 'B']);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns [] gracefully on GraphQL error', async () => {
+      fetchMock.mockResolvedValue({ json: async () => ({ errors: [{ message: 'boom' }] }) });
+      expect(await sample('0xabc::dex')).toEqual([]);
+    });
+
+    it('respects an explicit maxPages override (stops early)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [{ type: { repr: '0xabc::m::X' } }],
+              pageInfo: { hasNextPage: true, endCursor: 'NEXT' },
+            },
+          },
+        }),
+      });
+      await (service as any).sampleEventTypes('0xabc::m', 1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops at an empty endCursor even if hasNextPage is true (defensive)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [{ type: { repr: '0xabc::m::X' } }],
+              pageInfo: { hasNextPage: true, endCursor: null },
+            },
+          },
+        }),
+      });
+      const out = await (service as any).sampleEventTypes('0xabc::m');
+      expect(out).toEqual(['X']);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips nodes without a type.repr (defensive — malformed response)', async () => {
+      fetchMock.mockResolvedValue({
+        json: async () => ({
+          data: {
+            events: {
+              nodes: [
+                { type: null },
+                { type: { repr: '' } },
+                { type: { repr: '0xabc::dex::Swapped' } },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      });
+      const out = await sample('0xabc::dex');
+      expect(out).toEqual(['Swapped']);
+    });
+  });
+
   // ---------- probeIdentityFields ----------
 
   describe('probeIdentityFields', () => {
@@ -2821,6 +3034,8 @@ describe('EcosystemService', () => {
       networkTx?: string;
       /** Per-package event counts — matched against the `emittingModule` prefix in the filter. Modules on the same package all share the count. Used to drive primary-selection in shared-slug TVL tests. */
       eventsByPackage?: Record<string, number>;
+      /** Per-package event-type short names returned by `sampleEventTypes`. Synthesized as `<pkg>::<mod>::Name` reprs in the mocked GraphQL response. */
+      eventTypesByPackage?: Record<string, string[]>;
     }) => {
       return jest.fn(async (url: string, opts: any) => {
         const body: string = opts?.body || '';
@@ -2841,6 +3056,19 @@ describe('EcosystemService', () => {
             const pkgAddr = m?.[1] ?? '';
             const count = script.eventsByPackage?.[pkgAddr] ?? 0;
             const nodes = Array.from({ length: count }, () => ({ __typename: 'MoveEvent' }));
+            return { json: async () => ({ data: { events: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }) };
+          }
+          // sampleEventTypes — `events(filter:) { nodes { type { repr } } }`.
+          // Uses `eventTypesByPackage` script entry keyed on pkgAddr; returns
+          // `<pkg>::<mod>::Name` type reprs synthesized from the configured
+          // list so the probe sees non-empty sampled types.
+          if (body.includes('events(filter:') && body.includes('type { repr }')) {
+            const unescaped = body.replace(/\\/g, '');
+            const m = /emittingModule: "([^:]+)::([^"]+)"/.exec(unescaped);
+            const pkgAddr = m?.[1] ?? '';
+            const mod = m?.[2] ?? '';
+            const names = script.eventTypesByPackage?.[pkgAddr] ?? [];
+            const nodes = names.map((n) => ({ type: { repr: `${pkgAddr}::${mod}::${n}` } }));
             return { json: async () => ({ data: { events: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } }) };
           }
           // Backward-paginated senders: `events(filter:...) { nodes { sender { address } } pageInfo { hasPreviousPage startCursor } }`.
@@ -2902,13 +3130,32 @@ describe('EcosystemService', () => {
       });
     };
 
-    const pkg = (overrides: Partial<{ address: string; storageRebate: string; modules: string[]; deployer: string | null }>) => ({
+    const pkg = (overrides: Partial<{
+      address: string;
+      storageRebate: string;
+      modules: string[];
+      entryFunctions: Record<string, string[]>;
+      deployer: string | null;
+      publishedAt: string | null;
+    }>) => ({
       address: overrides.address ?? '0xaa',
       storageRebate: overrides.storageRebate ?? '1000000000',
-      modules: { nodes: (overrides.modules ?? ['nft']).map((name) => ({ name })) },
+      modules: {
+        nodes: (overrides.modules ?? ['nft']).map((name) => ({
+          name,
+          functions: {
+            nodes: (overrides.entryFunctions?.[name] ?? []).map((fn) => ({
+              name: fn, visibility: 'PUBLIC', isEntry: true,
+            })),
+          },
+        })),
+      },
       previousTransactionBlock: overrides.deployer === null
         ? null
-        : { sender: { address: overrides.deployer ?? '0xdeployer' } },
+        : {
+            sender: { address: overrides.deployer ?? '0xdeployer' },
+            effects: { timestamp: overrides.publishedAt ?? null },
+          },
     });
 
     const runCapture = async () => {
@@ -2934,6 +3181,49 @@ describe('EcosystemService', () => {
       // tests themselves.
       return classified as any;
     };
+
+    it('end-to-end: entry-function + event-type capture → Insights column shows domain hint on unattributed cluster', async () => {
+      // Unmatched modules (don't hit any ProjectDefinition) with publicly-
+      // visible entry fns + emitted event types → cluster should land in
+      // `unattributed` with the DEX-shaped insight driven by entry fns.
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({
+            address: '0xdeadbeefdead',
+            modules: ['amm'],
+            entryFunctions: { amm: ['swap', 'add_liquidity', 'remove_liquidity'] },
+            publishedAt: '2026-04-22T12:00:00.000Z',
+          }),
+        ],
+        // Module emits events — unlocks `sampleEventTypes` branch in captureRaw.
+        eventsByPackage: { '0xdeadbeefdead': 5 },
+        eventTypesByPackage: { '0xdeadbeefdead': ['Swapped', 'LiquidityAdded', 'LiquidityRemoved'] },
+      });
+      const snap = await runCapture();
+      expect(snap.l1).toHaveLength(0);
+      const cluster = snap.unattributed.find((c: any) => c.deployer === '0xdeployer');
+      expect(cluster).toBeDefined();
+      expect(cluster.insights).toContain('DEX-shaped (swap + liquidity entry fns)');
+      expect(cluster.publishedAt).toBe('2026-04-22T12:00:00.000Z');
+    });
+
+    it('end-to-end: event-type-only (no matching entry fns) falls back to event-domain matcher', async () => {
+      (global as any).fetch = scriptFetch({
+        packages: [
+          pkg({
+            address: '0xdeadbeefcafe',
+            modules: ['protocol'],
+            entryFunctions: { protocol: ['execute', 'init'] },
+          }),
+        ],
+        eventsByPackage: { '0xdeadbeefcafe': 3 },
+        eventTypesByPackage: { '0xdeadbeefcafe': ['Minted', 'Burned'] },
+      });
+      const snap = await runCapture();
+      const cluster = snap.unattributed.find((c: any) => c.deployer === '0xdeployer');
+      expect(cluster).toBeDefined();
+      expect(cluster.insights).toContain('NFT-shaped (mint/burn events)');
+    });
 
     it('skips framework-ish 0x0-prefixed packages that are not explicitly claimed', async () => {
       (global as any).fetch = scriptFetch({
