@@ -7250,6 +7250,11 @@ describe('EcosystemService', () => {
       expect(testnetCursorModel.updateOne).toHaveBeenCalledWith(
         expect.objectContaining({ _id: 'testnet' }),
         expect.objectContaining({ $unset: { backfillAfterCursor: '' }, $set: { backfillBeforeCursor: null } }),
+        // `strict: false` so the $unset actually reaches the wire —
+        // Mongoose default strict mode drops updates for fields not in
+        // the schema. Without this, modifiedCount is 1 but the legacy
+        // field persists. See ecosystem.service.ts:runPaginationInversionMigration.
+        { strict: false },
       );
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('discarded legacy backfillAfterCursor'));
       expect(ecoModel.deleteMany).toHaveBeenCalledWith({ _id: { $in: ['partial-id'] } });

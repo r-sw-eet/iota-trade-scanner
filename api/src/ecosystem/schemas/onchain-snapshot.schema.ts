@@ -293,8 +293,6 @@ export class OnchainSnapshot extends Document {
    */
   @Prop({ type: String, default: null }) captureProgressCursor: string | null;
 
-  @Prop({ type: [PackageFact], default: [] }) packages: PackageFact[];
-
   /** Summed storageRebateNanos across every package. Convenience for network-total queries. */
   @Prop({ required: true, default: 0 }) totalStorageRebateNanos: number;
 

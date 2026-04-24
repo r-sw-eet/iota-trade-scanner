@@ -599,42 +599,40 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   private static readonly BSON_SIZE_CEILING_BYTES = 15 * 1024 * 1024;
 
   /**
-   * Read the PackageFact set belonging to a snapshot, preferring the new
-   * `packagefacts` sub-collection and falling back to the legacy embedded
-   * `snapshot.packages[]` field for pre-split docs.
+   * Read the PackageFact set belonging to a snapshot. Since the
+   * 2026-04-25 backfill migrated every legacy embedded-packages doc
+   * into the `packagefacts` sub-collection, persisted snapshots always
+   * resolve via a `find({snapshotId})` query.
    *
-   * This is the single sanctioned read path — every call site that used to
-   * reach for `snap.packages` directly should use this helper so legacy
-   * docs stay queryable without a migration and new docs hit the sub-
-   * collection transparently.
+   * In-memory shortcut: if the caller already has packages loaded
+   * (e.g. `captureRaw` returns an object with `packages` inline before
+   * the snapshot is persisted), return those directly. Avoids a
+   * pointless DB round-trip for callers that haven't even written to
+   * Mongo yet. Does NOT act as a legacy-doc fallback — every persisted
+   * doc post-backfill has its facts in the sub-collection.
    */
   private async getPackages(
     snapshot: { _id?: unknown; packages?: PackageFact[] } | null | undefined,
   ): Promise<PackageFact[]> {
     if (!snapshot) return [];
-    const snapshotId = (snapshot as { _id?: Types.ObjectId | string })._id;
-    if (snapshotId) {
-      const docs = await this.pkgFactModel
-        .find({ snapshotId })
-        .lean()
-        .exec();
-      if (docs.length > 0) {
-        // Strip the sub-collection-only meta fields so the returned shape
-        // matches the embedded PackageFact exactly — downstream consumers
-        // don't need to know which path provided the data.
-        return docs.map((d) => {
-          // Destructure to strip sub-collection-only meta fields; the leading
-          // underscores + eslint-disable keep the unused-binding noise out
-          // of the lint gate without masking genuine unused-locals elsewhere.
-          /* eslint-disable @typescript-eslint/no-unused-vars */
-          const { _id, snapshotId, network, createdAt, updatedAt, ...rest } = d as Record<string, unknown>;
-          /* eslint-enable @typescript-eslint/no-unused-vars */
-          return rest as unknown as PackageFact;
-        });
-      }
+    if (Array.isArray(snapshot.packages) && snapshot.packages.length > 0) {
+      return snapshot.packages;
     }
-    // Legacy fallback — pre-split docs carry packages inline.
-    return (snapshot.packages ?? []) as PackageFact[];
+    const snapshotId = (snapshot as { _id?: Types.ObjectId | string })._id;
+    if (!snapshotId) return [];
+    const docs = await this.pkgFactModel
+      .find({ snapshotId })
+      .lean()
+      .exec();
+    // Strip the sub-collection-only meta fields so the returned shape
+    // matches the embedded PackageFact exactly — downstream consumers
+    // don't need to know the facts live in a separate collection.
+    return docs.map((d) => {
+      /* eslint-disable @typescript-eslint/no-unused-vars */
+      const { _id, snapshotId, network, createdAt, updatedAt, ...rest } = d as Record<string, unknown>;
+      /* eslint-enable @typescript-eslint/no-unused-vars */
+      return rest as unknown as PackageFact;
+    });
   }
 
   /**
@@ -761,11 +759,19 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    * no-op.
    */
   private async runPaginationInversionMigration(): Promise<void> {
-    // Rename cursor field on the testnet singleton.
+    // Rename cursor field on the testnet singleton. `strict: false` is
+    // required for the `$unset` to reach the wire — Mongoose's default
+    // strict mode silently drops updates referencing fields that no
+    // longer exist in the schema, so without this the legacy field
+    // persists even after migrateOne returns `modifiedCount: 1` (the
+    // `$set backfillBeforeCursor` still lands). Observed during the
+    // 2026-04-25 deploy; cleaned up manually then — this option keeps
+    // any future re-run clean without requiring a mongosh fallback.
     const cursorMig = await this.testnetCursorModel
       .updateOne(
         { _id: 'testnet', backfillAfterCursor: { $exists: true } as never },
         { $unset: { backfillAfterCursor: '' } as never, $set: { backfillBeforeCursor: null } as never },
+        { strict: false },
       )
       .exec();
     if (cursorMig.modifiedCount > 0) {
