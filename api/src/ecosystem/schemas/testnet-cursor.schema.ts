@@ -7,10 +7,15 @@ import { Document } from 'mongoose';
  * the network literal (`'testnet'` today, extensible for devnet). The
  * `tickCounter % 3` decides whether the next tick runs a newest pass
  * (counter % 3 === 0) or a backfill pass (1 or 2). Backfill resumes from
- * `backfillAfterCursor`; wraps to `null` on `hasNextPage: false`.
+ * `backfillBeforeCursor`; wraps to `null` on `hasPreviousPage: false` (we've
+ * reached genesis and start over from the newest end next cycle).
  *
  * Lightweight collection — O(1) reads and writes per cron tick. Safe to
  * drop; next tick writes fresh state.
+ *
+ * Field renamed 2026-04-25 from `backfillAfterCursor` during the pagination
+ * direction inversion (`plans/plan_pagination_inversion_and_gap_closing.md`).
+ * A one-shot migration in `onModuleInit` `$unset`s the old field on deploy.
  */
 @Schema({ timestamps: true, collection: 'testnetcursors', _id: false })
 export class TestnetCursor extends Document<string, any, any> {
@@ -23,19 +28,20 @@ export class TestnetCursor extends Document<string, any, any> {
 
   /**
    * Monotonic counter incremented once per tick. `tickCounter % 3`:
-   *   - 0 → newest-tick (paginate from `null` cursor, stop on fresh)
-   *   - 1 or 2 → backfill-tick (resume from `backfillAfterCursor`)
+   *   - 0 → newest-tick (paginate from `null` cursor = newest end, stop on fresh)
+   *   - 1 or 2 → backfill-tick (resume from `backfillBeforeCursor`, walk backward into the past)
    * Gives backfill 66% of ticks so the initial catch-up completes in
    * 3.5–7 days depending on package count.
    */
   @Prop({ type: Number, required: true, default: 0 }) tickCounter: number;
 
   /**
-   * Opaque GraphQL `after` cursor marking where the backfill paginator
-   * left off. `null` on first use or after a wrap (paginator returned
-   * `hasNextPage: false`). Newest-tick never reads or writes this field.
+   * Opaque GraphQL `before` cursor marking where the backfill paginator
+   * left off (walks newest→oldest). `null` on first use or after a wrap
+   * (paginator returned `hasPreviousPage: false`, reached genesis).
+   * Newest-tick never reads or writes this field.
    */
-  @Prop({ type: String, default: null }) backfillAfterCursor: string | null;
+  @Prop({ type: String, default: null }) backfillBeforeCursor: string | null;
 
   /** Diagnostic: which mode the most recent tick ran. */
   @Prop({ type: String, enum: ['newest', 'backfill'], default: null })

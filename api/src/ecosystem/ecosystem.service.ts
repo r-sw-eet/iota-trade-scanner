@@ -739,8 +739,67 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     return this.ecoModel.create(doc as OnchainSnapshot);
   }
 
+  /**
+   * One-shot transition migration for the 2026-04-25 pagination-direction
+   * inversion. The old `testnetcursors.backfillAfterCursor` encoded a
+   * forward-walk position from genesis; the new code walks newest→oldest
+   * via `before:` cursors. The old value is not a valid `before:` cursor
+   * (encoding is direction-specific), so on first boot of the new code we
+   * discard it. Null-valued `backfillBeforeCursor` means "start from the
+   * newest end" — which is exactly the fresh-start behavior the new code
+   * needs.
+   *
+   * Also deletes any in-flight `captureStage: 'partial'` snapshots + their
+   * packagefacts. Their `captureProgressCursor` was written under forward
+   * semantics and cannot be resumed under backward walk. Manual halt
+   * policy (see `plans/testnet_inversion_thread_state.md`) means there
+   * shouldn't be any live partials when this ships, but the migration
+   * runs defensively so a future re-flip or crash-mid-deploy is safe.
+   *
+   * Idempotent — after first successful run the `backfillAfterCursor`
+   * field is gone and no partials exist, so every subsequent call is a
+   * no-op.
+   */
+  private async runPaginationInversionMigration(): Promise<void> {
+    // Rename cursor field on the testnet singleton.
+    const cursorMig = await this.testnetCursorModel
+      .updateOne(
+        { _id: 'testnet', backfillAfterCursor: { $exists: true } as never },
+        { $unset: { backfillAfterCursor: '' } as never, $set: { backfillBeforeCursor: null } as never },
+      )
+      .exec();
+    if (cursorMig.modifiedCount > 0) {
+      this.logger.log(
+        'pagination-inversion migration: discarded legacy backfillAfterCursor on testnet singleton (old forward-direction value not valid as before: cursor in new code)',
+      );
+    }
+    // Drop any in-flight partials + their orphan pkgfacts.
+    const partials = await this.ecoModel
+      .find({ captureStage: 'partial' })
+      .select({ _id: 1, network: 1, captureProgressCursor: 1 })
+      .lean()
+      .exec();
+    if (partials.length > 0) {
+      const ids = partials.map((p) => p._id);
+      await this.ecoModel.deleteMany({ _id: { $in: ids } }).exec();
+      await this.pkgFactModel.deleteMany({ snapshotId: { $in: ids } }).exec();
+      this.logger.warn(
+        `pagination-inversion migration: deleted ${partials.length} partial snapshot(s) with forward-direction cursor — un-resumable in new code; next cron will start fresh`,
+      );
+    }
+  }
+
   async onModuleInit() {
     if (process.env.NODE_ENV === 'test') return;
+    // Direction-flip migration runs before everything else on every boot.
+    // Idempotent and cheap — one updateOne + one find on a ~25-doc
+    // collection — so the "always run" overhead is negligible and gives
+    // us safety against a second flip or a restore-from-backup scenario.
+    try {
+      await this.runPaginationInversionMigration();
+    } catch (e) {
+      this.logger.error(`pagination-inversion migration failed: ${(e as Error).message}`, e);
+    }
     const isServeOnly = process.env.API_ROLE === 'serve';
     if (!isServeOnly) {
       const count = await this.ecoModel.countDocuments(this.networkFilter());
@@ -3130,6 +3189,16 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    */
   private static readonly MAINNET_CHECKPOINT_EVERY_N = 50;
 
+  /**
+   * Per-capture budget for the mainnet atomic sweep. Well under the 2h
+   * cron interval so a runaway walk never collides with the next cron
+   * fire. In normal operation mainnet finishes in ~40 min, leaving ~50
+   * min of spare budget that `runGapClosing` consumes to re-probe stale
+   * pkgs. If Starfish-era load tests or similar stress push the sweep
+   * past this budget, the gap-WARN fires and we see the degradation.
+   */
+  private static readonly MAINNET_TICK_BUDGET_MS = 90 * 60 * 1000;
+
   private async captureRaw(): Promise<{
     packages: PackageFact[];
     totalStorageRebateNanos: number;
@@ -3200,23 +3269,81 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       await this.insertPackageFacts(partialId, 'mainnet', batch);
     };
 
+    const deadlineMs = captureStart.getTime() + EcosystemService.MAINNET_TICK_BUDGET_MS;
     const {
       probed: freshlyProbed,
       failedPackages,
+      deadlineHit,
+      wrapped,
     } = await this.probePaginator({
       startCursor: resumeCursor,
       displayByPackage,
       now: new Date(),
+      deadlineMs,
       claimedAddresses,
       onCheckpoint,
       checkpointEveryN: EcosystemService.MAINNET_CHECKPOINT_EVERY_N,
     });
 
+    // Gap WARN: mainnet's atomic sweep exhausted the budget without
+    // wrapping. Means the walk didn't reach every package — unusual
+    // but possible under sustained load (Starfish stress, etc.).
+    if (deadlineHit && !wrapped) {
+      await this.logCaptureGap(
+        'mainnet',
+        {
+          probedThisCapture: freshlyProbed.length,
+          carriedForwardFromPartial: carriedForward.length,
+          budgetMs: EcosystemService.MAINNET_TICK_BUDGET_MS,
+        },
+        `mainnet captureRaw exhausted ${EcosystemService.MAINNET_TICK_BUDGET_MS / 60000}min budget after ${freshlyProbed.length} freshly-probed pkgs without completing the sweep`,
+      );
+    }
+
+    // Gap-closing: when the primary walk completes (wrapped=true) with
+    // budget remaining, re-probe the stalest addresses. Uniform with
+    // testnet per Decision 4. Mainnet's atomic sweep normally covers
+    // every package within 40 min, so the staleness aggregate returns
+    // empty on every normal tick — this is a safety net for the 1% of
+    // cases where capacity is strained (load tests, degraded GraphQL,
+    // etc.).
+    let gapClosed: PackageFact[] = [];
+    if (wrapped && Date.now() < deadlineMs) {
+      const gc = await this.runGapClosing('mainnet', new Date(), deadlineMs, displayByPackage);
+      gapClosed = gc.probed;
+      if (gapClosed.length > 0) {
+        this.logger.log(
+          `Mainnet gap-closing probed ${gapClosed.length} stale pkgs (deadlineHit=${gc.deadlineHit} exhaustedCandidates=${gc.exhaustedCandidates})`,
+        );
+        // Persist gap-closed pkgs to the sub-collection. If a partial
+        // was established, reuse its _id; otherwise create a placeholder
+        // partial so the facts have an anchor until `finalizeMainnetSnapshot`
+        // promotes it. This keeps the invariant "every packagefacts doc
+        // has a real snapshotId" intact across the gap-closing path.
+        if (!partialId) {
+          const placeholder = await this.safeCreate({
+            network: 'mainnet',
+            captureStage: 'partial',
+            captureProgressCursor: null,
+            createdAt: captureStart,
+          });
+          partialId = placeholder._id as Types.ObjectId;
+        }
+        await this.insertPackageFacts(partialId, 'mainnet', gapClosed);
+      }
+    }
+
     // Final package list = previously-persisted carry-forward + this run's
-    // freshly-probed. No dedup key here: addresses walked in the new run
-    // only include those strictly after the resume cursor, so there's no
-    // overlap with the carried-forward set.
-    const packages: PackageFact[] = [...carriedForward, ...freshlyProbed];
+    // freshly-probed + gap-closed re-probes. No dedup key needed between
+    // carriedForward and freshlyProbed (new-run addresses are strictly
+    // after the resume cursor); gap-closed may overlap carriedForward on
+    // address, but those are intentionally re-probed with fresher data.
+    const gapAddrs = new Set(gapClosed.map((p) => p.address.toLowerCase()));
+    const packages: PackageFact[] = [
+      ...carriedForward.filter((p) => !gapAddrs.has(p.address.toLowerCase())),
+      ...freshlyProbed,
+      ...gapClosed,
+    ];
 
     // Sum storage rebate only from successfully-probed packages. Partial
     // inclusion of a failed package would make the total inconsistent
@@ -3503,7 +3630,23 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     }
 
     const projects: Project[] = [];
-    for (const [, { def, facts, splitDeployer }] of projectMap) {
+    for (const [, { def, facts: unsortedFacts, splitDeployer }] of projectMap) {
+      // Sort by `publishedAt` ascending so `facts[0]` is the original
+      // deployment and `facts[last]` is the newest upgrade — regardless
+      // of iteration order from the paginator. Post-2026-04-25 the
+      // paginator walks newest-first, so the pre-sort order would put
+      // the newest pkg at index 0, inverting the first/latest semantic.
+      // `publishedAt: null` (framework pkgs) sort first — stable enough
+      // for those since they don't get upgraded.
+      const facts = [...unsortedFacts].sort((a, b) => {
+        const aT = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+        const bT = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+        if (aT !== bT) return aT - bT;
+        // Stable fallback when publishedAt is null/equal (framework pkgs,
+        // test fixtures): sort by address so iteration order is
+        // deterministic regardless of the paginator direction.
+        return a.address.localeCompare(b.address);
+      });
       const latestPkg = facts[facts.length - 1];
       const latestMods = latestPkg.modules;
       const totalStorage = facts.reduce((sum, p) => sum + Number(p.storageRebateNanos || 0), 0) / 1_000_000_000;
@@ -3828,7 +3971,19 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     }
 
     const unattributed: UnattributedCluster[] = [];
-    for (const { deployer, facts, storageIota } of unattributedRanked) {
+    for (const { deployer, facts: unsortedFacts, storageIota } of unattributedRanked) {
+      // Same sort rationale as the attributed-projects loop above — chronological
+      // order regardless of paginator direction, so `facts[0]` is original and
+      // `facts[last]` is newest.
+      const facts = [...unsortedFacts].sort((a, b) => {
+        const aT = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+        const bT = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+        if (aT !== bT) return aT - bT;
+        // Stable fallback when publishedAt is null/equal (framework pkgs,
+        // test fixtures): sort by address so iteration order is
+        // deterministic regardless of the paginator direction.
+        return a.address.localeCompare(b.address);
+      });
       const firstPkg = facts[0];
       const latestPkg = facts[facts.length - 1];
       const modulesUnion = new Set<string>();
@@ -4287,7 +4442,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   //   - Every 3rd tick is a **newest** pass (paginate from null, probe until a
   //     package's `lastProbedAt > now - 18h` signals we've caught up).
   //   - The 2 intervening ticks are **backfill** passes (resume from the
-  //     persistent `backfillAfterCursor`; wrap to null on `hasNextPage: false`).
+  //     persistent `backfillBeforeCursor`; wrap to null on `hasPreviousPage: false`).
   //   - Each tick writes one new `OnchainSnapshot` doc: fresh probes this tick
   //     + copy-forward of un-touched packages from the previous testnet snapshot.
   //   - 90-min tick budget; 1-of-3 ratio gives backfill 66% of ticks.
@@ -4309,7 +4464,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     const created = await this.testnetCursorModel.create({
       _id: id,
       tickCounter: 0,
-      backfillAfterCursor: null,
+      backfillBeforeCursor: null,
       lastTickKind: null,
       lastTickAt: null,
       lastTickPackagesProbed: 0,
@@ -4413,13 +4568,36 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    * path (mainnet + testnet ticks). Returns the paginator info so the
    * caller can feed it back as the next `after` cursor.
    */
+  /**
+   * Newest-first pagination over the IOTA `packages` connection. We use
+   * `last:N, before:<cursor>` so page 1 (cursor=null) returns the newest
+   * `N` packages on the network, page 2 continues backward in publish-time,
+   * and `hasPreviousPage: false` marks genesis (end-of-walk).
+   *
+   * Why newest-first: the "newest tick" + "backfill tick" naming the
+   * testnet priority-shard uses requires newest-first order to be
+   * meaningful. Pre-2026-04-24 we paginated `first:N, after:` which is
+   * oldest-first (from genesis forward) — the names were lying. See
+   * `plans/plan_pagination_inversion_and_gap_closing.md` for the
+   * investigation. Mainnet's atomic sweep doesn't care about order but
+   * inherits the same helper; post-flip the newest packages get probed
+   * first, which incidentally fixes the TWIN undercount
+   * (`plans/TODO.md § Scanner snapshot lag`).
+   *
+   * Within a single page, GraphQL returns nodes oldest-first (Relay
+   * convention: nodes in index order are oldest→newest within the window).
+   * We reverse before returning so downstream iteration is uniformly
+   * newest-first — otherwise `probePaginator`'s freshness-window check
+   * would hit the oldest-in-page first and potentially bail before
+   * reaching the actually-newest package.
+   */
   private async fetchPackagePage(
     cursor: string | null,
     first = 50,
-  ): Promise<{ nodes: PackageInfo[]; hasNextPage: boolean; endCursor: string | null }> {
-    const afterClause: string = cursor ? `, after: "${cursor}"` : '';
+  ): Promise<{ nodes: PackageInfo[]; hasPreviousPage: boolean; startCursor: string | null }> {
+    const beforeClause: string = cursor ? `, before: "${cursor}"` : '';
     const data: any = await this.graphql(`{
-      packages(first: ${first}${afterClause}) {
+      packages(last: ${first}${beforeClause}) {
         nodes {
           address
           storageRebate
@@ -4429,13 +4607,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
             effects { timestamp }
           }
         }
-        pageInfo { hasNextPage endCursor }
+        pageInfo { hasPreviousPage startCursor }
       }
     }`);
+    // Reverse so nodes[0] is the newest-in-page (see doc-comment above).
+    const nodes = ((data.packages.nodes as PackageInfo[]) ?? []).slice().reverse();
     return {
-      nodes: data.packages.nodes as PackageInfo[],
-      hasNextPage: Boolean(data.packages.pageInfo?.hasNextPage),
-      endCursor: (data.packages.pageInfo?.endCursor as string | null) ?? null,
+      nodes,
+      hasPreviousPage: Boolean(data.packages.pageInfo?.hasPreviousPage),
+      startCursor: (data.packages.pageInfo?.startCursor as string | null) ?? null,
     };
   }
 
@@ -4533,6 +4713,9 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
           return { probed, nextCursor: cursor, wrapped: false, deadlineHit: true, hitFreshWindow, error: null, failedPackages };
         }
         const page = await this.fetchPackagePage(cursor);
+        // Nodes are newest-first within the page (see fetchPackagePage
+        // doc-comment on the reverse). Iteration order therefore matches
+        // the "newest first" walk the testnet priority-shard expects.
         for (const info of page.nodes) {
           // Mainnet framework filter — silent skip.
           if (
@@ -4560,21 +4743,23 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
             failedPackages.push({ address: info.address, error: err.message });
           }
           if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
-            return { probed, nextCursor: page.endCursor, wrapped: false, deadlineHit: true, hitFreshWindow, error: null, failedPackages };
+            return { probed, nextCursor: page.startCursor, wrapped: false, deadlineHit: true, hitFreshWindow, error: null, failedPackages };
           }
         }
         // Page fully processed — advance cursor, then optionally checkpoint
         // with the post-advance cursor. Writing the post-advance cursor
-        // means a crash-resume fetches the NEXT page, not this one.
-        if (!page.hasNextPage) {
+        // means a crash-resume fetches the NEXT page, not this one. Walk
+        // direction is newest → oldest; `hasPreviousPage: false` marks
+        // genesis (we've reached the oldest package in the connection).
+        if (!page.hasPreviousPage) {
           wrapped = true;
           cursor = null;
           await maybeCheckpoint(cursor);
           break;
         }
-        cursor = page.endCursor;
+        cursor = page.startCursor;
         if (!cursor) {
-          // Defensive: hasNextPage:true with null endCursor — treat as wrap.
+          // Defensive: hasPreviousPage:true with null startCursor — treat as wrap.
           wrapped = true;
           await maybeCheckpoint(cursor);
           break;
@@ -4585,6 +4770,135 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     } catch (e) {
       return { probed, nextCursor: cursor, wrapped: false, deadlineHit: false, hitFreshWindow, error: e as Error, failedPackages };
     }
+  }
+
+  /**
+   * Staleness threshold for gap-closing: any package whose most recent
+   * `lastProbedAt` in `packagefacts` is older than this gets re-probed
+   * when a tick has spare budget. 24h is 4× the intended ~6h newest-tick
+   * cycle: anything probed in the last day is fresh enough to skip;
+   * older is genuinely stale and worth a fresh sample. Tunable.
+   */
+  private static readonly GAP_CLOSING_STALENESS_MS = 24 * 60 * 60 * 1000;
+
+  /**
+   * Max addresses to consider per gap-closing run. Bounded so the
+   * aggregation query stays cheap; 500 at testnet's ~1s per probe gives
+   * ~8 min of gap-closing work, which fits a typical spare-budget window.
+   * If we ever exhaust this on a sustained basis, that's a signal to
+   * bump or to reopen the parallel-workers conversation.
+   */
+  private static readonly GAP_CLOSING_MAX_CANDIDATES = 500;
+
+  /**
+   * Fetch a single package's `PackageInfo` shape (the same fields
+   * `probeOnePackage` reads). Used by `runGapClosing` to probe a stale
+   * address directly without paginating. Returns `null` if the package
+   * was deleted / no longer exists — we then skip it.
+   */
+  private async fetchPackageByAddress(address: string): Promise<PackageInfo | null> {
+    const data: any = await this.graphql(`{
+      package(address: "${address}") {
+        address
+        storageRebate
+        modules { nodes { name } }
+        previousTransactionBlock {
+          sender { address }
+          effects { timestamp }
+        }
+      }
+    }`);
+    return (data?.package as PackageInfo | null) ?? null;
+  }
+
+  /**
+   * Gap-closing pass. When a tick's primary walk (newest or atomic
+   * sweep) finishes with budget remaining, query `packagefacts` for the
+   * addresses with the stalest `max(lastProbedAt)` across all prior
+   * snapshots in this network, and re-probe them targetedly (one
+   * `package(address:)` query per pkg, no pagination). Budget-aware:
+   * stops when `Date.now() >= deadlineMs` or the candidate list is
+   * drained or exhausts `GAP_CLOSING_MAX_CANDIDATES`.
+   *
+   * Returns the freshly-probed facts for the caller to merge into the
+   * snapshot's package set before save. Uniform for mainnet + testnet
+   * per Decision 4: idle 99% of the time on mainnet (atomic sweeps
+   * keep everything < 24h fresh) but present as a safety net for
+   * stressed captures (Starfish-era load tests, for example).
+   */
+  private async runGapClosing(
+    network: 'mainnet' | 'testnet' | 'devnet',
+    now: Date,
+    deadlineMs: number,
+    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
+  ): Promise<{ probed: PackageFact[]; exhaustedCandidates: boolean; deadlineHit: boolean }> {
+    const probed: PackageFact[] = [];
+    if (Date.now() >= deadlineMs) {
+      return { probed, exhaustedCandidates: false, deadlineHit: true };
+    }
+    const staleCutoff = new Date(now.getTime() - EcosystemService.GAP_CLOSING_STALENESS_MS);
+    // Find addresses whose newest probe is older than the cutoff, sorted
+    // stalest-first. Uses the `{address: 1}` index on packagefacts.
+    const stale: Array<{ _id: string; latestProbe: Date }> = await this.pkgFactModel
+      .aggregate([
+        { $match: { network } },
+        { $sort: { address: 1, lastProbedAt: -1 } },
+        { $group: { _id: '$address', latestProbe: { $first: '$lastProbedAt' } } },
+        { $match: { latestProbe: { $lt: staleCutoff } } },
+        { $sort: { latestProbe: 1 } },
+        { $limit: EcosystemService.GAP_CLOSING_MAX_CANDIDATES },
+      ])
+      .exec();
+    if (stale.length === 0) {
+      return { probed, exhaustedCandidates: true, deadlineHit: false };
+    }
+    this.logger.log(
+      `gap-closing (${network}): ${stale.length} stale address(es) identified (threshold ${EcosystemService.GAP_CLOSING_STALENESS_MS / 3600000}h); probing stalest first`,
+    );
+    for (const row of stale) {
+      if (Date.now() >= deadlineMs) {
+        return { probed, exhaustedCandidates: false, deadlineHit: true };
+      }
+      try {
+        const info = await this.fetchPackageByAddress(row._id);
+        if (!info) {
+          // Package disappeared from source (shouldn't happen on IOTA but
+          // handle gracefully) — skip without failing the whole pass.
+          continue;
+        }
+        const fact = await this.probeOnePackage(info, displayByPackage, now);
+        probed.push(fact);
+      } catch (e) {
+        this.logger.warn(
+          `gap-closing (${network}): skipped ${row._id} — ${(e as Error).message}`,
+        );
+      }
+    }
+    return { probed, exhaustedCandidates: true, deadlineHit: false };
+  }
+
+  /**
+   * Persistent log of a gap event — newest-tick (or mainnet capture)
+   * exhausted its budget without reaching the freshness window. Surfaces
+   * as a WARN and a `schemaAlerts` doc so the fact survives container log
+   * rotation. Match `BSON size guard` pattern.
+   */
+  private async logCaptureGap(
+    network: 'mainnet' | 'testnet' | 'devnet',
+    detail: Record<string, unknown>,
+    message: string,
+  ): Promise<void> {
+    this.logger.warn(`GAP: ${message}`);
+    await this.logSchemaAlert({
+      kind: network === 'mainnet' ? 'mainnet-capture-gap' : 'testnet-newest-tick-gap',
+      collectionName: 'onchainsnapshots',
+      op: 'probe',
+      network,
+      sizeBytes: 0,
+      thresholdBytes: 0,
+      detail,
+      message,
+    });
   }
 
   /**
@@ -4765,7 +5079,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       let hitFreshWindow = false;
       let wrapped = false;
       let deadlineHit = false;
-      let nextBackfillCursor: string | null = state.backfillAfterCursor;
+      let nextBackfillCursor: string | null = state.backfillBeforeCursor;
       let probeError: Error | null = null;
 
       if (kind === 'newest') {
@@ -4776,7 +5090,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         probeError = result.error;
       } else {
         const result = await this.runBackfillTick(
-          state.backfillAfterCursor,
+          state.backfillBeforeCursor,
           now,
           deadlineMs,
           displayByPackage,
@@ -4801,8 +5115,47 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         );
       }
 
-      // Build merged package set (fresh + copy-forward).
-      const merged = this.buildTestnetSnapshotPackages(freshlyProbed, previousPackages);
+      // Gap WARN + schemaAlert: newest-tick exhausted its budget without
+      // reaching the freshness window. Means capacity is falling behind
+      // testnet's production rate — log loudly and persist. See
+      // `plans/plan_pagination_inversion_and_gap_closing.md § 3`.
+      if (kind === 'newest' && deadlineHit && !hitFreshWindow && !probeError) {
+        const oldestProbedAt = freshlyProbed.length > 0
+          ? freshlyProbed[freshlyProbed.length - 1]?.publishedAt ?? null
+          : null;
+        await this.logCaptureGap('testnet', {
+          probedThisTick: freshlyProbed.length,
+          oldestProbedPublishedAt: oldestProbedAt,
+          durationBudgetMs: deadlineMs - startedAt,
+        }, `testnet newest-tick exhausted ${Math.round((deadlineMs-startedAt)/60000)}min budget after ${freshlyProbed.length} pkgs without reaching previously-probed range — coverage falling behind production rate`);
+      }
+
+      // Gap-closing: if newest-tick exited early via the freshness window
+      // and budget remains, use the spare time to re-probe the stalest
+      // addresses. Uniform for both tick kinds (Decision 4); on backfill
+      // there is no fresh-window signal so we only run gap-closing when
+      // backfill wrapped (reached genesis) and budget remains.
+      let gapClosed: PackageFact[] = [];
+      const shouldRunGapClosing =
+        !probeError &&
+        ((kind === 'newest' && hitFreshWindow) || (kind === 'backfill' && wrapped));
+      if (shouldRunGapClosing && Date.now() < deadlineMs) {
+        const gc = await this.runGapClosing('testnet', now, deadlineMs, displayByPackage);
+        gapClosed = gc.probed;
+        if (gapClosed.length > 0) {
+          this.logger.log(
+            `Testnet gap-closing probed ${gapClosed.length} stale pkgs (deadlineHit=${gc.deadlineHit} exhaustedCandidates=${gc.exhaustedCandidates})`,
+          );
+        }
+      }
+
+      // Build merged package set (fresh + gap-closed + copy-forward). Order
+      // matters: gap-closed pkgs must win over copy-forward (they're newly
+      // probed) but lose to freshly-probed-this-tick (fresher still).
+      const merged = this.buildTestnetSnapshotPackages(
+        [...freshlyProbed, ...gapClosed],
+        previousPackages,
+      );
 
       const totalStorageRebateNanos = merged.reduce((s, p) => s + Number(p.storageRebateNanos || 0), 0);
       const durationMs = Date.now() - startedAt;
@@ -4833,7 +5186,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         lastTickPackagesProbed: freshlyProbed.length,
       };
       if (kind === 'backfill') {
-        cursorUpdate.backfillAfterCursor = wrapped ? null : nextBackfillCursor;
+        cursorUpdate.backfillBeforeCursor = wrapped ? null : nextBackfillCursor;
       }
       await this.testnetCursorModel
         .updateOne({ _id: 'testnet' }, { $set: cursorUpdate }, { upsert: true })
