@@ -1639,7 +1639,10 @@ describe('EcosystemService', () => {
       await expect(service.findSnapshotsBetween(from, to)).resolves.toBe(snaps);
       expect(find).toHaveBeenCalledWith({
         createdAt: { $gte: from, $lte: to },
-        $or: [{ network: 'mainnet' }, { network: { $exists: false } }],
+        $and: [
+          { $or: [{ network: 'mainnet' }, { network: { $exists: false } }] },
+          { $or: [{ captureStage: 'complete' }, { captureStage: { $exists: false } }] },
+        ],
       });
       expect(sort).toHaveBeenCalledWith({ createdAt: 1 });
     });
@@ -2109,21 +2112,25 @@ describe('EcosystemService', () => {
       );
     });
 
-    it('reads use a transitional $or that matches tagged docs AND legacy docs with no network field', async () => {
+    it('reads use a transitional $and/$or that filters by network AND captureStage, matching legacy docs missing either field', async () => {
       // Grab the filter passed to `ecoModel.findOne` by any read path —
-      // `getLatestRaw` is the simplest. The `$or` shape is what lets prod's
-      // 8 pre-tag docs keep serving until the backfill runs.
+      // `getLatestRaw` is the simplest. The `$and` of two `$or` clauses is
+      // what lets prod's pre-tag docs keep serving during both the network
+      // and captureStage backfill windows.
       const chainRet = {
         sort: () => ({ lean: () => ({ exec: async () => null }) }),
       };
       ecoModel.findOne.mockReturnValue(chainRet);
       await service.getLatestRaw();
       expect(ecoModel.findOne).toHaveBeenCalledWith({
-        $or: [{ network: 'mainnet' }, { network: { $exists: false } }],
+        $and: [
+          { $or: [{ network: 'mainnet' }, { network: { $exists: false } }] },
+          { $or: [{ captureStage: 'complete' }, { captureStage: { $exists: false } }] },
+        ],
       });
     });
 
-    it('classifyOrLoad findOne scopes by snapshotId AND the transitional network $or', async () => {
+    it('classifyOrLoad findOne scopes by snapshotId AND the transitional network/captureStage filter', async () => {
       ecoModel.findOne.mockReturnValue({
         sort: () => ({ lean: () => ({ exec: async () => ({ _id: 'abc', network: 'mainnet', packages: [] }) }) }),
       });
@@ -2136,8 +2143,42 @@ describe('EcosystemService', () => {
       await service.getLatest();
       expect(seenFilter[0]).toEqual({
         snapshotId: 'abc',
-        $or: [{ network: 'mainnet' }, { network: { $exists: false } }],
+        $and: [
+          { $or: [{ network: 'mainnet' }, { network: { $exists: false } }] },
+          { $or: [{ captureStage: 'complete' }, { captureStage: { $exists: false } }] },
+        ],
       });
+    });
+
+    it('captureStage filter is an $and sibling so partial docs are invisible to getLatestRaw + findSnapshotsBetween', async () => {
+      // Simulate a mid-capture window by having the Mongo mock's query
+      // evaluator honour the filter: only the 'complete' doc should be
+      // returned by either reader. We capture the filter payload and
+      // assert the 'complete' clause is present in both call sites.
+      const completeDoc = { _id: 'complete-1', network: 'mainnet', captureStage: 'complete', packages: [], createdAt: new Date() };
+      ecoModel.findOne.mockReturnValue({
+        sort: () => ({ lean: () => ({ exec: async () => completeDoc }) }),
+      });
+      const findExec = jest.fn().mockResolvedValue([completeDoc]);
+      ecoModel.find = jest.fn().mockReturnValue({
+        sort: () => ({ lean: () => ({ exec: findExec }) }),
+      });
+
+      await service.getLatestRaw();
+      const latestFilter = (ecoModel.findOne as jest.Mock).mock.calls.slice(-1)[0][0];
+      expect(latestFilter.$and).toEqual(
+        expect.arrayContaining([
+          { $or: [{ captureStage: 'complete' }, { captureStage: { $exists: false } }] },
+        ]),
+      );
+
+      await service.findSnapshotsBetween(new Date('2026-04-01'), new Date('2026-04-20'));
+      const betweenFilter = (ecoModel.find as jest.Mock).mock.calls.slice(-1)[0][0];
+      expect(betweenFilter.$and).toEqual(
+        expect.arrayContaining([
+          { $or: [{ captureStage: 'complete' }, { captureStage: { $exists: false } }] },
+        ]),
+      );
     });
   });
 

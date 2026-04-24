@@ -258,6 +258,41 @@ export class OnchainSnapshot extends Document {
   @Prop({ type: String, enum: ['mainnet', 'testnet', 'devnet'], default: 'mainnet', required: true, index: true })
   network: string;
 
+  /**
+   * Capture lifecycle marker for resumable mainnet scans. `'partial'` means
+   * the snapshot is mid-walk — its `packages[]` is the work done so far,
+   * `captureProgressCursor` is the paginator position to resume from, and
+   * it is invisible to every public reader. `'complete'` is the promoted
+   * terminal state: `packages[]` is final, cursor cleared, doc visible to
+   * `getLatestRaw` / growth / classify.
+   *
+   * Default `'complete'` so every doc written before this field was added
+   * remains a first-class terminal snapshot. A transitional `{ $or: [{
+   * captureStage: 'complete' }, { captureStage: { $exists: false } }] }`
+   * read filter (see `networkFilter()`) keeps pre-migration docs queryable
+   * until the one-shot backfill mongosh stamps the field on every row:
+   *
+   *   db.onchainsnapshots.updateMany(
+   *     { captureStage: { $exists: false } },
+   *     { $set: { captureStage: 'complete', captureProgressCursor: null } }
+   *   )
+   *
+   * Indexed because the hot read path filters by it on every `findOne` /
+   * `find` against this collection (paired with `network` in the compound
+   * index below).
+   */
+  @Prop({ type: String, enum: ['partial', 'complete'], default: 'complete', index: true })
+  captureStage: 'partial' | 'complete';
+
+  /**
+   * GraphQL paginator cursor held by a `captureStage: 'partial'` doc — the
+   * `after:` value to pass to the next `fetchPackagePage` when resuming a
+   * mid-walk capture after a container kill. `null` on `'complete'` docs
+   * (resume meaningless once promoted) and while a capture hasn't yet
+   * crossed its first checkpoint window.
+   */
+  @Prop({ type: String, default: null }) captureProgressCursor: string | null;
+
   @Prop({ type: [PackageFact], default: [] }) packages: PackageFact[];
 
   /** Summed storageRebateNanos across every package. Convenience for network-total queries. */
@@ -296,10 +331,11 @@ export const OnchainSnapshotSchema = SchemaFactory.createForClass(OnchainSnapsho
 OnchainSnapshotSchema.index({ createdAt: -1 });
 
 /**
- * Compound index for the hot `findOne({ network }).sort({ createdAt: -1 })`
- * pattern used by `getLatest`/`getLatestRaw` and the growth endpoints. The
- * single-field `createdAt` index above covers range queries that don't filter
- * by network (legacy/transitional); this one keeps the network-filtered reads
- * O(log N) once prod docs carry the `network` field.
+ * Compound index for the hot `findOne({ network, captureStage }).sort({
+ * createdAt: -1 })` pattern used by `getLatest`/`getLatestRaw` and the
+ * growth endpoints. The single-field `createdAt` index above covers range
+ * queries that don't filter by network (legacy/transitional); this one
+ * keeps the network- + captureStage-filtered reads O(log N) once prod docs
+ * carry both fields.
  */
-OnchainSnapshotSchema.index({ network: 1, createdAt: -1 });
+OnchainSnapshotSchema.index({ network: 1, captureStage: 1, createdAt: -1 });

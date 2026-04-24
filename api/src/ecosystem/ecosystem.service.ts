@@ -511,12 +511,32 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
 
   /**
    * Transitional read filter for `onchainsnapshots` / `classifiedsnapshots`.
-   * Matches docs tagged with this process's network OR docs predating the
-   * `network` field (prod history written before this PR). Drop the `$exists`
-   * branch in a follow-up once the one-shot backfill has stamped every row.
+   * Composes two transitional clauses:
+   *   1. Network — docs tagged with this process's network OR docs predating
+   *      the `network` field.
+   *   2. Capture stage — docs tagged `captureStage: 'complete'` OR docs
+   *      predating the field. Excludes in-flight `'partial'` mainnet docs
+   *      so every reader (`getLatestRaw`, `findSnapshotsBetween`, growth,
+   *      classifiedOrLoad, …) sees only terminal snapshots during a mid-
+   *      capture window.
+   *
+   * The captureStage clause spreads harmlessly into `classifiedsnapshots`
+   * queries (those docs never have the field → match via `$exists: false`).
+   *
+   * Drop both `$exists: false` branches in a follow-up once backfill mongosh
+   * has stamped every row:
+   *   db.onchainsnapshots.updateMany(
+   *     { captureStage: { $exists: false } },
+   *     { $set: { captureStage: 'complete', captureProgressCursor: null } }
+   *   )
    */
   private networkFilter(): Record<string, unknown> {
-    return { $or: [{ network: this.network }, { network: { $exists: false } }] };
+    return {
+      $and: [
+        { $or: [{ network: this.network }, { network: { $exists: false } }] },
+        { $or: [{ captureStage: 'complete' }, { captureStage: { $exists: false } }] },
+      ],
+    };
   }
 
   async onModuleInit() {
