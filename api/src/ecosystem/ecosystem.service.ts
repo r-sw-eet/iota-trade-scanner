@@ -1390,43 +1390,6 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     throw lastError ?? new Error('graphql: unreachable retry-loop exit');
   }
 
-  private async getAllPackages(): Promise<PackageInfo[]> {
-    const packages: PackageInfo[] = [];
-    let cursor: string | null = null;
-
-    // Drain the full list. Safety cap at 2000 pages (100k packages) — if
-    // mainnet ever has more, bump this; never let it cut the scan silently.
-    for (let page = 0; page < 2000; page++) {
-      const afterClause: string = cursor ? `, after: "${cursor}"` : '';
-      // Keep this query lean. IOTA GraphQL rejects any query whose estimated
-      // output nodes crosses 100k; inlining `modules { functions(first: 50) }`
-      // here multiplies to 50×50×50 = 125 000 and gets rejected at parse time
-      // — functions must come from a per-package second pass (fetchEntryFunctions).
-      const data: any = await this.graphql(`{
-        packages(first: 50${afterClause}) {
-          nodes {
-            address
-            storageRebate
-            modules { nodes { name } }
-            previousTransactionBlock {
-              sender { address }
-              effects { timestamp }
-            }
-          }
-          pageInfo { hasNextPage endCursor }
-        }
-      }`);
-      packages.push(...data.packages.nodes);
-      if (!data.packages.pageInfo.hasNextPage) break;
-      cursor = data.packages.pageInfo.endCursor;
-    }
-    if (packages.length >= 2000 * 50) {
-      this.logger.warn(`Package scan hit the 100k safety cap — results may be incomplete`);
-    }
-    this.logger.log(`Fetched ${packages.length} mainnet packages`);
-    return packages;
-  }
-
   /**
    * Per-package entry-function probe. Returns `Map<moduleName, names[]>`
    * listing every module's PUBLIC + isEntry function names.
@@ -2929,8 +2892,6 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     networkTxTotal: number;
     txRates: Record<string, number>;
   }> {
-    const allPackages = await this.getAllPackages();
-
     // Display metadata pre-pass: one paginated fetch of every
     // `0x2::display::Display<T>` object on chain, grouped by the inner-type
     // package address. Each package's per-object fingerprint probe below
@@ -2940,7 +2901,8 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     // because its outer type lives under `0x2`, not the package address.
     const displayByPackage = await this.collectDisplayMetadata();
 
-    // Framework filter (see doc-comment above).
+    // Framework filter (see doc-comment above) — any `0x000…0***` package
+    // not explicitly claimed by a `ProjectDefinition` is skipped silently.
     const claimedAddresses = new Set<string>();
     for (const def of ALL_PROJECTS) {
       for (const addr of def.match.packageAddresses ?? []) {
@@ -2948,140 +2910,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       }
     }
 
-    const packages: PackageFact[] = [];
-    const failedPackages: { address: string; error: string }[] = [];
-
-    for (const pkg of allPackages) {
-      if (
-        pkg.address.startsWith('0x000000000000000000000000000000000000000000000000000000000000000') &&
-        !claimedAddresses.has(pkg.address.toLowerCase())
-      ) {
-        continue;
-      }
-
-      // Per-package try/catch — mirror of the partial-save pattern used by
-      // testnet's runNewestTick/runBackfillTick. One flaky package's probe
-      // (GraphQL error, unexpected shape, schema change) used to abort the
-      // entire capture, losing all prior probe work. Now we skip the bad
-      // package, log a warn with the address, and keep going. The snapshot
-      // lands with 750 of 753 packages rather than nothing.
-      try {
-
-      const deployer = pkg.previousTransactionBlock?.sender?.address?.toLowerCase() ?? null;
-      const modules = (pkg.modules?.nodes || []).map((m) => m.name);
-      const storageRebateNanos = Number(pkg.storageRebate || 0);
-
-      // Publish timestamp — comes straight from the TX effects of the
-      // previous-transaction-block. Static per package (upgrades don't
-      // rewrite the original publish tx). Null for framework packages that
-      // have no resolvable previous tx — treated as "unknown" in classify,
-      // not genesis.
-      const publishedIso = pkg.previousTransactionBlock?.effects?.timestamp ?? null;
-      const publishedAt = publishedIso ? new Date(publishedIso) : null;
-
-      // Public entry functions come from a scoped second-pass query per
-      // package — inlining them in `getAllPackages` overshoots IOTA GraphQL's
-      // 100k output-node cap. Filter to `visibility=PUBLIC` + `isEntry=true`
-      // inside the helper: non-public fns are internal plumbing and non-entry
-      // public fns don't receive TX calls, so only entry fns contribute to
-      // the "what does this package do" signal.
-      const entryFunctionsByModule = await this.fetchEntryFunctions(pkg.address);
-
-      // Per-module counters. These stay cumulative across scans so delta
-      // queries are plain subtraction between any two snapshots.
-      const moduleMetrics: ModuleMetrics[] = [];
-      for (const mod of modules) {
-        const emittingModule = `${pkg.address}::${mod}`;
-        const { count: events, capped: eventsCapped } = await this.countEvents(emittingModule);
-        const uniqueSenders = await this.updateSendersForModule(pkg.address, mod);
-        // Only probe event types when there's at least one event — skips a
-        // GraphQL round-trip on modules that never emit (~40% of registered
-        // modules by a rough sample).
-        const eventTypes = events > 0 ? await this.sampleEventTypes(emittingModule) : [];
-        moduleMetrics.push({
-          module: mod,
-          events,
-          eventsCapped,
-          uniqueSenders,
-          entryFunctions: entryFunctionsByModule.get(mod) ?? [],
-          eventTypes,
-        });
-      }
-
-      // Identity probe — one shot per package. Pass 1 reads owned Move
-      // objects (NFTs, configs with brand metadata); pass 2 falls back to
-      // tx-effect object changes for logic-only packages (CDP-style
-      // protocols whose package contains logic but never owns objects of
-      // its own types). Storing the raw output keeps classification
-      // schema-independent at read time.
-      const ident = await this.probeIdentityFields(pkg.address);
-      let identifiers = ident.identifiers;
-      let objectType: string | null = ident.objectType;
-      if (identifiers.length === 0) {
-        const tx = await this.probeTxEffects(pkg.address);
-        if (tx.identifiers.length) {
-          identifiers = tx.identifiers;
-          if (!objectType) objectType = tx.objectType;
-        }
-      }
-      // Fold in Display metadata when the package has any registered.
-      // Prefix with `display.` so these are distinguishable in the UI's
-      // Nested identifiers column and from probe-extracted strings.
-      // Deduped via Set because a project with 3 Display<T> objects for
-      // different types commonly repeats the same project_url.
-      const displayEntries = displayByPackage.get(pkg.address.toLowerCase()) ?? [];
-      if (displayEntries.length > 0) {
-        const seen = new Set(identifiers);
-        for (const { key, value } of displayEntries) {
-          const line = `display.${key}: ${value}`;
-          if (!seen.has(line)) {
-            identifiers = [...identifiers, line];
-            seen.add(line);
-          }
-        }
-      }
-      const fingerprint: FingerprintSampleDoc | null =
-        identifiers.length > 0 || objectType
-          ? { sampledObjectType: objectType, identifiers }
-          : null;
-
-      // Per-package cumulative TX count. Sibling to the events/senders loop
-      // above; one GraphQL call per scan on the steady-state path (cursor-
-      // forward from the saved watermark). Full history drains happen via
-      // the `backfill:txcounts` CLI, not here.
-      const { total: transactions, capped: transactionsCapped } =
-        await this.updateTxCountForPackage(pkg.address);
-
-      // Per-package holder counts + holder cursor advance. Option C: every
-      // `key`-able struct type gets captured, not just project-configured
-      // ones. Inner-loop type-level concurrency=3 keeps this off the 2h
-      // cron's critical path. Classify filters to project `countTypes` at
-      // read time. See `plans/plan_object_count.md § Option C + Step 3.5`.
-      const objectTypeCounts = await this.captureObjectTypesForPackage(pkg.address);
-      const summedObjectHolderCount = objectTypeCounts.reduce((s, e) => s + e.objectHolderCount, 0);
-      const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.objectCount, 0);
-
-      packages.push({
-        address: pkg.address,
-        deployer,
-        storageRebateNanos,
-        modules,
-        moduleMetrics,
-        objectHolderCount: summedObjectHolderCount,
-        objectCount: summedObjectCount,
-        transactions,
-        transactionsCapped,
-        objectTypeCounts,
-        fingerprint,
-        publishedAt,
-      } as PackageFact);
-
-      } catch (e) {
-        const err = e as Error;
-        this.logger.warn(`captureRaw: skipped ${pkg.address} — ${err.message}`);
-        failedPackages.push({ address: pkg.address, error: err.message });
-      }
-    }
+    // Delegate the paginate + per-package probe loop to `probePaginator`.
+    // Mainnet mode: no deadline (scan always drains), no freshness watermark,
+    // framework filter on, no checkpoints (commit-2 lands them).
+    const { probed: packages, failedPackages } = await this.probePaginator({
+      startCursor: null,
+      displayByPackage,
+      now: new Date(),
+      claimedAddresses,
+    });
 
     // Sum storage rebate only from successfully-probed packages. Partial
     // inclusion of a failed package would make the total inconsistent
@@ -4127,11 +3964,14 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
 
   /**
    * Fetch one page of packages from the GraphQL paginator. Lean shape —
-   * mirrors `getAllPackages`'s inner query — plus the paginator info so
-   * the caller can feed it back as the next `after` cursor.
+   * IOTA GraphQL rejects any query whose estimated output nodes crosses
+   * 100k, so inlining `modules { functions(first: 50) }` here (50×50×50
+   * = 125 000) would be rejected; functions come from a per-package
+   * second pass (`fetchEntryFunctions`) instead.
    *
-   * Exposed as a separate helper for the testnet ticks because they page
-   * incrementally rather than draining the full list up-front.
+   * Sole paginator entry-point used by `probePaginator` for every capture
+   * path (mainnet + testnet ticks). Returns the paginator info so the
+   * caller can feed it back as the next `after` cursor.
    */
   private async fetchPackagePage(
     cursor: string | null,
@@ -4160,100 +4000,106 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
-   * Run one newest-tick pass. Paginate from `cursor=null` and probe each
-   * package with the full captureRaw probe set, stopping when we hit a
-   * package whose stored `lastProbedAt > now - FRESHNESS_WINDOW_MS` (caught
-   * up to recent work). Respects the 90-min tick budget.
+   * Unified paginate-and-probe loop. Shared by:
    *
-   * Returns `{ probed, hitFreshWindow, deadlineHit }`. `hitFreshWindow:
-   * true` means the 18h optimization fired; `deadlineHit: true` means we
-   * ran out of budget before reaching either fresh territory or
-   * `hasNextPage: false`. `probed` has `lastProbedAt: <now>` stamped.
-   */
-  private async runNewestTick(
-    previousByAddress: Map<string, PackageFact>,
-    now: Date,
-    deadlineMs: number,
-    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
-  ): Promise<{ probed: PackageFact[]; hitFreshWindow: boolean; deadlineHit: boolean; error: Error | null }> {
-    const probed: PackageFact[] = [];
-    const freshCutoff = now.getTime() - EcosystemService.TESTNET_FRESHNESS_WINDOW_MS;
-    let cursor: string | null = null;
-    let hitFreshWindow = false;
-    let hasNextPage = true;
-
-    // Wrapping the entire probe loop in try/catch so mid-walk errors (e.g.
-    // testnet's 40s server timeout on fetchPackagePage, observed 2026-04-24
-    // 02:09 UTC) don't discard hours of probe work. The caller persists
-    // `probed` into a partial snapshot regardless of whether we returned
-    // cleanly or via `error`.
-    try {
-      while (hasNextPage) {
-        if (Date.now() >= deadlineMs) {
-          return { probed, hitFreshWindow, deadlineHit: true, error: null };
-        }
-        const page = await this.fetchPackagePage(cursor);
-        for (const info of page.nodes) {
-          const prev = previousByAddress.get(info.address.toLowerCase());
-          if (prev && prev.lastProbedAt && new Date(prev.lastProbedAt).getTime() > freshCutoff) {
-            hitFreshWindow = true;
-            return { probed, hitFreshWindow, deadlineHit: false, error: null };
-          }
-          const fact = await this.probeOnePackage(info, displayByPackage, now);
-          probed.push(fact);
-          if (Date.now() >= deadlineMs) {
-            return { probed, hitFreshWindow, deadlineHit: true, error: null };
-          }
-        }
-        hasNextPage = page.hasNextPage;
-        cursor = page.endCursor;
-        if (!cursor) break;
-      }
-      return { probed, hitFreshWindow, deadlineHit: false, error: null };
-    } catch (e) {
-      return { probed, hitFreshWindow, deadlineHit: false, error: e as Error };
-    }
-  }
-
-  /**
-   * Run one backfill-tick pass. Resume from `state.backfillAfterCursor`,
-   * probe every package the paginator returns, stop on `hasNextPage:
-   * false` (wrap — cursor resets to null for next cycle) or budget
-   * exhaustion. Unlike newest-tick this does NOT check the freshness
-   * window; the point of backfill is to refresh the long tail of stale
-   * entries regardless of how recently they were seen.
+   *   | Caller                | claimedAddresses | deadlineMs  | previousByAddress | freshnessWindowMs | onCheckpoint |
+   *   |-----------------------|------------------|-------------|-------------------|-------------------|--------------|
+   *   | mainnet `captureRaw`  | set              | —           | —                 | —                 | commit-3     |
+   *   | testnet newest-tick   | —                | 90min       | prev snap map     | 18h               | —            |
+   *   | testnet backfill-tick | —                | 90min       | —                 | —                 | —            |
    *
-   * Returns `{ probed, nextCursor, wrapped, deadlineHit }`. Caller writes
-   * `nextCursor` back to `state.backfillAfterCursor`; when `wrapped`,
-   * `nextCursor` is null (full scan cycle completed).
+   * Behaviour in one place:
+   *   - When `claimedAddresses` is provided AND the package address is in the
+   *     chain-primitive framework space (`0x0000…0***`) AND unclaimed → skip.
+   *     (Mainnet filter; testnet scans every package.)
+   *   - When `previousByAddress` + `freshnessWindowMs` are provided AND the
+   *     prior entry's `lastProbedAt > now - freshnessWindowMs` → early-exit
+   *     with `hitFreshWindow: true`. (Testnet newest-tick watermark.)
+   *   - When `deadlineMs` is provided AND `Date.now() >= deadlineMs` at the
+   *     top of a page fetch or after a probe → early-exit with
+   *     `deadlineHit: true`.
+   *   - Each `probeOnePackage` is try/catch'd individually (mainnet
+   *     per-package resilience — one flaky probe doesn't discard hours of
+   *     work; testnet benefits too).
+   *   - When a page fetch fails (after `this.graphql`'s own retries are
+   *     exhausted), returns with `error` set and `nextCursor` at the
+   *     pre-fetch position so the next invocation resumes correctly.
+   *
+   * `onCheckpoint` + `checkpointEveryN` are wired in the resumable-mainnet
+   * commit; the hook is declared on the options type here so the single-
+   * helper boundary is stable.
+   *
+   * The return shape is a superset of what the three call sites need; each
+   * picks off the fields it cares about.
    */
-  private async runBackfillTick(
-    startCursor: string | null,
-    now: Date,
-    deadlineMs: number,
-    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
-  ): Promise<{ probed: PackageFact[]; nextCursor: string | null; wrapped: boolean; deadlineHit: boolean; error: Error | null }> {
+  private async probePaginator(opts: {
+    startCursor: string | null;
+    displayByPackage: Map<string, Array<{ key: string; value: string }>>;
+    now: Date;
+    deadlineMs?: number;
+    previousByAddress?: Map<string, PackageFact>;
+    freshnessWindowMs?: number;
+    claimedAddresses?: Set<string>;
+  }): Promise<{
+    probed: PackageFact[];
+    nextCursor: string | null;
+    wrapped: boolean;
+    deadlineHit: boolean;
+    hitFreshWindow: boolean;
+    error: Error | null;
+    failedPackages: { address: string; error: string }[];
+  }> {
+    const {
+      startCursor,
+      displayByPackage,
+      now,
+      deadlineMs,
+      previousByAddress,
+      freshnessWindowMs,
+      claimedAddresses,
+    } = opts;
     const probed: PackageFact[] = [];
+    const failedPackages: { address: string; error: string }[] = [];
+    const freshCutoff =
+      previousByAddress && freshnessWindowMs ? now.getTime() - freshnessWindowMs : null;
     let cursor = startCursor;
     let wrapped = false;
+    let hitFreshWindow = false;
 
-    // Same try/catch rationale as runNewestTick — preserve partial probe
-    // work when a mid-walk GraphQL call throws unrecoverably (retries
-    // exhausted). On error, `nextCursor` stays at the pre-fetch value so
-    // the next backfill tick resumes from the same point; retries on the
-    // scheduled next cron usually succeed because the underlying cause
-    // (testnet endpoint load spike) is transient.
     try {
       while (true) {
-        if (Date.now() >= deadlineMs) {
-          return { probed, nextCursor: cursor, wrapped: false, deadlineHit: true, error: null };
+        if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+          return { probed, nextCursor: cursor, wrapped: false, deadlineHit: true, hitFreshWindow, error: null, failedPackages };
         }
         const page = await this.fetchPackagePage(cursor);
         for (const info of page.nodes) {
-          const fact = await this.probeOnePackage(info, displayByPackage, now);
-          probed.push(fact);
-          if (Date.now() >= deadlineMs) {
-            return { probed, nextCursor: page.endCursor, wrapped: false, deadlineHit: true, error: null };
+          // Mainnet framework filter — silent skip.
+          if (
+            claimedAddresses &&
+            info.address.startsWith('0x000000000000000000000000000000000000000000000000000000000000000') &&
+            !claimedAddresses.has(info.address.toLowerCase())
+          ) {
+            continue;
+          }
+          // Testnet newest-tick freshness watermark — stop as soon as we
+          // see a package we probed within the freshness window.
+          if (freshCutoff !== null && previousByAddress) {
+            const prev = previousByAddress.get(info.address.toLowerCase());
+            if (prev && prev.lastProbedAt && new Date(prev.lastProbedAt).getTime() > freshCutoff) {
+              hitFreshWindow = true;
+              return { probed, nextCursor: cursor, wrapped: false, deadlineHit: false, hitFreshWindow, error: null, failedPackages };
+            }
+          }
+          try {
+            const fact = await this.probeOnePackage(info, displayByPackage, now);
+            probed.push(fact);
+          } catch (e) {
+            const err = e as Error;
+            this.logger.warn(`probePaginator: skipped ${info.address} — ${err.message}`);
+            failedPackages.push({ address: info.address, error: err.message });
+          }
+          if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+            return { probed, nextCursor: page.endCursor, wrapped: false, deadlineHit: true, hitFreshWindow, error: null, failedPackages };
           }
         }
         if (!page.hasNextPage) {
@@ -4263,14 +4109,67 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         }
         cursor = page.endCursor;
         if (!cursor) {
+          // Defensive: hasNextPage:true with null endCursor — treat as wrap
+          // rather than spinning on the same stale cursor.
           wrapped = true;
           break;
         }
       }
-      return { probed, nextCursor: cursor, wrapped, deadlineHit: false, error: null };
+      return { probed, nextCursor: cursor, wrapped, deadlineHit: false, hitFreshWindow, error: null, failedPackages };
     } catch (e) {
-      return { probed, nextCursor: cursor, wrapped: false, deadlineHit: false, error: e as Error };
+      return { probed, nextCursor: cursor, wrapped: false, deadlineHit: false, hitFreshWindow, error: e as Error, failedPackages };
     }
+  }
+
+  /**
+   * Thin wrapper for the testnet priority-sharded newest-tick. See
+   * `probePaginator` for the full behaviour matrix.
+   */
+  private async runNewestTick(
+    previousByAddress: Map<string, PackageFact>,
+    now: Date,
+    deadlineMs: number,
+    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
+  ): Promise<{ probed: PackageFact[]; hitFreshWindow: boolean; deadlineHit: boolean; error: Error | null }> {
+    const result = await this.probePaginator({
+      startCursor: null,
+      displayByPackage,
+      now,
+      deadlineMs,
+      previousByAddress,
+      freshnessWindowMs: EcosystemService.TESTNET_FRESHNESS_WINDOW_MS,
+    });
+    return {
+      probed: result.probed,
+      hitFreshWindow: result.hitFreshWindow,
+      deadlineHit: result.deadlineHit,
+      error: result.error,
+    };
+  }
+
+  /**
+   * Thin wrapper for the testnet priority-sharded backfill tick. See
+   * `probePaginator` for the full behaviour matrix.
+   */
+  private async runBackfillTick(
+    startCursor: string | null,
+    now: Date,
+    deadlineMs: number,
+    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
+  ): Promise<{ probed: PackageFact[]; nextCursor: string | null; wrapped: boolean; deadlineHit: boolean; error: Error | null }> {
+    const result = await this.probePaginator({
+      startCursor,
+      displayByPackage,
+      now,
+      deadlineMs,
+    });
+    return {
+      probed: result.probed,
+      nextCursor: result.nextCursor,
+      wrapped: result.wrapped,
+      deadlineHit: result.deadlineHit,
+      error: result.error,
+    };
   }
 
   /**

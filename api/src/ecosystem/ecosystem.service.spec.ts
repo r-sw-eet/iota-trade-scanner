@@ -1937,7 +1937,13 @@ describe('EcosystemService', () => {
       // lands with the rest.
       const pkgA = { address: '0xAAA', storageRebate: '0', modules: { nodes: [{ name: 'm' }] }, previousTransactionBlock: null };
       const pkgB = { address: '0xBBB', storageRebate: '0', modules: { nodes: [{ name: 'm' }] }, previousTransactionBlock: null };
-      jest.spyOn(service as any, 'getAllPackages').mockResolvedValue([pkgA, pkgB]);
+      // captureRaw now goes through `probePaginator` → `fetchPackagePage`
+      // rather than the pre-drained `getAllPackages`. One page, no next.
+      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [pkgA, pkgB],
+        hasNextPage: false,
+        endCursor: null,
+      });
       jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
       jest.spyOn(service as any, 'fetchEntryFunctions').mockImplementation(async (addr: string) => {
         if (addr === '0xAAA') throw new Error('simulated: entry fn fetch failed');
