@@ -11,6 +11,9 @@ import { ProjectTxDigest } from './schemas/project-tx-digest.schema';
 import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
 import { TestnetCursor } from './schemas/testnet-cursor.schema';
 import { CaptureLock } from './schemas/capture-lock.schema';
+import { PackageFactDoc } from './schemas/package-fact.schema';
+import { SchemaAlert } from './schemas/schema-alert.schema';
+import { Types as MongooseTypes } from 'mongoose';
 import { AlertsService } from '../alerts/alerts.service';
 import { ProjectDefinition } from './projects';
 
@@ -242,6 +245,8 @@ const chain = <T>(value: T) => {
 describe('EcosystemService', () => {
   let service: EcosystemService;
   let ecoModel: any;
+  let pkgFactModel: any;
+  let schemaAlertModel: any;
   let senderModel: any;
   let senderDocModel: any;
   let txCountModel: any;
@@ -257,7 +262,15 @@ describe('EcosystemService', () => {
     ecoModel = {
       countDocuments: jest.fn(),
       findOne: jest.fn(),
-      create: jest.fn().mockResolvedValue({}),
+      // Mongo assigns `_id` on create when not provided; mimic that in the
+      // default mock so downstream code that uses `created._id` (e.g. the
+      // partial-snapshot-id threaded into `insertPackageFacts`) sees a
+      // real value, not `undefined`. Tests that pre-generate `_id` pass
+      // it in the arg; this default only fires when they don't.
+      create: jest.fn().mockImplementation(async (doc: any) => ({
+        _id: doc?._id ?? new MongooseTypes.ObjectId(),
+        ...doc,
+      })),
       // Resumable-mainnet plumbing: `capture()` now does a
       // `findOneAndUpdate` (promote partial → complete) before falling
       // back to `create`; `captureRaw` does a `find().sort().lean().exec()`
@@ -304,12 +317,34 @@ describe('EcosystemService', () => {
       aggregate: jest.fn().mockResolvedValue([]),
       collection: { name: 'project_holder_entries' },
     };
+    // ClassifiedSnapshot — stateful mock. `updateOne({snapshotId}, {$set:{view,registryHash}}, {upsert:true})`
+    // records the view keyed by snapshotId-string; `findOne({snapshotId})`
+    // returns the most-recently persisted entry (or null). This models
+    // the real persisted-view cache so that a post-capture
+    // classifyFromRaw + persist pair short-circuits subsequent
+    // getLatest() reads — matching production behavior where aggregate
+    // pipelines aren't re-run for every call. Without this, tests that
+    // assert on `uniqueSenders` (fed by senderDocModel.aggregate
+    // `mockResolvedValueOnce`) would double-consume the mock queue and
+    // see empty counts on the second pass.
+    const _classifiedByKey: Map<string, any> = new Map();
     classifiedModel = {
-      // Default: no persisted classified view → readers fall through to
-      // classifyFromRaw. Individual tests override `findOne` when they need
-      // to exercise the hit path.
-      findOne: jest.fn(() => chain(null)),
-      updateOne: jest.fn(() => ({ exec: jest.fn().mockResolvedValue({}) })),
+      findOne: jest.fn((filter: any) => ({
+        lean: () => ({
+          exec: jest.fn().mockImplementation(async () => {
+            const key = String(filter?.snapshotId ?? '');
+            return _classifiedByKey.get(key) ?? null;
+          }),
+        }),
+      })),
+      updateOne: jest.fn((filter: any, update: any) => ({
+        exec: jest.fn().mockImplementation(async () => {
+          const key = String(filter?.snapshotId ?? '');
+          const set = update?.$set ?? update?.$setOnInsert ?? update;
+          _classifiedByKey.set(key, set);
+          return {};
+        }),
+      })),
     };
     testnetCursorModel = {
       findById: jest.fn(() => ({ exec: jest.fn().mockResolvedValue(null) })),
@@ -330,6 +365,46 @@ describe('EcosystemService', () => {
       updateOne: jest.fn(() => ({ exec: jest.fn().mockResolvedValue({ modifiedCount: 1 }) })),
       findById: jest.fn(() => ({ lean: () => ({ exec: jest.fn().mockResolvedValue(null) }) })),
     };
+    // Packagefact sub-collection — post-2026-04-24 split. Mock is stateful:
+    // every `insertMany` is recorded keyed by `snapshotId` (coerced to
+    // string), and `find({snapshotId})` returns whatever was inserted for
+    // that id. Makes capture → classify end-to-end tests work transparently
+    // — tests keep mocking `ecoModel.create` and asserting against the
+    // resulting classified view without needing to know the split happened.
+    const _pkgByIdSpy: Map<string, any[]> = new Map();
+    pkgFactModel = {
+      find: jest.fn((filter: any) => ({
+        lean: () => ({
+          exec: jest.fn().mockImplementation(async () => {
+            const key = String(filter?.snapshotId ?? '');
+            return _pkgByIdSpy.get(key) ?? [];
+          }),
+        }),
+      })),
+      insertMany: jest.fn(async (batch: any[]) => {
+        if (Array.isArray(batch) && batch.length > 0) {
+          const key = String(batch[0]?.snapshotId ?? '');
+          const prev = _pkgByIdSpy.get(key) ?? [];
+          _pkgByIdSpy.set(key, prev.concat(batch));
+        }
+        return batch;
+      }),
+      deleteMany: jest.fn((filter: any) => ({
+        exec: jest.fn().mockImplementation(async () => {
+          const key = String(filter?.snapshotId ?? '');
+          _pkgByIdSpy.delete(key);
+          return {};
+        }),
+      })),
+      // Reset helper used by tests that rebuild the service — keeps the
+      // stateful mock isolated across test setup hooks.
+      __reset: () => _pkgByIdSpy.clear(),
+    };
+    // BSON size-guard alert sink. Default: accept writes silently — tests
+    // that exercise a guard trip can swap in a jest.fn and assert on calls.
+    schemaAlertModel = {
+      create: jest.fn().mockResolvedValue({}),
+    };
     const alertsMock = { notifyCaptureAlarm: jest.fn().mockResolvedValue(undefined) };
     const module = await Test.createTestingModule({
       providers: [
@@ -344,6 +419,8 @@ describe('EcosystemService', () => {
         { provide: getModelToken(ClassifiedSnapshot.name), useValue: classifiedModel },
         { provide: getModelToken(TestnetCursor.name), useValue: testnetCursorModel },
         { provide: getModelToken(CaptureLock.name), useValue: captureLockModel },
+        { provide: getModelToken(PackageFactDoc.name), useValue: pkgFactModel },
+        { provide: getModelToken(SchemaAlert.name), useValue: schemaAlertModel },
         { provide: AlertsService, useValue: alertsMock },
       ],
     }).compile();
@@ -1354,6 +1431,11 @@ describe('EcosystemService', () => {
     it('invalidateClassifyCache() forces the next getLatest() to re-classify', async () => {
       const raw = { _id: 'abc', packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
       ecoModel.findOne.mockReturnValue(chain(raw));
+      // Pin classifiedModel.findOne to always-miss so `classifyOrLoad` never
+      // short-circuits via the tier-2 persisted-view cache. The tier-1
+      // in-process LRU is what `invalidateClassifyCache()` clears, and
+      // that's what this test asserts on.
+      classifiedModel.findOne = jest.fn(() => chain(null));
       const classifySpy = jest
         .spyOn(service as any, 'classifyFromRaw')
         .mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
@@ -1720,11 +1802,24 @@ describe('EcosystemService', () => {
     const rawStub = { packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
 
     it('saves the raw snapshot returned by captureRaw, enriched with captureDurationMs', async () => {
-      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue({ ...rawStub, partialId: null });
       await service.capture();
+      // Post-split: packages live in the `packagefacts` sub-collection, not
+      // on the snapshot header. Assert on the header-shaped fields only;
+      // the `packages` field is intentionally absent from the create call.
       expect(ecoModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({ ...rawStub, captureDurationMs: expect.any(Number) }),
+        expect.objectContaining({
+          totalStorageRebateNanos: 0,
+          networkTxTotal: 0,
+          txRates: {},
+          captureDurationMs: expect.any(Number),
+          captureStage: 'complete',
+          network: 'mainnet',
+        }),
       );
+      // And separately: when there are no packages, insertMany is a no-op.
+      // When there are, it'd be called with the full batch.
+      expect(pkgFactModel.insertMany).not.toHaveBeenCalled();
     });
 
     it('emits ERROR log + alerts.notifyCaptureAlarm when duration crosses the 90min alarm threshold', async () => {
@@ -2079,47 +2174,55 @@ describe('EcosystemService', () => {
       expect(raw.packages.map((p: any) => p.address)).toEqual(['0xold1', '0xold2', '0xnew1']);
     });
 
-    it('fires onCheckpoint every N packages during a scan (upserting the partial doc)', async () => {
-      // 3 pages × 2 packages = 6 probed. With checkpointEveryN=50 the default
-      // fires zero times. Shrink the constant via a spy-backed override —
-      // easiest by mocking `probePaginator` itself and verifying its opts.
-      // Instead, set up a real run and spy on `ecoModel.updateOne`.
-      // Use MAINNET_CHECKPOINT_EVERY_N constant by issuing exactly that many
-      // packages across 2 pages so exactly one checkpoint fires at the
-      // page boundary.
+    it('fires onCheckpoint every N packages during a scan (creating partial header + inserting packagefacts)', async () => {
+      // Post-split: the first checkpoint calls `ecoModel.create` with a
+      // header-only partial doc (no packages); every checkpoint also calls
+      // `pkgFactModel.insertMany` with the batch, keyed by the partial's
+      // `_id`. Subsequent checkpoints hit `ecoModel.updateOne({_id})` to
+      // advance the cursor. Asserting on both sides here locks in the new
+      // split-collection contract.
       const every = (service as any).constructor.MAINNET_CHECKPOINT_EVERY_N ?? 50;
       const halfNodes = Array.from({ length: every }, (_, i) => pkgInfo(`0xckp${i}`));
       jest
         .spyOn(service as any, 'fetchPackagePage')
         .mockResolvedValueOnce({ nodes: halfNodes, hasNextPage: true, endCursor: 'cursor-after-page-1' })
         .mockResolvedValueOnce({ nodes: [pkgInfo('0xtail')], hasNextPage: false, endCursor: null });
-      const updateSpy = jest.spyOn(ecoModel, 'updateOne');
+      const createSpy = ecoModel.create as jest.Mock;
+      const insertManySpy = pkgFactModel.insertMany as jest.Mock;
 
       await (service as any).captureRaw();
-      // One checkpoint after page 1 (probed.length crosses `every`), and one
-      // more at end-of-walk (end-of-page wrap). Both should upsert the
-      // singleton partial with the network+stage filter.
-      const partialFilterCalls = updateSpy.mock.calls.filter(
+
+      // First-checkpoint header create — partial stage, pinned network,
+      // cursor matches the end of page 1.
+      const partialCreateCall = createSpy.mock.calls.find(
         (args: any[]) => args[0]?.network === 'mainnet' && args[0]?.captureStage === 'partial',
       );
-      expect(partialFilterCalls.length).toBeGreaterThanOrEqual(1);
-      // First checkpoint writes the page-1 endCursor so resume skips the
-      // already-probed page.
-      const firstCall = partialFilterCalls[0][1] as any;
-      expect(firstCall.$set.captureProgressCursor).toBe('cursor-after-page-1');
-      expect(firstCall.$push.packages.$each).toHaveLength(every);
+      expect(partialCreateCall).toBeDefined();
+      expect(partialCreateCall![0].captureProgressCursor).toBe('cursor-after-page-1');
+      // Packages never embedded in the header — that's the whole point of
+      // the split.
+      expect(partialCreateCall![0].packages).toBeUndefined();
+
+      // Packages landed in the sub-collection via insertMany.
+      expect(insertManySpy).toHaveBeenCalled();
+      const firstBatch = insertManySpy.mock.calls[0][0] as any[];
+      expect(firstBatch).toHaveLength(every);
+      expect(firstBatch[0].snapshotId).toBeDefined();
+      expect(firstBatch[0].network).toBe('mainnet');
     });
 
     it('end-of-capture promotes the partial doc to complete and clears the cursor', async () => {
-      // No partial at start → captureRaw writes an inline `create` on
-      // completion (fewer than N probed, falls through to create path).
-      // Force the promote path by seeding a partial doc BEFORE captureRaw
-      // runs, then calling the public `capture()` flow.
+      // Post-split: the partial is pinned by `_id` (captureRaw carries the
+      // `partialId` through its return), and the promote is a
+      // `findOneAndUpdate({_id})` with the terminal fields. Packages are
+      // NOT part of the $set — they already live in `packagefacts` under
+      // the same `_id`.
+      const partialId = 'promote-me-id';
       ecoModel.find = jest.fn(() => ({
         sort: () => ({
           lean: () => ({
             exec: async () => [
-              { _id: 'promote-me', captureProgressCursor: 'some-cursor', packages: [], createdAt: new Date() },
+              { _id: partialId, captureProgressCursor: 'some-cursor', packages: [], createdAt: new Date() },
             ],
           }),
         }),
@@ -2129,16 +2232,17 @@ describe('EcosystemService', () => {
         hasNextPage: false,
         endCursor: null,
       });
-      const findAndUpdateSpy = jest.fn(() => ({ exec: async () => ({ _id: 'promote-me', packages: [], network: 'mainnet' }) }));
+      const findAndUpdateSpy = jest.fn(() => ({ exec: async () => ({ _id: partialId, network: 'mainnet' }) }));
       ecoModel.findOneAndUpdate = findAndUpdateSpy as any;
       jest.spyOn(service as any, 'classifyFromRaw').mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
 
       await service.capture();
 
-      // Promote call: filter pins to the partial singleton, $set flips
-      // captureStage + clears cursor + lands final fields.
+      // Promote call: filter pins to the partial by `_id`, $set flips
+      // captureStage + clears cursor + lands final aggregate fields.
+      // `packages` intentionally absent — they already live in packagefacts.
       expect(findAndUpdateSpy).toHaveBeenCalledWith(
-        { network: 'mainnet', captureStage: 'partial' },
+        { _id: partialId },
         expect.objectContaining({
           $set: expect.objectContaining({
             captureStage: 'complete',
@@ -2148,8 +2252,132 @@ describe('EcosystemService', () => {
         }),
         { new: true },
       );
+      const setClause = ((findAndUpdateSpy.mock.calls[0] as any[])[1] as any).$set;
+      expect(setClause.packages).toBeUndefined();
       // No fallback `create` should fire when the promote succeeds.
       expect(ecoModel.create).not.toHaveBeenCalled();
+    });
+
+    it('multi-checkpoint run: first checkpoint creates the partial header, subsequent ones updateOne by _id', async () => {
+      // Force two checkpoints by issuing >2× N packages across two pages.
+      const every = (service as any).constructor.MAINNET_CHECKPOINT_EVERY_N ?? 50;
+      const page1 = Array.from({ length: every }, (_, i) => pkgInfo(`0xp1-${i}`));
+      const page2 = Array.from({ length: every }, (_, i) => pkgInfo(`0xp2-${i}`));
+      jest
+        .spyOn(service as any, 'fetchPackagePage')
+        .mockResolvedValueOnce({ nodes: page1, hasNextPage: true, endCursor: 'after-page-1' })
+        .mockResolvedValueOnce({ nodes: page2, hasNextPage: false, endCursor: null });
+
+      await (service as any).captureRaw();
+
+      // Exactly one partial header create (first checkpoint).
+      const createCalls = (ecoModel.create as jest.Mock).mock.calls.filter(
+        (args: any[]) => args[0]?.captureStage === 'partial',
+      );
+      expect(createCalls).toHaveLength(1);
+
+      // Subsequent checkpoint updates the same _id with the new cursor —
+      // exercises the non-create branch of the onCheckpoint closure.
+      const updateByIdCalls = (ecoModel.updateOne as jest.Mock).mock.calls.filter(
+        (args: any[]) => args[0]?._id !== undefined,
+      );
+      expect(updateByIdCalls.length).toBeGreaterThanOrEqual(1);
+      expect(updateByIdCalls[0][1].$set.captureProgressCursor).toBeDefined();
+
+      // Packages landed across >=2 insertMany batches.
+      expect((pkgFactModel.insertMany as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('finalize: partial doc vanishes mid-flight → warns + falls through to fresh-create terminal doc', async () => {
+      // Seed a partial that detectMainnetResume returns, but findOneAndUpdate
+      // reports null (doc gone between checkpoint and promote). Service must
+      // warn and still produce a complete snapshot rather than throw.
+      const vanishedId = 'vanished-partial';
+      ecoModel.find = jest.fn(() => ({
+        sort: () => ({
+          lean: () => ({
+            exec: async () => [
+              { _id: vanishedId, captureProgressCursor: 'cur', packages: [], createdAt: new Date() },
+            ],
+          }),
+        }),
+      }));
+      // findOneAndUpdate returns null → promote target gone.
+      ecoModel.findOneAndUpdate = jest.fn(() => ({ exec: async () => null })) as any;
+      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [pkgInfo('0xaftervan')],
+        hasNextPage: false,
+        endCursor: null,
+      });
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      jest.spyOn(service as any, 'classifyFromRaw').mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
+
+      await service.capture();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`partial ${vanishedId} vanished before promote`),
+      );
+      // Fall-through fresh-create landed a terminal doc.
+      const completeCreate = (ecoModel.create as jest.Mock).mock.calls.find(
+        (args: any[]) => args[0]?.captureStage === 'complete',
+      );
+      expect(completeCreate).toBeDefined();
+    });
+
+    it('safeCreate refuses an oversize header doc, logs ERROR, writes schemaAlerts, throws', async () => {
+      // Build a doc that will serialize > 15 MiB. Cheapest path: a big
+      // string field. BSON calculateObjectSize will trip the ceiling. Also
+      // attach a non-empty `packages` array so the `Array.isArray` branch
+      // in the detail-builder is exercised — this is the "someone accidentally
+      // tried to re-embed packages" scenario the guard exists to catch.
+      const huge = 'x'.repeat(16 * 1024 * 1024);
+      const errorSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+      await expect(
+        (service as any).safeCreate({
+          network: 'mainnet',
+          captureStage: 'complete',
+          packages: [{ address: '0xdeadbeef' }, { address: '0xcafe' }],
+          junk: huge,
+        }),
+      ).rejects.toThrow(/BSON size guard REFUSED/);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('BSON size guard REFUSED'));
+      expect(schemaAlertModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'bson-size-guard',
+          collectionName: 'onchainsnapshots',
+          op: 'create',
+          network: 'mainnet',
+          detail: expect.objectContaining({ packagesLen: 2 }),
+        }),
+      );
+    });
+
+    it('safeCreate omits non-string network from the schemaAlert when doc.network is missing', async () => {
+      // Exercises the `typeof doc.network === 'string'` false branch in
+      // safeCreate: no network field on the doc → alert network field falls
+      // through to `this.network` default ('mainnet' in the test harness).
+      const huge = 'x'.repeat(16 * 1024 * 1024);
+      jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+      await expect(
+        (service as any).safeCreate({ captureStage: 'complete', junk: huge }),
+      ).rejects.toThrow(/BSON size guard REFUSED/);
+      const alertCall = (schemaAlertModel.create as jest.Mock).mock.calls.find(
+        (args: any[]) => args[0]?.kind === 'bson-size-guard',
+      );
+      expect(alertCall![0].network).toBe('mainnet');
+    });
+
+    it('logSchemaAlert swallows a persist error so alerting never blocks the caller', async () => {
+      schemaAlertModel.create = jest.fn().mockRejectedValue(new Error('mongo flaked'));
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      // Call the private helper directly via the any-cast.
+      await (service as any).logSchemaAlert({
+        kind: 'bson-size-guard',
+        collectionName: 'onchainsnapshots',
+        op: 'create',
+        message: 'simulated',
+      });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to persist schemaAlert'));
     });
 
     it('no partial doc exists → starts fresh; creates a complete doc directly at end (fewer than N probed)', async () => {
@@ -2289,6 +2517,8 @@ describe('EcosystemService', () => {
           { provide: getModelToken(ClassifiedSnapshot.name), useValue: classifiedModel },
           { provide: getModelToken(TestnetCursor.name), useValue: testnetCursorModel },
         { provide: getModelToken(CaptureLock.name), useValue: captureLockModel },
+          { provide: getModelToken(PackageFactDoc.name), useValue: pkgFactModel },
+          { provide: getModelToken(SchemaAlert.name), useValue: schemaAlertModel },
           { provide: AlertsService, useValue: alertsMock },
         ],
       }).compile();
@@ -4356,8 +4586,13 @@ describe('EcosystemService', () => {
       // the raw snapshot then runs `classifyFromRaw`, which produces the
       // frontend-facing shape (`l1`, `l2`, `unattributed`, `totalProjects`).
       // Gives us end-to-end coverage of capture → classify in a single test.
+      // `raw` here is whatever `safeCreate` passed to the underlying
+      // `ecoModel.create` — now a header-only doc (no `packages` field;
+      // those live in the `pkgFactModel` stateful mock, keyed by the
+      // pre-generated `_id`). Reuse the real `_id` so the mock's
+      // `find({snapshotId})` returns the same batch that was insertMany'd.
       const raw = ecoModel.create.mock.calls[0][0];
-      const stored = { _id: 'test-id', ...raw };
+      const stored = raw;
       ecoModel.findOne.mockReturnValue({
         sort: () => ({ lean: () => ({ exec: async () => stored }) }),
       });
@@ -6660,9 +6895,17 @@ describe('EcosystemService', () => {
 
       await service.captureTestnetTick();
 
+      // Post-split: header-only create tagged testnet; packages live in
+      // `packagefacts` (empty batch here since the newest-tick probed
+      // nothing). No `packages` field on the snapshot doc — the whole
+      // point of the refactor.
       expect(ecoModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({ network: 'testnet', packages: [] }),
+        expect.objectContaining({ network: 'testnet', captureStage: 'complete' }),
       );
+      const createArg = (ecoModel.create as jest.Mock).mock.calls[0][0];
+      expect(createArg.packages).toBeUndefined();
+      // Empty probed + empty previous → no insertMany call.
+      expect(pkgFactModel.insertMany).not.toHaveBeenCalled();
       expect(testnetCursorModel.updateOne).toHaveBeenCalledWith(
         { _id: 'testnet' },
         expect.objectContaining({
@@ -6958,10 +7201,21 @@ describe('EcosystemService', () => {
       const result = await (service as any).captureTestnetTick();
 
       expect((result as any).skipped).toBeUndefined();
+      // Post-split: the probed partial packages land in `packagefacts` via
+      // `insertMany`, not on the snapshot header. The header doc itself
+      // is packages-free; assert on both sides.
       expect(ecoModel.create).toHaveBeenCalledWith(expect.objectContaining({
         network: 'testnet',
-        packages: expect.arrayContaining(partial),
+        captureStage: 'complete',
       }));
+      const createArg = (ecoModel.create as jest.Mock).mock.calls[0][0];
+      expect(createArg.packages).toBeUndefined();
+      expect(pkgFactModel.insertMany).toHaveBeenCalled();
+      const insertedBatch = (pkgFactModel.insertMany as jest.Mock).mock.calls[0][0] as any[];
+      expect(insertedBatch.map((p) => p.address)).toEqual(
+        expect.arrayContaining(partial.map((p) => p.address)),
+      );
+      expect(insertedBatch[0].network).toBe('testnet');
       expect(testnetCursorModel.updateOne).toHaveBeenCalled();
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('aborted mid-probe after 2 pkgs'));
     });

@@ -1,7 +1,8 @@
 import { Injectable, Logger, OnModuleInit, OnApplicationShutdown } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Cron } from '@nestjs/schedule';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
+import { BSON } from 'bson';
 import { createHash } from 'crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
@@ -12,6 +13,8 @@ import {
   FingerprintSampleDoc,
   ObjectTypeCount,
 } from './schemas/onchain-snapshot.schema';
+import { PackageFactDoc } from './schemas/package-fact.schema';
+import { SchemaAlert } from './schemas/schema-alert.schema';
 import { ProjectSenders } from './schemas/project-senders.schema';
 import { ProjectSender } from './schemas/project-sender.schema';
 import { ProjectTxCounts } from './schemas/project-tx-counts.schema';
@@ -476,6 +479,8 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
 
   constructor(
     @InjectModel(OnchainSnapshot.name) private ecoModel: Model<OnchainSnapshot>,
+    @InjectModel(PackageFactDoc.name) private pkgFactModel: Model<PackageFactDoc>,
+    @InjectModel(SchemaAlert.name) private schemaAlertModel: Model<SchemaAlert>,
     @InjectModel(ProjectSenders.name) private senderModel: Model<ProjectSenders>,
     @InjectModel(ProjectSender.name) private senderDocModel: Model<ProjectSender>,
     @InjectModel(ProjectTxCounts.name) private txCountModel: Model<ProjectTxCounts>,
@@ -537,6 +542,156 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         { $or: [{ captureStage: 'complete' }, { captureStage: { $exists: false } }] },
       ],
     };
+  }
+
+  /**
+   * BSON-size ceiling enforced by `safeCreate` / `safeUpdateOne` on every
+   * write to `onchainsnapshots`. 15 MiB leaves a 1 MiB headroom below the
+   * 16 MiB MongoDB per-doc limit (16,777,216 bytes) so benign serialization
+   * overhead doesn't trip us. Chosen after the 2026-04-24 testnet overflow
+   * where a snapshot doc at 17,825,798 bytes threw during `bson.encodeUTF8Into`.
+   */
+  private static readonly BSON_SIZE_CEILING_BYTES = 15 * 1024 * 1024;
+
+  /**
+   * Read the PackageFact set belonging to a snapshot, preferring the new
+   * `packagefacts` sub-collection and falling back to the legacy embedded
+   * `snapshot.packages[]` field for pre-split docs.
+   *
+   * This is the single sanctioned read path — every call site that used to
+   * reach for `snap.packages` directly should use this helper so legacy
+   * docs stay queryable without a migration and new docs hit the sub-
+   * collection transparently.
+   */
+  private async getPackages(
+    snapshot: { _id?: unknown; packages?: PackageFact[] } | null | undefined,
+  ): Promise<PackageFact[]> {
+    if (!snapshot) return [];
+    const snapshotId = (snapshot as { _id?: Types.ObjectId | string })._id;
+    if (snapshotId) {
+      const docs = await this.pkgFactModel
+        .find({ snapshotId })
+        .lean()
+        .exec();
+      if (docs.length > 0) {
+        // Strip the sub-collection-only meta fields so the returned shape
+        // matches the embedded PackageFact exactly — downstream consumers
+        // don't need to know which path provided the data.
+        return docs.map((d) => {
+          // Destructure to strip sub-collection-only meta fields; the leading
+          // underscores + eslint-disable keep the unused-binding noise out
+          // of the lint gate without masking genuine unused-locals elsewhere.
+          /* eslint-disable @typescript-eslint/no-unused-vars */
+          const { _id, snapshotId, network, createdAt, updatedAt, ...rest } = d as Record<string, unknown>;
+          /* eslint-enable @typescript-eslint/no-unused-vars */
+          return rest as unknown as PackageFact;
+        });
+      }
+    }
+    // Legacy fallback — pre-split docs carry packages inline.
+    return (snapshot.packages ?? []) as PackageFact[];
+  }
+
+  /**
+   * Insert a batch of PackageFacts into the sub-collection, stamping
+   * `snapshotId` and `network` onto each. Idempotent-safe when the
+   * `{ snapshotId, address }` unique index is in place — retrying a
+   * partial-save batch after a transient error won't duplicate rows.
+   *
+   * Chunks at 1000 to stay well clear of Mongo's `maxWriteBatchSize`
+   * (100k) and keep the insertMany RTT under a few hundred ms even on
+   * the busiest testnet backfill ticks.
+   */
+  private async insertPackageFacts(
+    snapshotId: Types.ObjectId,
+    network: 'mainnet' | 'testnet' | 'devnet',
+    batch: PackageFact[],
+  ): Promise<void> {
+    if (batch.length === 0) return;
+    const CHUNK = 1000;
+    for (let i = 0; i < batch.length; i += CHUNK) {
+      const slice = batch.slice(i, i + CHUNK).map((p) => ({ ...p, snapshotId, network }));
+      await this.pkgFactModel.insertMany(slice, { ordered: false });
+    }
+  }
+
+  /**
+   * Delete every PackageFact doc belonging to a snapshot. Called when a
+   * partial mainnet snapshot is abandoned (cleaner shutdown or supplanted
+   * by a newer complete run) — the sub-collection equivalent of
+   * `ecoModel.deleteOne({_id})` on the header.
+   */
+  private async deletePackageFactsFor(snapshotId: Types.ObjectId): Promise<void> {
+    await this.pkgFactModel.deleteMany({ snapshotId }).exec();
+  }
+
+  /**
+   * Persist a schema-guard trip to Mongo so a future deploy / debugging
+   * session can still see that a guard fired even after container logs
+   * have rotated. Swallow write errors — alerting must never block the
+   * caller that refused the oversize write.
+   */
+  private async logSchemaAlert(alert: {
+    kind: string;
+    collectionName: string;
+    op: string;
+    network?: string;
+    sizeBytes?: number;
+    thresholdBytes?: number;
+    detail?: Record<string, unknown>;
+    message: string;
+  }): Promise<void> {
+    try {
+      await this.schemaAlertModel.create({
+        kind: alert.kind,
+        collectionName: alert.collectionName,
+        op: alert.op,
+        network: alert.network ?? this.network ?? 'unknown',
+        sizeBytes: alert.sizeBytes ?? 0,
+        thresholdBytes: alert.thresholdBytes ?? 0,
+        detail: alert.detail ?? {},
+        message: alert.message,
+      });
+    } catch (e) {
+      this.logger.warn(`Failed to persist schemaAlert: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * Oversize-aware `ecoModel.create` wrapper. Measures the BSON byte size
+   * the doc will serialize to; if above `BSON_SIZE_CEILING_BYTES`, logs
+   * loudly, writes a `schemaAlerts` record, and throws — so the caller
+   * sees the failure AND a persistent record survives log rotation.
+   *
+   * Any doc that fails here is the signal that the 15 MiB ceiling is
+   * being approached; we ratchet down the data shape rather than loosen
+   * the ceiling.
+   */
+  private async safeCreate(
+    doc: Partial<OnchainSnapshot> & Record<string, unknown>,
+  ): Promise<OnchainSnapshot> {
+    const size = BSON.calculateObjectSize(doc as Record<string, unknown>);
+    if (size > EcosystemService.BSON_SIZE_CEILING_BYTES) {
+      const detail: Record<string, unknown> = {
+        packagesLen: Array.isArray(doc.packages) ? (doc.packages as unknown[]).length : undefined,
+        network: doc.network,
+        captureStage: doc.captureStage,
+      };
+      const message = `BSON size guard REFUSED onchainsnapshots create: ${size} bytes > ceiling ${EcosystemService.BSON_SIZE_CEILING_BYTES} — packages are supposed to live in the packagefacts sub-collection, do NOT embed them in the snapshot header doc`;
+      this.logger.error(message);
+      await this.logSchemaAlert({
+        kind: 'bson-size-guard',
+        collectionName: 'onchainsnapshots',
+        op: 'create',
+        network: typeof doc.network === 'string' ? doc.network : undefined,
+        sizeBytes: size,
+        thresholdBytes: EcosystemService.BSON_SIZE_CEILING_BYTES,
+        detail,
+        message,
+      });
+      throw new Error(message);
+    }
+    return this.ecoModel.create(doc as OnchainSnapshot);
   }
 
   async onModuleInit() {
@@ -916,9 +1071,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       };
     }
 
+    // Resolve packages via the sub-collection-aware helper so growth math
+    // works uniformly against legacy (embedded) and post-split (sub-collection)
+    // snapshots.
+    const baselinePackages = await this.getPackages(baseline);
+    const latestPackages = await this.getPackages(latest);
+
     // Index the baseline by address for O(1) lookups while scanning `latest`.
-    const baselineByAddr = new Map<string, typeof baseline.packages[number]>();
-    for (const p of baseline.packages) baselineByAddr.set(p.address, p);
+    const baselineByAddr = new Map<string, PackageFact>();
+    for (const p of baselinePackages) baselineByAddr.set(p.address, p);
 
     let totalEventsDelta = 0;
     let totalTransactionsDelta = 0;
@@ -934,7 +1095,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       modules: Array<{ module: string; eventsDelta: number; uniqueSendersDelta: number }>;
     }> = [];
 
-    for (const pkg of latest.packages) {
+    for (const pkg of latestPackages) {
       const prev = baselineByAddr.get(pkg.address);
       const isNew = !prev;
       if (isNew) newPackages += 1;
@@ -1703,7 +1864,8 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     // Classification doesn't matter for sender drain — `ProjectSenders` is
     // keyed by `(packageAddress, module)`, which is stable regardless of
     // which ProjectDefinition the package ultimately maps to at read time.
-    const packages = snapshot.packages.filter((p) => p.modules.length > 0);
+    const snapPackages = await this.getPackages(snapshot);
+    const packages = snapPackages.filter((p) => p.modules.length > 0);
     let totalModules = 0;
     let totalSenders = 0;
 
@@ -1994,7 +2156,8 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       throw new Error('No ecosystem snapshot exists yet — run a scan first.');
     }
 
-    const addresses = snapshot.packages.map((p) => p.address);
+    const snapPackages = await this.getPackages(snapshot);
+    const addresses = snapPackages.map((p) => p.address);
     let totalTxs = 0;
     let cappedPackages = 0;
     let cursor = 0;
@@ -2259,8 +2422,9 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       throw new Error('No ecosystem snapshot exists yet — run a scan first.');
     }
 
+    const snapPackages = await this.getPackages(snapshot);
     const pairs: Array<{ packageAddress: string; type: string }> = [];
-    for (const p of snapshot.packages) {
+    for (const p of snapPackages) {
       for (const entry of p.objectTypeCounts ?? []) {
         pairs.push({ packageAddress: p.address, type: entry.type });
       }
@@ -2926,6 +3090,14 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     totalStorageRebateNanos: number;
     networkTxTotal: number;
     txRates: Record<string, number>;
+    /**
+     * If the partial-save path created (or resumed) a partial snapshot doc,
+     * its `_id`. `finalizeMainnetSnapshot` promotes that doc in place rather
+     * than creating a fresh one — and more importantly, the packages already
+     * live in `packagefacts` under this `_id`, so no re-insert is needed.
+     * `null` when capture finished inside the first checkpoint window.
+     */
+    partialId: Types.ObjectId | null;
   }> {
     // Display metadata pre-pass: one paginated fetch of every
     // `0x2::display::Display<T>` object on chain, grouped by the inner-type
@@ -2949,21 +3121,38 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     // Multiple partial docs shouldn't happen (capture is locked), but defend
     // anyway: keep the newest, delete the rest.
     const captureStart = new Date();
-    const { resumeCursor, carriedForward } = await this.detectMainnetResume();
+    const resume = await this.detectMainnetResume();
+    const { resumeCursor, carriedForward } = resume;
+    // Mutable across closures — each checkpoint either creates the partial
+    // header doc (first hit) or updates the existing one. Scoped to this
+    // captureRaw invocation; not shared with concurrent runs because the
+    // capture lock serializes them.
+    let partialId: Types.ObjectId | null = resume.partialId;
 
-    // Checkpoint callback — upserts the singleton partial doc. First hit
-    // creates it (with createdAt pinned to captureStart so duration-since-
-    // start computations still match); subsequent hits $push the tail.
+    // Checkpoint callback — on first hit with no partial yet, create the
+    // partial header doc (packages-free, just cursor + lifecycle marker)
+    // and insert the fresh batch into the `packagefacts` sub-collection
+    // against that header's `_id`. Subsequent hits update the cursor and
+    // append to the sub-collection. Splits packages out of the snapshot
+    // doc so it never approaches the 16 MiB BSON ceiling.
     const onCheckpoint = async (batch: PackageFact[], cursorAt: string | null): Promise<void> => {
-      await this.ecoModel.updateOne(
-        { network: 'mainnet', captureStage: 'partial' },
-        {
-          $setOnInsert: { network: 'mainnet', captureStage: 'partial', createdAt: captureStart },
-          $set: { captureProgressCursor: cursorAt, updatedAt: new Date() },
-          $push: { packages: { $each: batch } },
-        },
-        { upsert: true },
-      ).exec();
+      if (!partialId) {
+        const created = await this.safeCreate({
+          network: 'mainnet',
+          captureStage: 'partial',
+          captureProgressCursor: cursorAt,
+          createdAt: captureStart,
+        });
+        partialId = created._id as Types.ObjectId;
+      } else {
+        await this.ecoModel
+          .updateOne(
+            { _id: partialId },
+            { $set: { captureProgressCursor: cursorAt, updatedAt: new Date() } },
+          )
+          .exec();
+      }
+      await this.insertPackageFacts(partialId, 'mainnet', batch);
     };
 
     const {
@@ -3020,6 +3209,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         perMinute: Math.round(networkTxTotal / (daysLive * 24 * 60)),
         perSecond: Math.round((networkTxTotal / secondsLive) * 100) / 100,
       },
+      partialId,
     };
   }
 
@@ -3036,33 +3226,54 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       totalStorageRebateNanos: number;
       networkTxTotal: number;
       txRates: Record<string, number>;
+      partialId: Types.ObjectId | null;
     },
     durationMs: number,
   ): Promise<OnchainSnapshot & { _id: unknown }> {
+    // `packages` is now tracked via the `packagefacts` sub-collection, not
+    // embedded in the snapshot header. The header doc carries aggregates +
+    // lifecycle fields only. This is what keeps us clear of the 16 MiB
+    // BSON ceiling even as the ecosystem grows.
     const finalFields = {
       captureStage: 'complete' as const,
       captureProgressCursor: null,
-      packages: raw.packages,
       totalStorageRebateNanos: raw.totalStorageRebateNanos,
       networkTxTotal: raw.networkTxTotal,
       txRates: raw.txRates,
       captureDurationMs: durationMs,
     };
-    // `findOneAndUpdate` so we get the promoted doc back in one round-trip.
-    // Filter: the singleton partial doc for mainnet. If one exists, this
-    // flips it; if none, `upsert: false` returns null and we fall through.
-    const promoted = await this.ecoModel
-      .findOneAndUpdate(
-        { network: 'mainnet', captureStage: 'partial' },
-        { $set: finalFields },
-        { new: true },
-      )
-      .exec();
-    if (promoted) return promoted as OnchainSnapshot & { _id: unknown };
-    // No partial ever got created — capture finished inside the first
-    // checkpoint window (fewer than `MAINNET_CHECKPOINT_EVERY_N` packages,
-    // or a freshly-wiped DB). Insert a terminal doc directly.
-    return this.ecoModel.create({ ...raw, network: this.network, captureDurationMs: durationMs });
+
+    if (raw.partialId) {
+      // Promote the existing partial — its packagefacts are already in
+      // place under `partialId` because every checkpoint wrote to the
+      // sub-collection keyed by this id. No re-insert needed.
+      const promoted = await this.ecoModel
+        .findOneAndUpdate({ _id: raw.partialId }, { $set: finalFields }, { new: true })
+        .exec();
+      if (promoted) return promoted as OnchainSnapshot & { _id: unknown };
+      // Defensive: partial doc vanished between checkpoint and finalize.
+      // Fall through to the fresh-create path so we don't lose the capture.
+      this.logger.warn(
+        `finalizeMainnetSnapshot: partial ${String(raw.partialId)} vanished before promote; creating fresh terminal doc`,
+      );
+    }
+
+    // No partial was ever created — capture finished inside the first
+    // checkpoint window (fewer than `MAINNET_CHECKPOINT_EVERY_N` packages).
+    // Pre-generate `_id` so packagefacts go in first; if the header create
+    // then fails, a stale-id cleanup sweep can remove orphans, but no
+    // partial header ever becomes visible without its package data.
+    const newId = new Types.ObjectId();
+    await this.insertPackageFacts(newId, this.network, raw.packages);
+    return this.safeCreate({
+      _id: newId,
+      network: this.network,
+      captureStage: 'complete',
+      totalStorageRebateNanos: raw.totalStorageRebateNanos,
+      networkTxTotal: raw.networkTxTotal,
+      txRates: raw.txRates,
+      captureDurationMs: durationMs,
+    });
   }
 
   /**
@@ -3084,6 +3295,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   private async detectMainnetResume(): Promise<{
     resumeCursor: string | null;
     carriedForward: PackageFact[];
+    partialId: Types.ObjectId | null;
   }> {
     const partials = await this.ecoModel
       .find({ network: 'mainnet', captureStage: 'partial' })
@@ -3092,7 +3304,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       .exec();
 
     if (partials.length === 0) {
-      return { resumeCursor: null, carriedForward: [] };
+      return { resumeCursor: null, carriedForward: [], partialId: null };
     }
 
     const [newest, ...older] = partials;
@@ -3100,8 +3312,14 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       this.logger.warn(
         `captureRaw: found ${partials.length} partial mainnet snapshots (expected at most 1 under the capture lock); keeping newest ${String(newest._id)} and deleting ${older.length} older`,
       );
+      const olderIds = older.map((o) => o._id);
       await this.ecoModel
-        .deleteMany({ _id: { $in: older.map((o) => o._id) } })
+        .deleteMany({ _id: { $in: olderIds } })
+        .exec();
+      // Also cascade-delete their orphaned packagefacts; leaving them behind
+      // would count against a future snapshot if `_id` ever collided.
+      await this.pkgFactModel
+        .deleteMany({ snapshotId: { $in: olderIds } })
         .exec();
     }
 
@@ -3111,14 +3329,23 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         `captureRaw: found partial mainnet snapshot ${String(newest._id)} with null captureProgressCursor — treating as broken-from-promote and deleting; starting fresh`,
       );
       await this.ecoModel.deleteOne({ _id: newest._id }).exec();
-      return { resumeCursor: null, carriedForward: [] };
+      await this.deletePackageFactsFor(newest._id as Types.ObjectId);
+      return { resumeCursor: null, carriedForward: [], partialId: null };
     }
 
-    const carried: PackageFact[] = (newest as { packages?: PackageFact[] }).packages ?? [];
+    // Carry-forward reads via getPackages() — pulls from packagefacts sub-
+    // collection if the partial's checkpoints have already written there,
+    // falls through to legacy embedded packages[] for docs predating the
+    // split. Either way the same shape comes back.
+    const carried: PackageFact[] = await this.getPackages(newest);
     this.logger.log(
       `captureRaw: resuming mainnet capture from partial ${String(newest._id)} — ${carried.length} packages carried forward, cursor=${cursor}`,
     );
-    return { resumeCursor: cursor, carriedForward: carried };
+    return {
+      resumeCursor: cursor,
+      carriedForward: carried,
+      partialId: newest._id as Types.ObjectId,
+    };
   }
 
   /**
@@ -3140,7 +3367,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    */
   private async classifyFromRaw(raw: {
     _id?: unknown;
-    packages: PackageFact[];
+    packages?: PackageFact[];
     totalStorageRebateNanos?: number;
     networkTxTotal: number;
     txRates: Record<string, number>;
@@ -3149,11 +3376,17 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   }) {
     const scanNetwork: 'mainnet' | 'testnet' | 'devnet' =
       raw.network === 'testnet' || raw.network === 'devnet' ? raw.network : 'mainnet';
+    // Resolve packages via the sub-collection-aware helper. In-memory raw
+    // objects (from `captureRaw`) carry `packages` inline and short-circuit
+    // the sub-collection fetch. Persisted snapshots post-split carry no
+    // embedded `packages` and go to the sub-collection; legacy embedded-
+    // packages snapshots short-circuit back to the inline array.
+    const rawPackages = await this.getPackages(raw);
     const projectMap = new Map<string, { def: ProjectDefinition; facts: PackageFact[]; splitDeployer?: string }>();
     // Unmatched packages grouped by deployer. `unknown` collects packages
     // whose deployer resolves to null (framework / legacy publish records).
     const unattributedByDeployer = new Map<string, PackageFact[]>();
-    for (const pkg of raw.packages) {
+    for (const pkg of rawPackages) {
       const mods = new Set(pkg.modules);
       const pkgDeployer = pkg.deployer;
       let def = this.matchProject(mods, pkg.address, pkgDeployer, scanNetwork);
@@ -3720,9 +3953,9 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     // investigating. A mainnet snapshot with zero matches is a genuine
     // bug; log at WARN here rather than ERROR so testnet-first iteration
     // (registry still being built out) doesn't spam alarms.
-    if (scanNetwork !== 'mainnet' && projects.length === 0 && raw.packages.length > 0) {
+    if (scanNetwork !== 'mainnet' && projects.length === 0 && rawPackages.length > 0) {
       this.logger.warn(
-        `classifyFromRaw: ${scanNetwork} snapshot with ${raw.packages.length} packages produced zero matches — registry likely missing testnet-tagged defs.`,
+        `classifyFromRaw: ${scanNetwork} snapshot with ${rawPackages.length} packages produced zero matches — registry likely missing testnet-tagged defs.`,
       );
     }
 
@@ -4444,7 +4677,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         .sort({ createdAt: -1 })
         .lean()
         .exec();
-      const previousPackages: PackageFact[] = (previousDoc?.packages ?? []) as PackageFact[];
+      const previousPackages: PackageFact[] = await this.getPackages(previousDoc);
       const previousByAddress = new Map<string, PackageFact>();
       for (const p of previousPackages) previousByAddress.set(p.address.toLowerCase(), p);
 
@@ -4499,9 +4732,18 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       const totalStorageRebateNanos = merged.reduce((s, p) => s + Number(p.storageRebateNanos || 0), 0);
       const durationMs = Date.now() - startedAt;
 
-      await this.ecoModel.create({
+      // Write packagefacts first (sub-collection), header last — if the
+      // header create fails we leave orphan facts behind but never an
+      // empty-looking snapshot header. Pre-generated `_id` threads through
+      // both writes. This is the exact pattern that averts the 2026-04-24
+      // BSON-ceiling crash: the 9230-pkg payload lives in its own docs,
+      // the header stays under 5 KiB.
+      const newId = new Types.ObjectId();
+      await this.insertPackageFacts(newId, 'testnet', merged);
+      await this.safeCreate({
+        _id: newId,
         network: 'testnet',
-        packages: merged,
+        captureStage: 'complete',
         totalStorageRebateNanos,
         networkTxTotal: previousDoc?.networkTxTotal ?? 0,
         txRates: previousDoc?.txRates ?? {},

@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { OnchainSnapshot, OnchainSnapshotSchema } from './schemas/onchain-snapshot.schema';
+import { PackageFactDoc, PackageFactDocSchema } from './schemas/package-fact.schema';
+import { SchemaAlert, SchemaAlertSchema } from './schemas/schema-alert.schema';
 import { ProjectSenders, ProjectSendersSchema } from './schemas/project-senders.schema';
 import { ProjectSender, ProjectSenderSchema } from './schemas/project-sender.schema';
 import { ProjectTxCounts, ProjectTxCountsSchema } from './schemas/project-tx-counts.schema';
@@ -18,6 +20,8 @@ import { AlertsModule } from '../alerts/alerts.module';
   imports: [
     MongooseModule.forFeature([
       { name: OnchainSnapshot.name, schema: OnchainSnapshotSchema },
+      { name: PackageFactDoc.name, schema: PackageFactDocSchema },
+      { name: SchemaAlert.name, schema: SchemaAlertSchema },
       { name: ProjectSenders.name, schema: ProjectSendersSchema },
       { name: ProjectSender.name, schema: ProjectSenderSchema },
       { name: ProjectTxCounts.name, schema: ProjectTxCountsSchema },
