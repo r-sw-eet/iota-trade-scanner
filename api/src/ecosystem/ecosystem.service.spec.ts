@@ -1804,6 +1804,15 @@ describe('EcosystemService', () => {
       expect(service.isCapturing()).toBe(false);
     });
 
+    it('skip-log falls back to "unknown"/"?" when acquireCaptureLock returns no holder / no lockedUntil', async () => {
+      // Covers the `?? 'unknown'` and `?? '?'` branches in the log format.
+      jest.spyOn(service as any, 'acquireCaptureLock').mockResolvedValue({ acquired: false });
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      const logSpy = jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
+      await service.capture();
+      expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/lock held by unknown until \?;/));
+    });
+
     it('releases the mainnet capture lock in finally after a successful capture', async () => {
       jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
       const releaseSpy = jest.spyOn(service as any, 'releaseCaptureLock');
@@ -7108,6 +7117,16 @@ describe('EcosystemService', () => {
       const runNewestSpy = jest.spyOn(service as any, 'runNewestTick');
       const result = await service.captureTestnetTick();
       expect(result).toEqual({ skipped: true, reason: expect.stringContaining('cross-process lock held by another-host') });
+      expect(runNewestSpy).not.toHaveBeenCalled();
+    });
+
+    it('captureTestnetTick skip-log falls back to "unknown"/"?" when acquireCaptureLock returns no holder / no lockedUntil', async () => {
+      (service as any).acquireCaptureLock.mockResolvedValue({ acquired: false });
+      const logSpy = jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
+      const runNewestSpy = jest.spyOn(service as any, 'runNewestTick');
+      const result = await service.captureTestnetTick();
+      expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/lock held by unknown until \?;/));
+      expect(result).toEqual({ skipped: true, reason: expect.stringContaining('cross-process lock held by unknown') });
       expect(runNewestSpy).not.toHaveBeenCalled();
     });
 
