@@ -258,6 +258,15 @@ describe('EcosystemService', () => {
       countDocuments: jest.fn(),
       findOne: jest.fn(),
       create: jest.fn().mockResolvedValue({}),
+      // Resumable-mainnet plumbing: `capture()` now does a
+      // `findOneAndUpdate` (promote partial → complete) before falling
+      // back to `create`; `captureRaw` does a `find().sort().lean().exec()`
+      // to detect an abandoned partial. Defaults return "no partial".
+      findOneAndUpdate: jest.fn(() => ({ exec: async () => null })),
+      find: jest.fn(() => ({ sort: () => ({ lean: () => ({ exec: async () => [] }) }) })),
+      deleteOne: jest.fn(() => ({ exec: async () => ({}) })),
+      deleteMany: jest.fn(() => ({ exec: async () => ({}) })),
+      updateOne: jest.fn(() => ({ exec: async () => ({}) })),
     };
     senderModel = {
       findOne: jest.fn(),
@@ -2000,6 +2009,250 @@ describe('EcosystemService', () => {
       jest.spyOn(service as any, 'classifyFromRaw').mockRejectedValue(new Error('boom'));
       await expect(service.capture()).resolves.toBeUndefined();
       expect(ecoModel.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ---------- resumable mainnet captures (checkpoint + resume) ----------
+
+  describe('resumable mainnet captures', () => {
+    // Minimal probeOnePackage stub — every per-package probe is mocked so
+    // the tests measure paginator + checkpoint state-machine behaviour,
+    // not per-package fanout.
+    const stubProbes = () => {
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      jest
+        .spyOn(service as any, 'probeOnePackage')
+        .mockImplementation(async (pkg: any, _d: any, now: Date) => ({
+          address: pkg.address,
+          deployer: null,
+          storageRebateNanos: 0,
+          modules: [],
+          moduleMetrics: [],
+          objectHolderCount: 0,
+          objectCount: 0,
+          transactions: 0,
+          transactionsCapped: false,
+          objectTypeCounts: [],
+          fingerprint: null,
+          publishedAt: null,
+          lastProbedAt: now,
+        }));
+      fetchMock.mockResolvedValue({
+        json: async () => ({ data: { checkpoint: { networkTotalTransactions: '1000' } } }),
+      });
+    };
+
+    const pkgInfo = (address: string) => ({
+      address,
+      storageRebate: '0',
+      modules: { nodes: [] },
+      previousTransactionBlock: null,
+    });
+
+    beforeEach(() => {
+      stubProbes();
+    });
+
+    it('resumes from an existing partial doc — honours its cursor and carries its packages forward', async () => {
+      const carriedPackages = [
+        { address: '0xold1', modules: [], moduleMetrics: [], storageRebateNanos: 100, fingerprint: null } as any,
+        { address: '0xold2', modules: [], moduleMetrics: [], storageRebateNanos: 200, fingerprint: null } as any,
+      ];
+      ecoModel.find = jest.fn(() => ({
+        sort: () => ({
+          lean: () => ({
+            exec: async () => [
+              { _id: 'partial-doc', captureProgressCursor: 'resume-cursor', packages: carriedPackages, createdAt: new Date() },
+            ],
+          }),
+        }),
+      }));
+      const pageSpy = jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [pkgInfo('0xnew1')],
+        hasNextPage: false,
+        endCursor: null,
+      });
+      const raw = await (service as any).captureRaw();
+      // Paginator was invoked with the resume cursor.
+      expect(pageSpy).toHaveBeenCalledWith('resume-cursor');
+      // Final packages list = 2 carried-forward + 1 freshly probed.
+      expect(raw.packages.map((p: any) => p.address)).toEqual(['0xold1', '0xold2', '0xnew1']);
+    });
+
+    it('fires onCheckpoint every N packages during a scan (upserting the partial doc)', async () => {
+      // 3 pages × 2 packages = 6 probed. With checkpointEveryN=50 the default
+      // fires zero times. Shrink the constant via a spy-backed override —
+      // easiest by mocking `probePaginator` itself and verifying its opts.
+      // Instead, set up a real run and spy on `ecoModel.updateOne`.
+      // Use MAINNET_CHECKPOINT_EVERY_N constant by issuing exactly that many
+      // packages across 2 pages so exactly one checkpoint fires at the
+      // page boundary.
+      const every = (service as any).constructor.MAINNET_CHECKPOINT_EVERY_N ?? 50;
+      const halfNodes = Array.from({ length: every }, (_, i) => pkgInfo(`0xckp${i}`));
+      jest
+        .spyOn(service as any, 'fetchPackagePage')
+        .mockResolvedValueOnce({ nodes: halfNodes, hasNextPage: true, endCursor: 'cursor-after-page-1' })
+        .mockResolvedValueOnce({ nodes: [pkgInfo('0xtail')], hasNextPage: false, endCursor: null });
+      const updateSpy = jest.spyOn(ecoModel, 'updateOne');
+
+      await (service as any).captureRaw();
+      // One checkpoint after page 1 (probed.length crosses `every`), and one
+      // more at end-of-walk (end-of-page wrap). Both should upsert the
+      // singleton partial with the network+stage filter.
+      const partialFilterCalls = updateSpy.mock.calls.filter(
+        (args: any[]) => args[0]?.network === 'mainnet' && args[0]?.captureStage === 'partial',
+      );
+      expect(partialFilterCalls.length).toBeGreaterThanOrEqual(1);
+      // First checkpoint writes the page-1 endCursor so resume skips the
+      // already-probed page.
+      const firstCall = partialFilterCalls[0][1] as any;
+      expect(firstCall.$set.captureProgressCursor).toBe('cursor-after-page-1');
+      expect(firstCall.$push.packages.$each).toHaveLength(every);
+    });
+
+    it('end-of-capture promotes the partial doc to complete and clears the cursor', async () => {
+      // No partial at start → captureRaw writes an inline `create` on
+      // completion (fewer than N probed, falls through to create path).
+      // Force the promote path by seeding a partial doc BEFORE captureRaw
+      // runs, then calling the public `capture()` flow.
+      ecoModel.find = jest.fn(() => ({
+        sort: () => ({
+          lean: () => ({
+            exec: async () => [
+              { _id: 'promote-me', captureProgressCursor: 'some-cursor', packages: [], createdAt: new Date() },
+            ],
+          }),
+        }),
+      }));
+      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [pkgInfo('0xfinal')],
+        hasNextPage: false,
+        endCursor: null,
+      });
+      const findAndUpdateSpy = jest.fn(() => ({ exec: async () => ({ _id: 'promote-me', packages: [], network: 'mainnet' }) }));
+      ecoModel.findOneAndUpdate = findAndUpdateSpy as any;
+      jest.spyOn(service as any, 'classifyFromRaw').mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
+
+      await service.capture();
+
+      // Promote call: filter pins to the partial singleton, $set flips
+      // captureStage + clears cursor + lands final fields.
+      expect(findAndUpdateSpy).toHaveBeenCalledWith(
+        { network: 'mainnet', captureStage: 'partial' },
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            captureStage: 'complete',
+            captureProgressCursor: null,
+            captureDurationMs: expect.any(Number),
+          }),
+        }),
+        { new: true },
+      );
+      // No fallback `create` should fire when the promote succeeds.
+      expect(ecoModel.create).not.toHaveBeenCalled();
+    });
+
+    it('no partial doc exists → starts fresh; creates a complete doc directly at end (fewer than N probed)', async () => {
+      // ecoModel.find default returns [] → no partial.
+      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [pkgInfo('0xone'), pkgInfo('0xtwo')],
+        hasNextPage: false,
+        endCursor: null,
+      });
+      // findOneAndUpdate default returns null → no partial to promote.
+      jest.spyOn(service as any, 'classifyFromRaw').mockResolvedValue({ l1: [], l2: [], totalProjects: 0 });
+
+      await service.capture();
+
+      // No partial write happened (checkpoint never fires below N packages).
+      const updateCalls = (ecoModel.updateOne as jest.Mock).mock.calls.filter(
+        (args: any[]) => args[0]?.network === 'mainnet' && args[0]?.captureStage === 'partial',
+      );
+      expect(updateCalls).toHaveLength(0);
+      // Fall-through to `create` with the final shape.
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ network: 'mainnet', captureDurationMs: expect.any(Number) }),
+      );
+    });
+
+    it('partial doc with null captureProgressCursor is treated as broken, deleted, and the run starts fresh', async () => {
+      const brokenId = 'broken-partial';
+      ecoModel.find = jest.fn(() => ({
+        sort: () => ({
+          lean: () => ({
+            exec: async () => [{ _id: brokenId, captureProgressCursor: null, packages: [], createdAt: new Date() }],
+          }),
+        }),
+      }));
+      const deleteOneSpy = jest.spyOn(ecoModel, 'deleteOne');
+      const pageSpy = jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [pkgInfo('0xfresh')],
+        hasNextPage: false,
+        endCursor: null,
+      });
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+
+      const raw = await (service as any).captureRaw();
+
+      expect(deleteOneSpy).toHaveBeenCalledWith({ _id: brokenId });
+      // Fresh start — paginator called with null cursor.
+      expect(pageSpy).toHaveBeenCalledWith(null);
+      expect(raw.packages.map((p: any) => p.address)).toEqual(['0xfresh']);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('broken-from-promote'));
+    });
+
+    it('multiple partial docs (defence) → newest kept, older deleted with a warn', async () => {
+      const newest = { _id: 'newest', captureProgressCursor: 'resume-cur', packages: [], createdAt: new Date('2026-04-23') };
+      const older1 = { _id: 'older-1', captureProgressCursor: 'x', packages: [], createdAt: new Date('2026-04-22') };
+      const older2 = { _id: 'older-2', captureProgressCursor: 'y', packages: [], createdAt: new Date('2026-04-21') };
+      ecoModel.find = jest.fn(() => ({
+        sort: () => ({
+          lean: () => ({
+            exec: async () => [newest, older1, older2],
+          }),
+        }),
+      }));
+      const deleteManySpy = jest.spyOn(ecoModel, 'deleteMany');
+      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [],
+        hasNextPage: false,
+        endCursor: null,
+      });
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+
+      await (service as any).captureRaw();
+
+      expect(deleteManySpy).toHaveBeenCalledWith({ _id: { $in: ['older-1', 'older-2'] } });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('found 3 partial'));
+    });
+
+    it('growth endpoint + getLatestRaw stay on `complete`-only during a mid-capture window (partial invisible to readers)', async () => {
+      // Seed: a `complete` doc and a `partial` doc exist concurrently.
+      // `networkFilter()` routes both `getLatestRaw` and
+      // `findSnapshotsBetween` to exclude the partial via the captureStage
+      // `$or` clause. We verify the filter shape carries the `complete`
+      // branch; the Mongo query evaluator would do the rest in production.
+      const captured: any[] = [];
+      ecoModel.findOne.mockImplementation((f: any) => {
+        captured.push({ op: 'findOne', filter: f });
+        return { sort: () => ({ lean: () => ({ exec: async () => null }) }) };
+      });
+      ecoModel.find = jest.fn((f: any) => {
+        captured.push({ op: 'find', filter: f });
+        return { sort: () => ({ lean: () => ({ exec: async () => [] }) }) };
+      });
+
+      await service.getLatestRaw();
+      await service.findSnapshotsBetween(new Date('2026-04-01'), new Date('2026-04-20'));
+
+      for (const { filter } of captured) {
+        const and = filter.$and as Array<Record<string, unknown>>;
+        expect(and).toEqual(
+          expect.arrayContaining([
+            { $or: [{ captureStage: 'complete' }, { captureStage: { $exists: false } }] },
+          ]),
+        );
+      }
     });
   });
 

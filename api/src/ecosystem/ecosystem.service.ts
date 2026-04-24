@@ -1083,7 +1083,14 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       const captureWork = (async () => {
         const raw = await this.captureRaw();
         const durationMs = Date.now() - startedAt;
-        const created = await this.ecoModel.create({ ...raw, network: this.network, captureDurationMs: durationMs });
+        // Promote-or-create: if `captureRaw` established a partial doc via
+        // its checkpoint callbacks, flip it to `complete` with the final
+        // fields in one atomic update. Otherwise (capture finished inside
+        // a single checkpoint window — fewer than N packages on-chain, or
+        // a resume that completed on the first page) fall back to the
+        // historical `create`. In both branches the final doc is tagged
+        // `captureStage: 'complete'` so readers pick it up immediately.
+        const created = await this.finalizeMainnetSnapshot(raw, durationMs);
         // Precompute + persist the classified view so the first read after
         // this capture is O(1). Failures here are non-fatal — readers fall
         // back to classify-on-demand via `classifyOrLoad`. Keeps the
@@ -2906,6 +2913,14 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    * cheap — it only decides whether we capture these at all, not how we
    * label them downstream.
    */
+  /**
+   * Default checkpoint cadence for mainnet resumable captures. 50 packages
+   * × ~3 sec/package ≈ ~2.5 min worst-case loss window if the container is
+   * killed mid-walk. Smaller cadence → more Mongo writes, less loss; we
+   * picked the per-page granularity as the sweet spot.
+   */
+  private static readonly MAINNET_CHECKPOINT_EVERY_N = 50;
+
   private async captureRaw(): Promise<{
     packages: PackageFact[];
     totalStorageRebateNanos: number;
@@ -2930,15 +2945,44 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       }
     }
 
-    // Delegate the paginate + per-package probe loop to `probePaginator`.
-    // Mainnet mode: no deadline (scan always drains), no freshness watermark,
-    // framework filter on, no checkpoints (commit-2 lands them).
-    const { probed: packages, failedPackages } = await this.probePaginator({
-      startCursor: null,
+    // Resume detection — find an abandoned partial from a prior crash.
+    // Multiple partial docs shouldn't happen (capture is locked), but defend
+    // anyway: keep the newest, delete the rest.
+    const captureStart = new Date();
+    const { resumeCursor, carriedForward } = await this.detectMainnetResume();
+
+    // Checkpoint callback — upserts the singleton partial doc. First hit
+    // creates it (with createdAt pinned to captureStart so duration-since-
+    // start computations still match); subsequent hits $push the tail.
+    const onCheckpoint = async (batch: PackageFact[], cursorAt: string | null): Promise<void> => {
+      await this.ecoModel.updateOne(
+        { network: 'mainnet', captureStage: 'partial' },
+        {
+          $setOnInsert: { network: 'mainnet', captureStage: 'partial', createdAt: captureStart },
+          $set: { captureProgressCursor: cursorAt, updatedAt: new Date() },
+          $push: { packages: { $each: batch } },
+        },
+        { upsert: true },
+      ).exec();
+    };
+
+    const {
+      probed: freshlyProbed,
+      failedPackages,
+    } = await this.probePaginator({
+      startCursor: resumeCursor,
       displayByPackage,
       now: new Date(),
       claimedAddresses,
+      onCheckpoint,
+      checkpointEveryN: EcosystemService.MAINNET_CHECKPOINT_EVERY_N,
     });
+
+    // Final package list = previously-persisted carry-forward + this run's
+    // freshly-probed. No dedup key here: addresses walked in the new run
+    // only include those strictly after the resume cursor, so there's no
+    // overlap with the carried-forward set.
+    const packages: PackageFact[] = [...carriedForward, ...freshlyProbed];
 
     // Sum storage rebate only from successfully-probed packages. Partial
     // inclusion of a failed package would make the total inconsistent
@@ -2957,7 +3001,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     const secondsLive = daysLive * 86400;
 
     this.logger.log(
-      `captureRaw: ${packages.length} packages, ` +
+      `captureRaw: ${packages.length} packages (${carriedForward.length} carried forward from partial, ${freshlyProbed.length} freshly probed), ` +
         `${packages.reduce((s, p) => s + p.moduleMetrics.reduce((ss, m) => ss + m.events, 0), 0)} events, ` +
         `${packages.reduce((s, p) => s + (p.transactions ?? 0), 0)} txs, ` +
         `${packages.filter((p) => p.fingerprint).length} with identity fingerprint`,
@@ -2977,6 +3021,104 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         perSecond: Math.round((networkTxTotal / secondsLive) * 100) / 100,
       },
     };
+  }
+
+  /**
+   * End-of-capture write: promote the in-flight partial doc (if any) to
+   * `complete` with all terminal fields set, or fall back to a fresh
+   * `create` when no partial was ever established (capture finished inside
+   * one checkpoint window). Returns the persisted document so the caller
+   * can hand it to `classifyFromRaw`.
+   */
+  private async finalizeMainnetSnapshot(
+    raw: {
+      packages: PackageFact[];
+      totalStorageRebateNanos: number;
+      networkTxTotal: number;
+      txRates: Record<string, number>;
+    },
+    durationMs: number,
+  ): Promise<OnchainSnapshot & { _id: unknown }> {
+    const finalFields = {
+      captureStage: 'complete' as const,
+      captureProgressCursor: null,
+      packages: raw.packages,
+      totalStorageRebateNanos: raw.totalStorageRebateNanos,
+      networkTxTotal: raw.networkTxTotal,
+      txRates: raw.txRates,
+      captureDurationMs: durationMs,
+    };
+    // `findOneAndUpdate` so we get the promoted doc back in one round-trip.
+    // Filter: the singleton partial doc for mainnet. If one exists, this
+    // flips it; if none, `upsert: false` returns null and we fall through.
+    const promoted = await this.ecoModel
+      .findOneAndUpdate(
+        { network: 'mainnet', captureStage: 'partial' },
+        { $set: finalFields },
+        { new: true },
+      )
+      .exec();
+    if (promoted) return promoted as OnchainSnapshot & { _id: unknown };
+    // No partial ever got created — capture finished inside the first
+    // checkpoint window (fewer than `MAINNET_CHECKPOINT_EVERY_N` packages,
+    // or a freshly-wiped DB). Insert a terminal doc directly.
+    return this.ecoModel.create({ ...raw, network: this.network, captureDurationMs: durationMs });
+  }
+
+  /**
+   * Resume-point discovery for a mainnet capture. Looks for an existing
+   * `captureStage: 'partial'` doc and decides whether to pick up where the
+   * previous (crashed) run left off, or clear the slate and start fresh.
+   *
+   *   - No partial doc → fresh scan.
+   *   - Single partial with non-null cursor → resume: seed the paginator
+   *     from that cursor and carry its `packages[]` forward into the final
+   *     snapshot.
+   *   - Single partial with null cursor → "broken state" from a crash
+   *     during promote (cursor had already been cleared when the partial
+   *     was about to flip to complete). Can't resume usefully; delete and
+   *     start fresh.
+   *   - Multiple partials (shouldn't happen under the capture lock) → take
+   *     the newest, log a warn, delete the older ones.
+   */
+  private async detectMainnetResume(): Promise<{
+    resumeCursor: string | null;
+    carriedForward: PackageFact[];
+  }> {
+    const partials = await this.ecoModel
+      .find({ network: 'mainnet', captureStage: 'partial' })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    if (partials.length === 0) {
+      return { resumeCursor: null, carriedForward: [] };
+    }
+
+    const [newest, ...older] = partials;
+    if (older.length > 0) {
+      this.logger.warn(
+        `captureRaw: found ${partials.length} partial mainnet snapshots (expected at most 1 under the capture lock); keeping newest ${String(newest._id)} and deleting ${older.length} older`,
+      );
+      await this.ecoModel
+        .deleteMany({ _id: { $in: older.map((o) => o._id) } })
+        .exec();
+    }
+
+    const cursor = (newest as { captureProgressCursor?: string | null }).captureProgressCursor ?? null;
+    if (cursor === null) {
+      this.logger.warn(
+        `captureRaw: found partial mainnet snapshot ${String(newest._id)} with null captureProgressCursor — treating as broken-from-promote and deleting; starting fresh`,
+      );
+      await this.ecoModel.deleteOne({ _id: newest._id }).exec();
+      return { resumeCursor: null, carriedForward: [] };
+    }
+
+    const carried: PackageFact[] = (newest as { packages?: PackageFact[] }).packages ?? [];
+    this.logger.log(
+      `captureRaw: resuming mainnet capture from partial ${String(newest._id)} — ${carried.length} packages carried forward, cursor=${cursor}`,
+    );
+    return { resumeCursor: cursor, carriedForward: carried };
   }
 
   /**
@@ -4045,9 +4187,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    *     exhausted), returns with `error` set and `nextCursor` at the
    *     pre-fetch position so the next invocation resumes correctly.
    *
-   * `onCheckpoint` + `checkpointEveryN` are wired in the resumable-mainnet
-   * commit; the hook is declared on the options type here so the single-
-   * helper boundary is stable.
+   * `onCheckpoint` + `checkpointEveryN` wire in the resumable-mainnet
+   * flow: after every `checkpointEveryN` probed packages (counted since
+   * the last checkpoint), the helper calls `onCheckpoint(batch, cursor)`
+   * with the newly-probed tail and the paginator cursor that's safe to
+   * resume from (`page.endCursor` of the last fully-iterated page).
+   * Checkpoints fire only at page boundaries so the written cursor
+   * always matches the position AFTER every package in `batch` — a
+   * crash-resume from that cursor re-fetches the next page, not the
+   * already-checkpointed one.
    *
    * The return shape is a superset of what the three call sites need; each
    * picks off the fields it cares about.
@@ -4060,6 +4208,8 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     previousByAddress?: Map<string, PackageFact>;
     freshnessWindowMs?: number;
     claimedAddresses?: Set<string>;
+    onCheckpoint?: (batch: PackageFact[], cursor: string | null) => Promise<void>;
+    checkpointEveryN?: number;
   }): Promise<{
     probed: PackageFact[];
     nextCursor: string | null;
@@ -4077,6 +4227,8 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       previousByAddress,
       freshnessWindowMs,
       claimedAddresses,
+      onCheckpoint,
+      checkpointEveryN,
     } = opts;
     const probed: PackageFact[] = [];
     const failedPackages: { address: string; error: string }[] = [];
@@ -4085,6 +4237,17 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     let cursor = startCursor;
     let wrapped = false;
     let hitFreshWindow = false;
+    // Track how many probed packages have already been flushed via
+    // `onCheckpoint` so each flush ships only the un-checkpointed tail.
+    let lastCheckpointed = 0;
+
+    const maybeCheckpoint = async (cursorAtBoundary: string | null): Promise<void> => {
+      if (!onCheckpoint || !checkpointEveryN) return;
+      if (probed.length - lastCheckpointed < checkpointEveryN) return;
+      const batch = probed.slice(lastCheckpointed);
+      lastCheckpointed = probed.length;
+      await onCheckpoint(batch, cursorAtBoundary);
+    };
 
     try {
       while (true) {
@@ -4122,18 +4285,23 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
             return { probed, nextCursor: page.endCursor, wrapped: false, deadlineHit: true, hitFreshWindow, error: null, failedPackages };
           }
         }
+        // Page fully processed — advance cursor, then optionally checkpoint
+        // with the post-advance cursor. Writing the post-advance cursor
+        // means a crash-resume fetches the NEXT page, not this one.
         if (!page.hasNextPage) {
           wrapped = true;
           cursor = null;
+          await maybeCheckpoint(cursor);
           break;
         }
         cursor = page.endCursor;
         if (!cursor) {
-          // Defensive: hasNextPage:true with null endCursor — treat as wrap
-          // rather than spinning on the same stale cursor.
+          // Defensive: hasNextPage:true with null endCursor — treat as wrap.
           wrapped = true;
+          await maybeCheckpoint(cursor);
           break;
         }
+        await maybeCheckpoint(cursor);
       }
       return { probed, nextCursor: cursor, wrapped, deadlineHit: false, hitFreshWindow, error: null, failedPackages };
     } catch (e) {
