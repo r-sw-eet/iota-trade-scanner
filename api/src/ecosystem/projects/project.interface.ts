@@ -149,6 +149,21 @@ export interface ProjectDefinition {
     packageAddresses?: string[];
     /** Deployer addresses (first-publisher of the package). Matches every package published by any listed deployer. Cheaper than enumerating `packageAddresses` when a team's whole footprint is on-scope. Lowercased on compare. */
     deployerAddresses?: string[];
+    /**
+     * Required Move-struct names — every entry must appear as the trailing
+     * `::<StructName>` segment of at least one `objectTypeCounts.type` on the
+     * package. Lets a rule key off the package's *structural shape* in addition
+     * to its module list. Originally added to detect TWIN's "scaffold" of
+     * `MigrationState` + `UpgradeCapRegistry` companion objects, which
+     * mechanically distinguishes their tooling deployments from the
+     * IF-Testing fixtures that share the same deployer + `nft` module name.
+     * Generalises to any team that publishes a recognisable shape: e.g.
+     * "this deployer + an `AdminCap` + a `<Foo>Pool`" without having to
+     * pin the specific package address. Suffix-match on `<StructName>` (the
+     * last `::` segment), case-sensitive — Move struct names are PascalCase
+     * by convention so case-insensitivity would just hide typos.
+     */
+    objectTypes?: string[];
     /** Fingerprint a sample object from the package. All specified constraints must match (AND). Enables discovery of new packages deployed by this project. */
     fingerprint?: {
       /** Struct path within the package, e.g. 'nft::NFT'. Sampled type is `<pkg>::<type>`. */

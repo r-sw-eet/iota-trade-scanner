@@ -44,7 +44,8 @@ function hasSyncMatch(def: ProjectDefinition): boolean {
     (m.exact?.length ?? 0) > 0 ||
     (m.all?.length ?? 0) > 0 ||
     (m.any?.length ?? 0) > 0 ||
-    (m.minModules ?? 0) > 0
+    (m.minModules ?? 0) > 0 ||
+    (m.objectTypes?.length ?? 0) > 0
   );
 }
 
@@ -2680,6 +2681,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     address: string,
     deployer: string | null,
     network: 'mainnet' | 'testnet' | 'devnet',
+    structNames: Set<string> | null = null,
   ): ProjectDefinition | null {
     const lowerAddr = address.toLowerCase();
     const lowerDeployer = deployer?.toLowerCase() ?? null;
@@ -2707,6 +2709,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       if (match.all?.length && !match.all.every((m) => mods.has(m))) continue;
       if (match.any?.length && !match.any.some((m) => mods.has(m))) continue;
       if (match.minModules && mods.size < match.minModules) continue;
+      if (match.objectTypes?.length) {
+        // structNames carries the trailing `<StructName>` of every entry on the
+        // package's `objectTypeCounts`. Caller passes `null` only when the
+        // package's type list is unknown (legacy paths) — treat as a non-match
+        // for any rule that requires structural shape, rather than silently
+        // ignoring the criterion.
+        if (!structNames) continue;
+        if (!match.objectTypes.every((t) => structNames.has(t))) continue;
+      }
       return def;
     }
     return null;
@@ -3567,7 +3578,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     for (const pkg of rawPackages) {
       const mods = new Set(pkg.modules);
       const pkgDeployer = pkg.deployer;
-      let def = this.matchProject(mods, pkg.address, pkgDeployer, scanNetwork);
+      // Trailing `<StructName>` segment of every entry on the package's
+      // type list. Test fixtures sometimes omit `objectTypeCounts`, so the
+      // `?? []` guard is real (production schema defaults to []; in-memory
+      // mocks bypass the schema). `.split('::').pop()!` is non-null by
+      // construction — String.split always returns a non-empty array.
+      const structNames = new Set(
+        (pkg.objectTypeCounts ?? []).map((t) => t.type.split('::').pop()!),
+      );
+      let def = this.matchProject(mods, pkg.address, pkgDeployer, scanNetwork, structNames);
       // When the synchronous match is an aggregate bucket, consult fingerprint
       // first — a more-specific project may claim this package by `issuer`/`tag`.
       if (def?.splitByDeployer) {

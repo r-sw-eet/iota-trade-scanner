@@ -13,3 +13,4 @@ export { phishingSpray49c4 } from './phishing-spray-49c4';
 export { iotaEstoicos } from './iota-estoicos';
 export { ctrlvAgents } from './ctrlv-agents';
 export { numberOneFreeNft } from './number-one';
+export { twinNft } from './twin-nft';

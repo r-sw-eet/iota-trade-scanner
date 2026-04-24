@@ -5,7 +5,7 @@ import { tlip, twinImmutableProof, notarization, iotaAssetFramework, iotaAccredi
 import { identityFull, identityWot, objectid, credentials, iotaNames, iotaLink, carNft, turingcerts } from './identity/_index';
 import { echoProtocolBridge, layerZero, layerZeroWorkers, layerZeroPriceFeed, layerZeroOft, layerZeroCounterExample, wormhole } from './bridges/_index';
 import { pythOracle, switchboardOracle, kamuiVrf } from './oracles/_index';
-import { nftLaunchpad, tradeport, tradeportEarlyMover, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents, numberOneFreeNft } from './nft/_index';
+import { nftLaunchpad, tradeport, tradeportEarlyMover, nftCollections, healthyGang, ghostLights, tanapaz, tomaRajadao, tranquilidadeDrops, studioCb69Aggregate, gamiflyAylab, gamiflyIsla, gamiflyOtterfly, gamiflyChamillion, iotaPunks, ogApe, lilApe, lumis, phishingSpray49c4, iotaEstoicos, ctrlvAgents, numberOneFreeNft, twinNft } from './nft/_index';
 import { chess, ticTacToe, game2048, iotaFlip, lostCrusaderArcaneDust, lostCrusaderReviveSpells } from './games/_index';
 import {
   clawnera, vault, tokenSale, izipublish, giftDrop, liquidlink, boltEarth,
@@ -45,7 +45,12 @@ export const ALL_PROJECTS: ProjectDefinition[] = [
   // TLIP and TWIN keep priority above IF Asset Framework / Accreditation to
   // preserve the shared-deployer split at `0x164625aa…` (TWIN matches first
   // on `verifiable_storage`; IF-proper products match on different modules).
-  tlip, twinImmutableProof,
+  // `twinNft` sits in the same cluster: same deployer + the `nft` module +
+  // the `MigrationState` + `UpgradeCapRegistry` scaffold — must precede the
+  // generic NFT-collections / IF Testing routing so dormant TWIN NFT packages
+  // don't get absorbed by the iota-foundation team's routing-only target on
+  // the shared deployer.
+  tlip, twinImmutableProof, twinNft,
   notarization, iotaAssetFramework, iotaAccreditationRegistry,
   traceability, salus, truvid,
   // Seedlot — Lake Toba Collective. First RWA / Agriculture project. Single

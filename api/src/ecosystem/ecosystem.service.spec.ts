@@ -104,6 +104,19 @@ jest.mock('./projects', () => {
       match: { deployerAddresses: ['0xDEPL'] },
     },
     {
+      name: 'ScaffoldShape',
+      layer: 'L1',
+      category: 'Misc',
+      description: 'Requires deployer + nft module + scaffold types — TWIN-style structural shape match (regression guard for the objectTypes matcher added 2026-04-25). Sits ahead of `Aggregate` in match order so a structurally-distinctive scaffolded package isn\'t absorbed by the broader `any: [nft]` aggregate bucket.',
+      urls: [],
+      teamId: null,
+      match: {
+        deployerAddresses: ['0xSCAFFOLD'],
+        all: ['nft'],
+        objectTypes: ['MigrationState', 'UpgradeCapRegistry'],
+      },
+    },
+    {
       name: 'DeployerAndModule',
       layer: 'L1',
       category: 'Misc',
@@ -459,7 +472,8 @@ describe('EcosystemService', () => {
       addr = '0x0',
       deployer: string | null = null,
       network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
-    ) => (service as any).matchProject(new Set(mods), addr, deployer, network);
+      structNames: Set<string> | null = null,
+    ) => (service as any).matchProject(new Set(mods), addr, deployer, network, structNames);
 
     it('matches by package address (case-insensitive)', () => {
       expect(match([], '0xabcdef').name).toBe('AddrOnly');
@@ -538,6 +552,66 @@ describe('EcosystemService', () => {
     it('matches Combo via packageAddresses despite having a fingerprint', () => {
       expect(match([], '0x999').name).toBe('Combo');
       expect(match([], '0x0999')).toBeNull();
+    });
+
+    it('matches `objectTypes` only when every required struct name is present', () => {
+      // ScaffoldShape requires deployer 0xSCAFFOLD + nft + both scaffold types.
+      const ok = match(
+        ['nft'],
+        '0x0',
+        '0xSCAFFOLD',
+        'mainnet',
+        new Set(['NFT', 'MigrationState', 'UpgradeCapRegistry']),
+      );
+      expect(ok?.name).toBe('ScaffoldShape');
+    });
+
+    it('rejects `objectTypes` when one required struct name is missing', () => {
+      // Missing UpgradeCapRegistry — bare-NFT shape (the IF-Testing pattern).
+      // Package falls through to broader rules; ScaffoldShape must not claim it.
+      const partial = match(
+        ['nft'],
+        '0x0',
+        '0xSCAFFOLD',
+        'mainnet',
+        new Set(['NFT', 'MigrationState']),
+      );
+      expect(partial?.name).not.toBe('ScaffoldShape');
+    });
+
+    it('rejects `objectTypes` rule when struct names are unknown (null)', () => {
+      // Legacy fact docs without `objectTypeCounts` — caller passes null.
+      // Don't silently bypass the criterion: a rule that demands structural
+      // shape must not match a package whose shape is unknown. The package
+      // can still flow through to broader rules (here: `Aggregate`); we just
+      // assert ScaffoldShape did NOT claim it.
+      const unknown = match(['nft'], '0x0', '0xSCAFFOLD', 'mainnet', null);
+      expect(unknown?.name).not.toBe('ScaffoldShape');
+    });
+
+    it('falls through `objectTypes` rule when deployer or modules disagree', () => {
+      // Right structural shape, wrong deployer — ScaffoldShape's
+      // composition AND fails. The package still matches the broader
+      // `Aggregate` rule (`any: ['nft']`); the assertion is that the
+      // narrower scaffold rule did NOT claim it.
+      const wrongDeployer = match(
+        ['nft'],
+        '0x0',
+        '0xother',
+        'mainnet',
+        new Set(['NFT', 'MigrationState', 'UpgradeCapRegistry']),
+      );
+      expect(wrongDeployer?.name).not.toBe('ScaffoldShape');
+      // Right deployer + scaffold, but no `nft` module — `all` clause fails;
+      // `verifiable_storage` matches no rule in the fixture set.
+      const wrongModules = match(
+        ['verifiable_storage'],
+        '0x0',
+        '0xSCAFFOLD',
+        'mainnet',
+        new Set(['NFT', 'MigrationState', 'UpgradeCapRegistry']),
+      );
+      expect(wrongModules).toBeNull();
     });
   });
 
