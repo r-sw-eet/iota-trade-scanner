@@ -453,11 +453,56 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   private static readonly TESTNET_FRESHNESS_WINDOW_MS = 18 * 60 * 60 * 1000;
 
   /**
-   * Per-tick wall-clock budget. Leaves headroom inside the 2h cron slot
-   * so the next mainnet run (every even UTC hour) starts on a clean
-   * scheduler even if this tick was CPU-tight.
+   * Upper-bound per-tick budget. The effective deadline is computed at
+   * tick-start as `min(now + this, nextMainnetCron - BUFFER)` — whichever
+   * comes sooner. For the natural cron cadence (testnet at odd UTC hours,
+   * mainnet at even) the gap-to-next-mainnet dominates (~55 min
+   * effective). For a manual trigger right after mainnet finishes the
+   * 90-min ceiling dominates. Either way testnet never overlaps the
+   * mainnet capture window — Invariant 5: testnet never breaks mainnet.
    */
   private static readonly TESTNET_TICK_BUDGET_MS = 90 * 60 * 1000;
+
+  /**
+   * Safety buffer before the next mainnet cron fires. The effective
+   * testnet deadline cuts 5 min short of that, so even if this Node
+   * event loop is mid-BSON-serialization when the buffer kicks in, the
+   * mainnet capture can start on a clean scheduler. 5 min is generous
+   * for the testnet partial-save path (finalize + insertMany typically
+   * completes in a few seconds).
+   */
+  private static readonly TESTNET_MAINNET_OVERLAP_BUFFER_MS = 5 * 60 * 1000;
+
+  // Cron-interval of the mainnet capture (every 2h). Kept in sync with
+  // the `@Cron` on `capture()` — 0 SPLAT 2 SPLAT SPLAT SPLAT where SPLAT
+  // is the asterisk character. (Jsdoc can't render the raw expression
+  // since its slash-splat closes the comment.)
+  private static readonly MAINNET_CRON_INTERVAL_MS = 2 * 60 * 60 * 1000;
+
+  /**
+   * Compute the next wall-clock time the mainnet cron fires, at or after
+   * `from`. Mainnet fires every even UTC hour on the hour. If `from` is
+   * exactly on an even UTC hour the result is the NEXT even UTC hour —
+   * the mainnet cron is already firing at that instant. Static helper so
+   * it can be unit-tested directly.
+   */
+  static nextMainnetCronAt(from: Date): Date {
+    const next = new Date(from);
+    next.setUTCMilliseconds(0);
+    next.setUTCSeconds(0);
+    next.setUTCMinutes(0);
+    const currentHour = next.getUTCHours();
+    // Round UP to the next even UTC hour strictly after `from`. If we're
+    // at 14:05 UTC the answer is 16:00 UTC (14:00's mainnet slot already
+    // fired). If we're at 15:00 UTC it's 16:00 (next even). If we're at
+    // exactly 14:00:00.000 UTC the answer is still 16:00 — this helper
+    // is for "when will the next mainnet cron fire from my perspective",
+    // and at the instant of 14:00:00 the cron has just (about to) fire,
+    // so the *next* one is 16:00.
+    const hoursToAdd = currentHour % 2 === 0 ? 2 : 1;
+    next.setUTCHours(currentHour + hoursToAdd);
+    return next;
+  }
 
   /**
    * Which IOTA network this process is scanning/serving. Resolved once at
@@ -4641,7 +4686,20 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     this.capturingByNetwork['testnet'] = true;
     let lockAcquired = false;
     const startedAt = Date.now();
-    const deadlineMs = startedAt + EcosystemService.TESTNET_TICK_BUDGET_MS;
+    // Dynamic deadline — `min(startedAt + 90min ceiling, nextMainnetCron - 5min buffer)`.
+    // Testnet shares the Node event loop with the mainnet capture; concurrent
+    // BSON serialization + heavy GraphQL walks stretch mainnet's 40-min
+    // window and risk the sshd-banner-timeout gotcha. Capping testnet at
+    // "5 min before next mainnet" guarantees no overlap regardless of
+    // tick kind (newest/backfill) or manual-trigger timing — and uses as
+    // much compute as is safe when mainnet is far off (e.g. a manual
+    // trigger right after a mainnet capture finishes has ~75 min, vs. the
+    // natural 19:00 UTC cron tick having ~55 min).
+    const nextMainnet = EcosystemService.nextMainnetCronAt(new Date(startedAt));
+    const mainnetBufferDeadline = nextMainnet.getTime() - EcosystemService.TESTNET_MAINNET_OVERLAP_BUFFER_MS;
+    const ceilingDeadline = startedAt + EcosystemService.TESTNET_TICK_BUDGET_MS;
+    const deadlineMs = Math.min(ceilingDeadline, mainnetBufferDeadline);
+    const effectiveBudgetMin = Math.round((deadlineMs - startedAt) / 60000);
     const now = new Date(startedAt);
 
     // Scope every nested `this.graphql(...)` call to the testnet endpoint via
@@ -4654,6 +4712,23 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     const testnetUrl = GRAPHQL_URL_BY_NETWORK.testnet;
     return this.graphqlUrlContext.run(testnetUrl, async () => {
     try {
+      // Invariant 5 guard: if a mainnet capture is actively running, skip
+      // the testnet tick entirely. They share the Node event loop; running
+      // both concurrently stretches mainnet's 40-min window and risks the
+      // sshd-banner-timeout gotcha noted in global CLAUDE.md. The dynamic
+      // deadline above prevents us from overrunning INTO the next mainnet
+      // cron; this guard prevents us from starting UNDER an active one.
+      const mainnetLock = await this.captureLockModel
+        .findById('mainnet')
+        .lean()
+        .exec();
+      if (mainnetLock?.lockedUntil && mainnetLock.lockedUntil > new Date()) {
+        this.logger.log(
+          `Testnet tick skipping — mainnet capture in flight (lockedUntil ${mainnetLock.lockedUntil.toISOString()})`,
+        );
+        return { skipped: true as const, reason: 'mainnet-active' };
+      }
+
       // Cross-process lock — prevents a manual bootstrap from duplicating a
       // scheduled-cron tick (happened 2026-04-23: both contexts ran newest-
       // tick from tickCounter=0, wasting ~90min of probe work each).
@@ -4668,7 +4743,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
 
       const state = await this.loadTestnetCursor();
       const kind: 'newest' | 'backfill' = state.tickCounter % 3 === 0 ? 'newest' : 'backfill';
-      this.logger.log(`Testnet tick starting: kind=${kind} tickCounter=${state.tickCounter}`);
+      this.logger.log(`Testnet tick starting: kind=${kind} tickCounter=${state.tickCounter} effectiveBudget=${effectiveBudgetMin}min`);
 
       // Load previous testnet snapshot so we can (a) check freshness in
       // newest-tick, (b) copy-forward un-touched packages into the new doc.
