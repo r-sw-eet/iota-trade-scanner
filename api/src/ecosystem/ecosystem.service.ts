@@ -4,6 +4,7 @@ import { Cron } from '@nestjs/schedule';
 import { Model } from 'mongoose';
 import { createHash } from 'crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import * as os from 'node:os';
 import {
   OnchainSnapshot,
   PackageFact,
@@ -19,6 +20,7 @@ import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
 import { ProjectTxDigest } from './schemas/project-tx-digest.schema';
 import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
 import { TestnetCursor } from './schemas/testnet-cursor.schema';
+import { CaptureLock } from './schemas/capture-lock.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ALL_PROJECTS, ProjectDefinition, Category, Subcategory } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
@@ -482,6 +484,7 @@ export class EcosystemService implements OnModuleInit {
     @InjectModel(ProjectTxDigest.name) private txDigestModel: Model<ProjectTxDigest>,
     @InjectModel(ClassifiedSnapshot.name) private classifiedModel: Model<ClassifiedSnapshot>,
     @InjectModel(TestnetCursor.name) private testnetCursorModel: Model<TestnetCursor>,
+    @InjectModel(CaptureLock.name) private captureLockModel: Model<CaptureLock>,
     private alerts: AlertsService,
   ) {
     const env = process.env.IOTA_NETWORK;
@@ -998,13 +1001,30 @@ export class EcosystemService implements OnModuleInit {
     // `capturing: true` and skips. We miss one snapshot interval rather
     // than overlap. No data corruption.
     if (this.capturing) {
-      this.logger.log('Capture already in flight, skipping duplicate trigger');
+      this.logger.log('Capture already in flight (in-process), skipping duplicate trigger');
       return;
     }
+    // Set the in-process flag SYNCHRONOUSLY before awaiting the cross-process
+    // lock acquisition. Otherwise a second `capture()` call in the same tick
+    // wouldn't see `this.capturing` set yet and would race past step 1.
     this.capturing = true;
+    let lockAcquired = false;
     this.logger.log('Capturing ecosystem snapshot...');
     const startedAt = Date.now();
     try {
+      // Cross-process lock — protects against a manual bootstrap script
+      // racing the scheduled cron, or a future HA scanner replica
+      // duplicating work. Awaited inside the `try` so the `finally` path
+      // always releases both the in-process flag and the cross-process lock.
+      const lock = await this.acquireCaptureLock('mainnet', EcosystemService.MAINNET_LOCK_TTL_MS);
+      if (!lock.acquired) {
+        this.logger.log(
+          `Mainnet capture lock held by ${lock.holder ?? 'unknown'} until ${lock.lockedUntil?.toISOString() ?? '?'}; skipping`,
+        );
+        return;
+      }
+      lockAcquired = true;
+
       // Hard timeout at 125 min: the only edge case `try/finally` can't
       // protect against is an awaited promise that literally hangs forever
       // (no resolve, no reject). Promise.race forces the finally to run,
@@ -1083,6 +1103,11 @@ export class EcosystemService implements OnModuleInit {
       this.logger.error(`Ecosystem capture failed after ${durationMin}min`, e);
     } finally {
       this.capturing = false;
+      if (lockAcquired) {
+        await this.releaseCaptureLock('mainnet').catch((e) =>
+          this.logger.warn(`Failed to release mainnet capture lock: ${(e as Error).message}`),
+        );
+      }
     }
   }
 
@@ -1218,6 +1243,77 @@ export class EcosystemService implements OnModuleInit {
    * execution tree carries its own context, no cross-talk.
    */
   private readonly graphqlUrlContext = new AsyncLocalStorage<string>();
+
+  /**
+   * Cross-process distributed lock for capture paths. See
+   * `schemas/capture-lock.schema.ts` for the rationale — per-instance
+   * `this.capturing` / `this.capturingByNetwork` flags can't coordinate
+   * across Node processes, so when a manual bootstrap script races with
+   * the scheduled cron (or a future HA deployment) we get duplicate work.
+   *
+   * `acquireCaptureLock` atomically reserves the lock via Mongo's
+   * `updateOne` with a filter that only matches when no lock is held
+   * or the held lock has expired. Returns true if we got it, false if
+   * someone else is holding a live lock.
+   *
+   * Release via `$set` nulls in a `finally`. TTL is a safety valve —
+   * if we crash before release, the next acquirer picks up after the
+   * TTL passes.
+   */
+  private async acquireCaptureLock(
+    network: string,
+    ttlMs: number,
+  ): Promise<{ acquired: boolean; holder?: string; lockedUntil?: Date }> {
+    const now = new Date();
+    const lockedUntil = new Date(now.getTime() + ttlMs);
+    const hostname = os.hostname();
+
+    // Step 1 — ensure the singleton doc exists. Idempotent: `$setOnInsert`
+    // only writes on insert, leaving an existing doc's lock state alone.
+    await this.captureLockModel.updateOne(
+      { _id: network },
+      { $setOnInsert: { lockedUntil: null, lockedAt: null, holderHostname: null } },
+      { upsert: true },
+    ).exec();
+
+    // Step 2 — atomic acquire. Filter matches only when the lock is
+    // available (null or expired). Separate from the upsert because
+    // `findOneAndUpdate` with upsert can race-duplicate on an existing
+    // `_id`.
+    const ack = await this.captureLockModel.updateOne(
+      {
+        _id: network,
+        $or: [{ lockedUntil: null }, { lockedUntil: { $lt: now } }],
+      },
+      { $set: { lockedUntil, lockedAt: now, holderHostname: hostname } },
+    ).exec();
+
+    if (ack.modifiedCount === 1) {
+      return { acquired: true, lockedUntil };
+    }
+
+    // Lock is held by someone else — fetch the holder for diagnostics.
+    const existing = await this.captureLockModel.findById(network).lean().exec();
+    return {
+      acquired: false,
+      holder: existing?.holderHostname ?? 'unknown',
+      lockedUntil: existing?.lockedUntil ?? undefined,
+    };
+  }
+
+  private async releaseCaptureLock(network: string): Promise<void> {
+    await this.captureLockModel
+      .updateOne(
+        { _id: network },
+        { $set: { lockedUntil: null, lockedAt: null, holderHostname: null } },
+      )
+      .exec();
+  }
+
+  // Lock TTLs — generously above the capture's worst-case duration so a
+  // crashed lock-holder eventually releases.
+  private static readonly MAINNET_LOCK_TTL_MS = 180 * 60 * 1000; // 125m hard timeout + 55m buffer
+  private static readonly TESTNET_LOCK_TTL_MS = 150 * 60 * 1000; // 90m budget + 60m buffer
 
   /**
    * Transient-error retry policy for GraphQL. IOTA testnet's endpoint has a
@@ -2825,7 +2921,7 @@ export class EcosystemService implements OnModuleInit {
     }
 
     const packages: PackageFact[] = [];
-    let totalStorageRebateNanos = 0;
+    const failedPackages: { address: string; error: string }[] = [];
 
     for (const pkg of allPackages) {
       if (
@@ -2835,10 +2931,17 @@ export class EcosystemService implements OnModuleInit {
         continue;
       }
 
+      // Per-package try/catch — mirror of the partial-save pattern used by
+      // testnet's runNewestTick/runBackfillTick. One flaky package's probe
+      // (GraphQL error, unexpected shape, schema change) used to abort the
+      // entire capture, losing all prior probe work. Now we skip the bad
+      // package, log a warn with the address, and keep going. The snapshot
+      // lands with 750 of 753 packages rather than nothing.
+      try {
+
       const deployer = pkg.previousTransactionBlock?.sender?.address?.toLowerCase() ?? null;
       const modules = (pkg.modules?.nodes || []).map((m) => m.name);
       const storageRebateNanos = Number(pkg.storageRebate || 0);
-      totalStorageRebateNanos += storageRebateNanos;
 
       // Publish timestamp — comes straight from the TX effects of the
       // previous-transaction-block. Static per package (upgrades don't
@@ -2944,6 +3047,23 @@ export class EcosystemService implements OnModuleInit {
         fingerprint,
         publishedAt,
       } as PackageFact);
+
+      } catch (e) {
+        const err = e as Error;
+        this.logger.warn(`captureRaw: skipped ${pkg.address} — ${err.message}`);
+        failedPackages.push({ address: pkg.address, error: err.message });
+      }
+    }
+
+    // Sum storage rebate only from successfully-probed packages. Partial
+    // inclusion of a failed package would make the total inconsistent
+    // with the packages[] list.
+    const totalStorageRebateNanos = packages.reduce((s, p) => s + Number(p.storageRebateNanos || 0), 0);
+
+    if (failedPackages.length > 0) {
+      this.logger.warn(
+        `captureRaw: ${failedPackages.length} package(s) failed their probe and were skipped: ${failedPackages.map((f) => f.address).join(', ')}`,
+      );
     }
 
     const checkpointData: any = await this.graphql(`{ checkpoint { networkTotalTransactions } }`);
@@ -4164,10 +4284,14 @@ export class EcosystemService implements OnModuleInit {
     hitFreshWindow: boolean;
   } | { skipped: true; reason: string }> {
     if (this.capturingByNetwork['testnet']) {
-      this.logger.log('Testnet capture already in flight, skipping duplicate trigger');
+      this.logger.log('Testnet capture already in flight (in-process), skipping duplicate trigger');
       return { skipped: true, reason: 'in-flight' };
     }
+    // Set the in-process flag SYNCHRONOUSLY before awaiting the lock so
+    // a second captureTestnetTick() call in the same tick can't race past
+    // the check above.
     this.capturingByNetwork['testnet'] = true;
+    let lockAcquired = false;
     const startedAt = Date.now();
     const deadlineMs = startedAt + EcosystemService.TESTNET_TICK_BUDGET_MS;
     const now = new Date(startedAt);
@@ -4182,6 +4306,18 @@ export class EcosystemService implements OnModuleInit {
     const testnetUrl = GRAPHQL_URL_BY_NETWORK.testnet;
     return this.graphqlUrlContext.run(testnetUrl, async () => {
     try {
+      // Cross-process lock — prevents a manual bootstrap from duplicating a
+      // scheduled-cron tick (happened 2026-04-23: both contexts ran newest-
+      // tick from tickCounter=0, wasting ~90min of probe work each).
+      const lock = await this.acquireCaptureLock('testnet', EcosystemService.TESTNET_LOCK_TTL_MS);
+      if (!lock.acquired) {
+        this.logger.log(
+          `Testnet capture lock held by ${lock.holder ?? 'unknown'} until ${lock.lockedUntil?.toISOString() ?? '?'}; skipping`,
+        );
+        return { skipped: true as const, reason: `cross-process lock held by ${lock.holder ?? 'unknown'}` };
+      }
+      lockAcquired = true;
+
       const state = await this.loadTestnetCursor();
       const kind: 'newest' | 'backfill' = state.tickCounter % 3 === 0 ? 'newest' : 'backfill';
       this.logger.log(`Testnet tick starting: kind=${kind} tickCounter=${state.tickCounter}`);
@@ -4286,6 +4422,11 @@ export class EcosystemService implements OnModuleInit {
       };
     } finally {
       this.capturingByNetwork['testnet'] = false;
+      if (lockAcquired) {
+        await this.releaseCaptureLock('testnet').catch((e) =>
+          this.logger.warn(`Failed to release testnet capture lock: ${(e as Error).message}`),
+        );
+      }
     }
     });
   }

@@ -10,6 +10,7 @@ import { ProjectHolderEntry } from './schemas/project-holder-entry.schema';
 import { ProjectTxDigest } from './schemas/project-tx-digest.schema';
 import { ClassifiedSnapshot } from './schemas/classified-snapshot.schema';
 import { TestnetCursor } from './schemas/testnet-cursor.schema';
+import { CaptureLock } from './schemas/capture-lock.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ProjectDefinition } from './projects';
 
@@ -249,6 +250,7 @@ describe('EcosystemService', () => {
   let holderEntryModel: any;
   let classifiedModel: any;
   let testnetCursorModel: any;
+  let captureLockModel: any;
   let fetchMock: FetchMock;
 
   beforeEach(async () => {
@@ -312,6 +314,13 @@ describe('EcosystemService', () => {
       }),
       updateOne: jest.fn(() => ({ exec: jest.fn().mockResolvedValue({}) })),
     };
+    // CaptureLock — default mock acquires successfully (modifiedCount: 1 on
+    // the atomic acquire). Individual tests override updateOne when they
+    // need to exercise the "lock held by someone else" path.
+    captureLockModel = {
+      updateOne: jest.fn(() => ({ exec: jest.fn().mockResolvedValue({ modifiedCount: 1 }) })),
+      findById: jest.fn(() => ({ lean: () => ({ exec: jest.fn().mockResolvedValue(null) }) })),
+    };
     const alertsMock = { notifyCaptureAlarm: jest.fn().mockResolvedValue(undefined) };
     const module = await Test.createTestingModule({
       providers: [
@@ -325,12 +334,20 @@ describe('EcosystemService', () => {
         { provide: getModelToken(ProjectHolderEntry.name), useValue: holderEntryModel },
         { provide: getModelToken(ClassifiedSnapshot.name), useValue: classifiedModel },
         { provide: getModelToken(TestnetCursor.name), useValue: testnetCursorModel },
+        { provide: getModelToken(CaptureLock.name), useValue: captureLockModel },
         { provide: AlertsService, useValue: alertsMock },
       ],
     }).compile();
     service = module.get(EcosystemService);
     fetchMock = jest.fn();
     (global as any).fetch = fetchMock;
+    // Default lock stubs — every existing test gets instant "acquired".
+    // Tests that need to exercise the "lock held" path override these.
+    // Without the spy, the real `acquireCaptureLock` adds 2-3 microtasks
+    // per call (2× updateOne().exec() chains) which breaks tests that
+    // assert synchronous behavior like the concurrent-capture guard.
+    jest.spyOn(service as any, 'acquireCaptureLock').mockResolvedValue({ acquired: true, lockedUntil: new Date() });
+    jest.spyOn(service as any, 'releaseCaptureLock').mockResolvedValue(undefined);
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -1769,6 +1786,132 @@ describe('EcosystemService', () => {
       await first;
     });
 
+    it('skips when the cross-process mainnet capture lock is held by another host', async () => {
+      // Override the default "always acquired" spy for this test.
+      const acquireSpy = jest
+        .spyOn(service as any, 'acquireCaptureLock')
+        .mockResolvedValue({ acquired: false, holder: 'other-scanner-host', lockedUntil: new Date(Date.now() + 60_000) });
+      const captureRaw = jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      const logSpy = jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
+
+      await service.capture();
+
+      expect(acquireSpy).toHaveBeenCalledWith('mainnet', expect.any(Number));
+      expect(captureRaw).not.toHaveBeenCalled();
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('lock held by other-scanner-host'));
+      // Per-instance flag must still reset to false so the next cron tick on
+      // this instance can try again.
+      expect(service.isCapturing()).toBe(false);
+    });
+
+    it('releases the mainnet capture lock in finally after a successful capture', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      const releaseSpy = jest.spyOn(service as any, 'releaseCaptureLock');
+      await service.capture();
+      expect(releaseSpy).toHaveBeenCalledWith('mainnet');
+    });
+
+    it('releases the mainnet capture lock in finally even when captureRaw throws', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockRejectedValue(new Error('boom'));
+      const releaseSpy = jest.spyOn(service as any, 'releaseCaptureLock');
+      await service.capture();
+      expect(releaseSpy).toHaveBeenCalledWith('mainnet');
+    });
+
+    describe('acquireCaptureLock / releaseCaptureLock — real-method coverage', () => {
+      it('acquireCaptureLock: returns acquired:true when modifiedCount === 1', async () => {
+        // Undo the default always-acquire spy so we exercise the real body.
+        (service as any).acquireCaptureLock.mockRestore();
+        captureLockModel.updateOne = jest
+          .fn()
+          .mockReturnValueOnce({ exec: jest.fn().mockResolvedValue({}) }) // upsert ensure-exists
+          .mockReturnValueOnce({ exec: jest.fn().mockResolvedValue({ modifiedCount: 1 }) }); // atomic acquire
+        const result = await (service as any).acquireCaptureLock('mainnet', 60_000);
+        expect(result.acquired).toBe(true);
+        expect(result.lockedUntil).toBeInstanceOf(Date);
+      });
+
+      it('acquireCaptureLock: returns acquired:false with holder info when the lock is held', async () => {
+        (service as any).acquireCaptureLock.mockRestore();
+        const held = new Date(Date.now() + 60_000);
+        captureLockModel.updateOne = jest
+          .fn()
+          .mockReturnValueOnce({ exec: jest.fn().mockResolvedValue({}) })
+          .mockReturnValueOnce({ exec: jest.fn().mockResolvedValue({ modifiedCount: 0 }) });
+        captureLockModel.findById = jest.fn().mockReturnValue({
+          lean: () => ({ exec: jest.fn().mockResolvedValue({ _id: 'mainnet', holderHostname: 'host-a', lockedUntil: held }) }),
+        });
+        const result = await (service as any).acquireCaptureLock('mainnet', 60_000);
+        expect(result.acquired).toBe(false);
+        expect(result.holder).toBe('host-a');
+        expect(result.lockedUntil).toEqual(held);
+      });
+
+      it('acquireCaptureLock: falls back to "unknown" holder when the holder doc is missing', async () => {
+        (service as any).acquireCaptureLock.mockRestore();
+        captureLockModel.updateOne = jest
+          .fn()
+          .mockReturnValueOnce({ exec: jest.fn().mockResolvedValue({}) })
+          .mockReturnValueOnce({ exec: jest.fn().mockResolvedValue({ modifiedCount: 0 }) });
+        captureLockModel.findById = jest.fn().mockReturnValue({
+          lean: () => ({ exec: jest.fn().mockResolvedValue(null) }),
+        });
+        const result = await (service as any).acquireCaptureLock('mainnet', 60_000);
+        expect(result.acquired).toBe(false);
+        expect(result.holder).toBe('unknown');
+      });
+
+      it('releaseCaptureLock: clears lockedUntil/lockedAt/holderHostname on the singleton doc', async () => {
+        (service as any).releaseCaptureLock.mockRestore();
+        const updateOneSpy = jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue({}) });
+        captureLockModel.updateOne = updateOneSpy;
+        await (service as any).releaseCaptureLock('testnet');
+        expect(updateOneSpy).toHaveBeenCalledWith(
+          { _id: 'testnet' },
+          { $set: { lockedUntil: null, lockedAt: null, holderHostname: null } },
+        );
+      });
+    });
+
+    it('swallows a mainnet release-lock error in finally (mostly cosmetic — lock TTL protects us)', async () => {
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
+      (service as any).releaseCaptureLock.mockRejectedValue(new Error('mongo blip'));
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      await expect(service.capture()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to release mainnet capture lock'));
+    });
+
+    it('captureRaw: per-package try/catch — one failing package does not abort the capture', async () => {
+      // Applying the testnet partial-save lesson to mainnet. A single flaky
+      // package's probe throwing (GraphQL error, unexpected shape, schema
+      // change) used to abort the entire capture, losing all prior probe
+      // work. Now the failed package is logged + skipped; the snapshot
+      // lands with the rest.
+      const pkgA = { address: '0xAAA', storageRebate: '0', modules: { nodes: [{ name: 'm' }] }, previousTransactionBlock: null };
+      const pkgB = { address: '0xBBB', storageRebate: '0', modules: { nodes: [{ name: 'm' }] }, previousTransactionBlock: null };
+      jest.spyOn(service as any, 'getAllPackages').mockResolvedValue([pkgA, pkgB]);
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'fetchEntryFunctions').mockImplementation(async (addr: string) => {
+        if (addr === '0xAAA') throw new Error('simulated: entry fn fetch failed');
+        return new Map();
+      });
+      jest.spyOn(service as any, 'countEvents').mockResolvedValue({ count: 0, capped: false });
+      jest.spyOn(service as any, 'updateSendersForModule').mockResolvedValue(0);
+      jest.spyOn(service as any, 'probeIdentityFields').mockResolvedValue({ identifiers: [], objectType: null });
+      jest.spyOn(service as any, 'probeTxEffects').mockResolvedValue({ identifiers: [], objectType: null });
+      jest.spyOn(service as any, 'updateTxCountForPackage').mockResolvedValue({ total: 0, capped: false });
+      jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([]);
+      fetchMock.mockResolvedValue({ json: async () => ({ data: { checkpoint: { networkTotalTransactions: '1000' } } }) });
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+
+      const result = await (service as any).captureRaw();
+
+      expect(result.packages).toHaveLength(1);
+      expect(result.packages[0].address).toBe('0xBBB');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipped 0xAAA'));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 package(s) failed their probe'));
+    });
+
     it('clears the classify cache after a successful capture', async () => {
       (service as any).classifyCache.set('stale', { expiresAt: Date.now() + 60_000, value: {} });
       jest.spyOn(service as any, 'captureRaw').mockResolvedValue(rawStub);
@@ -1835,6 +1978,7 @@ describe('EcosystemService', () => {
           { provide: getModelToken(ProjectHolderEntry.name), useValue: holderEntryModel },
           { provide: getModelToken(ClassifiedSnapshot.name), useValue: classifiedModel },
           { provide: getModelToken(TestnetCursor.name), useValue: testnetCursorModel },
+        { provide: getModelToken(CaptureLock.name), useValue: captureLockModel },
           { provide: AlertsService, useValue: alertsMock },
         ],
       }).compile();
@@ -6953,6 +7097,30 @@ describe('EcosystemService', () => {
         }),
         { upsert: true },
       );
+    });
+
+    it('captureTestnetTick skips with "cross-process lock held" when acquire returns acquired:false', async () => {
+      (service as any).acquireCaptureLock.mockResolvedValue({
+        acquired: false,
+        holder: 'another-host',
+        lockedUntil: new Date(Date.now() + 60_000),
+      });
+      const runNewestSpy = jest.spyOn(service as any, 'runNewestTick');
+      const result = await service.captureTestnetTick();
+      expect(result).toEqual({ skipped: true, reason: expect.stringContaining('cross-process lock held by another-host') });
+      expect(runNewestSpy).not.toHaveBeenCalled();
+    });
+
+    it('swallows a testnet release-lock error in finally', async () => {
+      seedCursor({ tickCounter: 0, backfillAfterCursor: null });
+      jest
+        .spyOn(service as any, 'runNewestTick')
+        .mockResolvedValue({ probed: [], hitFreshWindow: false, deadlineHit: false, error: null });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      (service as any).releaseCaptureLock.mockRejectedValue(new Error('mongo blip'));
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      await service.captureTestnetTick();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to release testnet capture lock'));
     });
   });
 });

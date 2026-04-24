@@ -9,6 +9,7 @@ import { ProjectHolders, ProjectHoldersSchema } from './schemas/project-holders.
 import { ProjectHolderEntry, ProjectHolderEntrySchema } from './schemas/project-holder-entry.schema';
 import { ClassifiedSnapshot, ClassifiedSnapshotSchema } from './schemas/classified-snapshot.schema';
 import { TestnetCursor, TestnetCursorSchema } from './schemas/testnet-cursor.schema';
+import { CaptureLock, CaptureLockSchema } from './schemas/capture-lock.schema';
 import { EcosystemService } from './ecosystem.service';
 import { EcosystemController } from './ecosystem.controller';
 import { AlertsModule } from '../alerts/alerts.module';
@@ -25,6 +26,7 @@ import { AlertsModule } from '../alerts/alerts.module';
       { name: ProjectHolderEntry.name, schema: ProjectHolderEntrySchema },
       { name: ClassifiedSnapshot.name, schema: ClassifiedSnapshotSchema },
       { name: TestnetCursor.name, schema: TestnetCursorSchema },
+      { name: CaptureLock.name, schema: CaptureLockSchema },
     ]),
     AlertsModule,
   ],
