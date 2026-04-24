@@ -1827,6 +1827,45 @@ describe('EcosystemService', () => {
       expect(releaseSpy).toHaveBeenCalledWith('mainnet');
     });
 
+    describe('onApplicationShutdown — graceful SIGTERM handling', () => {
+      it('releases both mainnet and testnet locks on shutdown', async () => {
+        const origEnv = process.env.NODE_ENV;
+        delete process.env.NODE_ENV; // exit the test-env short-circuit
+        const releaseSpy = (service as any).releaseCaptureLock as jest.Mock;
+        releaseSpy.mockClear();
+        releaseSpy.mockResolvedValue(undefined);
+
+        await (service as any).onApplicationShutdown('SIGTERM');
+
+        expect(releaseSpy).toHaveBeenCalledTimes(2);
+        expect(releaseSpy).toHaveBeenCalledWith('mainnet');
+        expect(releaseSpy).toHaveBeenCalledWith('testnet');
+        process.env.NODE_ENV = origEnv;
+      });
+
+      it('is a no-op in test env (NODE_ENV=test) so functional tests do not poke prod Mongo', async () => {
+        // NODE_ENV is already "test" in the jest runner.
+        const releaseSpy = (service as any).releaseCaptureLock as jest.Mock;
+        releaseSpy.mockClear();
+        await (service as any).onApplicationShutdown('SIGTERM');
+        expect(releaseSpy).not.toHaveBeenCalled();
+      });
+
+      it('swallows per-network release errors with a warn log; does not throw out of the hook', async () => {
+        const origEnv = process.env.NODE_ENV;
+        delete process.env.NODE_ENV;
+        const releaseSpy = (service as any).releaseCaptureLock as jest.Mock;
+        releaseSpy.mockClear();
+        releaseSpy
+          .mockRejectedValueOnce(new Error('mongo blip mainnet'))
+          .mockResolvedValueOnce(undefined);
+        const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+        await expect((service as any).onApplicationShutdown('SIGTERM')).resolves.toBeUndefined();
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('mainnet capture lock on shutdown'));
+        process.env.NODE_ENV = origEnv;
+      });
+    });
+
     describe('acquireCaptureLock / releaseCaptureLock — real-method coverage', () => {
       it('acquireCaptureLock: returns acquired:true when modifiedCount === 1', async () => {
         // Undo the default always-acquire spy so we exercise the real body.

@@ -32,6 +32,59 @@ if [[ "$HAS_WEBSITE" == "1" ]]; then
   docker build -t iota-trade-scanner-website:latest "$SRC/website"
 fi
 
+# Wait-for-quiet: before killing the running API container, check whether
+# a capture is in flight via the `capturelocks` collection. If one is held
+# and `lockedUntil` is in the future, wait (poll every 30s) up to
+# DEPLOY_WAIT_MAX_MIN minutes. After that, proceed anyway — the graceful
+# SIGTERM hook in EcosystemService.onApplicationShutdown releases any
+# still-held locks, so the cost of force-killing is lost in-flight probe
+# work but nothing durable.
+#
+# Only runs on the scanner host (has no public mongo port of its own; it
+# reaches the Mongo on the web host via the private network already wired
+# into the container's env). On the web host, Mongo is local but no
+# capture cron runs there, so the check is a fast no-op.
+#
+# Disable entirely with DEPLOY_WAIT_MAX_MIN=0 in the environment (e.g.
+# emergency deploys that MUST land immediately).
+DEPLOY_WAIT_MAX_MIN=${DEPLOY_WAIT_MAX_MIN:-50}
+if [[ "$DEPLOY_WAIT_MAX_MIN" -gt 0 ]] && docker ps --format '{{.Names}}' | grep -q '^iota-trade-scanner-api$'; then
+  MONGODB_URI=$(docker exec iota-trade-scanner-api printenv MONGODB_URI 2>/dev/null || true)
+  if [[ -n "$MONGODB_URI" ]]; then
+    echo "==> Checking for in-flight capture (wait up to ${DEPLOY_WAIT_MAX_MIN}min)"
+    DEADLINE=$(( $(date +%s) + DEPLOY_WAIT_MAX_MIN * 60 ))
+    while true; do
+      # Query held locks via the running container's existing mongosh access.
+      # Output is "HELD" if any lock's `lockedUntil` is in the future, else "QUIET".
+      STATE=$(docker exec iota-trade-scanner-api node -e "
+        const { MongoClient } = require('mongodb');
+        (async () => {
+          const client = new MongoClient(process.env.MONGODB_URI);
+          try {
+            await client.connect();
+            const docs = await client.db().collection('capturelocks').find({
+              lockedUntil: { \$gt: new Date() }
+            }).toArray();
+            console.log(docs.length > 0 ? 'HELD:' + docs.map(d => d._id).join(',') : 'QUIET');
+          } finally { await client.close(); }
+        })().catch((e) => { console.error(e.message); process.exit(2); });
+      " 2>/dev/null || echo "QUIET") # on error (e.g. no mongo driver), treat as quiet
+      if [[ "$STATE" == "QUIET" ]]; then
+        echo "==> No capture in flight — proceeding"
+        break
+      fi
+      NOW=$(date +%s)
+      if [[ "$NOW" -ge "$DEADLINE" ]]; then
+        echo "==> Wait timeout reached (${DEPLOY_WAIT_MAX_MIN}min); proceeding anyway — graceful SIGTERM hook will release any held locks"
+        break
+      fi
+      REMAINING=$(( (DEADLINE - NOW) / 60 ))
+      echo "   capture in flight ($STATE); waiting 30s (up to ${REMAINING}min left)…"
+      sleep 30
+    done
+  fi
+fi
+
 echo "==> Stopping + removing api/website containers"
 if [[ "$HAS_WEBSITE" == "1" ]]; then
   docker compose rm -fs api website 2>/dev/null || true

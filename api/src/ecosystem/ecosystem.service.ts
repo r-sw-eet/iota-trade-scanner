@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnApplicationShutdown } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Cron } from '@nestjs/schedule';
 import { Model } from 'mongoose';
@@ -342,7 +342,7 @@ interface PackageInfo {
 }
 
 @Injectable()
-export class EcosystemService implements OnModuleInit {
+export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(EcosystemService.name);
 
   /**
@@ -539,6 +539,34 @@ export class EcosystemService implements OnModuleInit {
     this.selfHealLatestClassified().catch((e) =>
       this.logger.error('Boot self-heal of classified view failed', e),
     );
+  }
+
+  /**
+   * Lifecycle hook for graceful shutdown (SIGTERM / SIGINT). Docker's
+   * default 10-sec grace period is nowhere near enough to finish an
+   * in-flight capture, so we do NOT try to "drain" — the work is lost.
+   * But we DO release held `CaptureLock`s so the next container boot
+   * (or any other scanner replica) can start the next cycle immediately,
+   * instead of waiting for the lock's TTL to expire (~3h mainnet, 2.5h
+   * testnet).
+   *
+   * Called by Nest AFTER `app.enableShutdownHooks()` is in effect (see
+   * `main.ts`). `Promise.allSettled` so one release failing doesn't
+   * block the other.
+   */
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    if (process.env.NODE_ENV === 'test') return;
+    this.logger.log(`Received ${signal ?? 'shutdown'}, releasing any held capture locks…`);
+    const results = await Promise.allSettled([
+      this.releaseCaptureLock('mainnet'),
+      this.releaseCaptureLock('testnet'),
+    ]);
+    for (const [i, r] of results.entries()) {
+      if (r.status === 'rejected') {
+        const net = i === 0 ? 'mainnet' : 'testnet';
+        this.logger.warn(`Failed to release ${net} capture lock on shutdown: ${(r.reason as Error).message}`);
+      }
+    }
   }
 
   /**
