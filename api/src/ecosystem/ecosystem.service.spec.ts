@@ -6313,6 +6313,167 @@ describe('EcosystemService', () => {
       }
     });
 
+    it('graphql() retries on transient timeouts (matches GRAPHQL_RETRYABLE_RE) and returns the successful response', async () => {
+      jest.useFakeTimers();
+      // Regression for the Phase 4c resilience gap: testnet's 40s server-
+      // side timeout occasionally kills single GraphQL calls and used to
+      // blow up entire 90-min ticks. Retry policy is 3 attempts with 2s/4s
+      // backoff; this test pins the happy case (second attempt succeeds).
+      fetchMock
+        .mockResolvedValueOnce({ json: async () => ({ errors: [{ message: 'Query request timed out. Limit: 40s' }] }) })
+        .mockResolvedValueOnce({ json: async () => ({ data: { ok: true } }) });
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      const p = (service as any).graphql('{ ok }');
+      // Advance through the 2s backoff between attempt 1 and 2.
+      await jest.advanceTimersByTimeAsync(2100);
+      await expect(p).resolves.toEqual({ ok: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('attempt 1/3 failed'));
+      jest.useRealTimers();
+    });
+
+    it('graphql() exhausts retries (3 attempts) and throws when the error keeps being retryable', async () => {
+      jest.useFakeTimers();
+      fetchMock.mockResolvedValue({ json: async () => ({ errors: [{ message: 'Query request timed out. Limit: 40s' }] }) });
+      jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      // Attach the rejection handler FIRST via expect().rejects, THEN advance
+      // timers. Otherwise the underlying promise can reject before jest's
+      // assertion handler is wired up, which jest treats as an unhandled
+      // rejection / test failure.
+      const assertion = expect((service as any).graphql('{ ok }')).rejects.toThrow(/timed out/i);
+      await jest.advanceTimersByTimeAsync(6500); // 2s + 4s backoff
+      await assertion;
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      jest.useRealTimers();
+    });
+
+    it('graphql() fails fast on non-retryable errors (validation / schema) — no retry, single attempt', async () => {
+      fetchMock.mockResolvedValueOnce({ json: async () => ({ errors: [{ message: 'Cannot query field "nope" on type "Query".' }] }) });
+      await expect((service as any).graphql('{ nope }')).rejects.toThrow(/Cannot query field/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('runNewestTick returns partial probed + error when fetchPackagePage throws mid-walk (retries exhausted)', async () => {
+      // Symmetric to the runBackfillTick partial-probed test below. Newest
+      // tick catches the same class of error and preserves probe work done
+      // before the throw.
+      jest
+        .spyOn(service as any, 'fetchPackagePage')
+        .mockResolvedValueOnce({
+          nodes: [pkgInfo('0xrn1', ['m1'])],
+          hasNextPage: true,
+          endCursor: 'cur-1',
+        })
+        .mockRejectedValueOnce(new Error('Query request timed out. Limit: 40s'));
+      jest.spyOn(service as any, 'probeOnePackage').mockResolvedValue({
+        address: '0xrn1',
+        deployer: '0xd',
+        modules: ['m1'],
+        storageRebateNanos: 0,
+        moduleMetrics: [],
+        objectHolderCount: 0,
+        objectCount: 0,
+        objectTypeCounts: {},
+        transactions: 0,
+        transactionsCapped: false,
+        fingerprint: null,
+        publishedAt: null,
+        lastProbedAt: new Date(),
+      });
+      const result = await (service as any).runNewestTick(
+        new Map(), // empty previousByAddress (no fresh-window hits)
+        new Date(),
+        Date.now() + 10 * 60 * 1000,
+        new Map(),
+      );
+      expect(result.probed).toHaveLength(1);
+      expect(result.error).not.toBeNull();
+      expect((result.error as Error).message).toMatch(/timed out/i);
+      expect(result.hitFreshWindow).toBe(false);
+      expect(result.deadlineHit).toBe(false);
+    });
+
+    it('runBackfillTick returns partial probed + error when fetchPackagePage throws mid-walk (retries exhausted)', async () => {
+      // First page succeeds with 2 packages probed; second page throws
+      // (simulating testnet's 40s timeout exhausting retries). Expect:
+      // probed contains the 2 packages from page 1, error is non-null,
+      // nextCursor stays at the pre-failed-fetch value ('cur-1').
+      const pageSpy = jest
+        .spyOn(service as any, 'fetchPackagePage')
+        .mockResolvedValueOnce({
+          nodes: [pkgInfo('0xrb1', ['m1']), pkgInfo('0xrb2', ['m1'])],
+          hasNextPage: true,
+          endCursor: 'cur-1',
+        })
+        .mockRejectedValueOnce(new Error('Query request timed out. Limit: 40s'));
+      jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (info: any) => ({
+        address: info.address,
+        deployer: '0xd',
+        modules: ['m1'],
+        storageRebateNanos: 0,
+        moduleMetrics: [],
+        objectHolderCount: 0,
+        objectCount: 0,
+        objectTypeCounts: {},
+        transactions: 0,
+        transactionsCapped: false,
+        fingerprint: null,
+        publishedAt: null,
+        lastProbedAt: new Date(),
+      }));
+      const result = await (service as any).runBackfillTick(
+        'cur-0',
+        new Date(),
+        Date.now() + 10 * 60 * 1000, // 10 min budget — plenty
+        new Map(),
+      );
+      expect(result.probed).toHaveLength(2);
+      expect(result.error).not.toBeNull();
+      expect((result.error as Error).message).toMatch(/timed out/i);
+      expect(result.nextCursor).toBe('cur-1'); // advanced past page 1 (which succeeded)
+      expect(result.wrapped).toBe(false);
+      expect(result.deadlineHit).toBe(false);
+      expect(pageSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('captureTestnetTick persists a partial snapshot + advances cursor even when runBackfillTick returns an error', async () => {
+      // Wire the tick to look like tickCounter=1 (backfill), have runBackfillTick
+      // return partial results with an error — the final doc must still land
+      // in onchainsnapshots with the 2 probed packages, and the cursor must
+      // still be updated so subsequent ticks advance.
+      testnetCursorModel.findById = jest.fn().mockReturnValue({
+        exec: async () => ({ _id: 'testnet', tickCounter: 1, backfillAfterCursor: 'cur-0' }),
+      }) as any;
+      testnetCursorModel.updateOne = jest.fn().mockReturnValue({ exec: async () => ({}) }) as any;
+      ecoModel.findOne = jest.fn().mockReturnValue({
+        sort: () => ({ lean: () => ({ exec: async () => null }) }),
+      }) as any;
+      ecoModel.create.mockResolvedValue({} as any);
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      const partial = [
+        { address: '0xpa1', deployer: '0xd', modules: ['m1'], storageRebateNanos: 0, moduleMetrics: [], objectHolderCount: 0, objectCount: 0, objectTypeCounts: {}, transactions: 0, transactionsCapped: false, fingerprint: null, publishedAt: null, lastProbedAt: new Date() },
+        { address: '0xpa2', deployer: '0xd', modules: ['m1'], storageRebateNanos: 0, moduleMetrics: [], objectHolderCount: 0, objectCount: 0, objectTypeCounts: {}, transactions: 0, transactionsCapped: false, fingerprint: null, publishedAt: null, lastProbedAt: new Date() },
+      ];
+      jest.spyOn(service as any, 'runBackfillTick').mockResolvedValue({
+        probed: partial,
+        nextCursor: 'cur-0', // cursor stays (fetch threw on cur-0's target page)
+        wrapped: false,
+        deadlineHit: false,
+        error: new Error('Query request timed out. Limit: 40s'),
+      });
+      const errorSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+
+      const result = await (service as any).captureTestnetTick();
+
+      expect((result as any).skipped).toBeUndefined();
+      expect(ecoModel.create).toHaveBeenCalledWith(expect.objectContaining({
+        network: 'testnet',
+        packages: expect.arrayContaining(partial),
+      }));
+      expect(testnetCursorModel.updateOne).toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('aborted mid-probe after 2 pkgs'));
+    });
+
     it('fetchPackagePage builds the correct GraphQL query shape and parses pageInfo', async () => {
       const graphqlSpy = jest
         .spyOn(service as any, 'graphql')

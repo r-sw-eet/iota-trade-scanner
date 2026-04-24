@@ -1219,16 +1219,51 @@ export class EcosystemService implements OnModuleInit {
    */
   private readonly graphqlUrlContext = new AsyncLocalStorage<string>();
 
+  /**
+   * Transient-error retry policy for GraphQL. IOTA testnet's endpoint has a
+   * hard 40s server-side timeout per query — individual `packages(first: 50, after)`
+   * calls occasionally cross it under load, returning `{ errors: [{ message:
+   * 'Query request timed out. Limit: 40s' }] }`. Observed 2026-04-24 02:09
+   * during a backfill tick that then lost 69 min of probe work.
+   *
+   * Policy: retry on messages matching the timeout / connection-reset /
+   * 5xx family, up to 3 attempts total with 2s → 4s backoff. Validation /
+   * schema errors (non-matching messages) fail immediately so we don't
+   * mask real bugs behind silent retries. Mainnet paths rarely trigger
+   * this because mainnet's endpoint doesn't exhibit the 40s ceiling.
+   */
+  private static readonly GRAPHQL_MAX_ATTEMPTS = 3;
+  private static readonly GRAPHQL_RETRYABLE_RE = /timed? ?out|timeout|ECONNRESET|ETIMEDOUT|socket hang up|5\d\d/i;
+
   private async graphql(query: string): Promise<any> {
     const url = this.graphqlUrlContext.getStore() ?? this.graphqlUrl;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-    });
-    const json: any = await res.json();
-    if (json.errors?.length) throw new Error(json.errors[0].message);
-    return json.data;
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= EcosystemService.GRAPHQL_MAX_ATTEMPTS; attempt++) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query }),
+        });
+        const json: any = await res.json();
+        if (json.errors?.length) throw new Error(json.errors[0].message);
+        return json.data;
+      } catch (e) {
+        lastError = e as Error;
+        const retryable = EcosystemService.GRAPHQL_RETRYABLE_RE.test(lastError.message);
+        if (attempt < EcosystemService.GRAPHQL_MAX_ATTEMPTS && retryable) {
+          const delayMs = 2000 * Math.pow(2, attempt - 1); // 2s, 4s
+          this.logger.warn(
+            `GraphQL attempt ${attempt}/${EcosystemService.GRAPHQL_MAX_ATTEMPTS} failed against ${url}: ${lastError.message} — retrying in ${delayMs}ms`,
+          );
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+        throw lastError;
+      }
+    }
+    /* istanbul ignore next — unreachable: the for-loop always exits via return (success) or throw (final retryable / non-retryable attempt). Kept as a TS/defense belt-and-braces. */
+    throw lastError ?? new Error('graphql: unreachable retry-loop exit');
   }
 
   private async getAllPackages(): Promise<PackageInfo[]> {
@@ -3992,35 +4027,44 @@ export class EcosystemService implements OnModuleInit {
     now: Date,
     deadlineMs: number,
     displayByPackage: Map<string, Array<{ key: string; value: string }>>,
-  ): Promise<{ probed: PackageFact[]; hitFreshWindow: boolean; deadlineHit: boolean }> {
+  ): Promise<{ probed: PackageFact[]; hitFreshWindow: boolean; deadlineHit: boolean; error: Error | null }> {
     const probed: PackageFact[] = [];
     const freshCutoff = now.getTime() - EcosystemService.TESTNET_FRESHNESS_WINDOW_MS;
     let cursor: string | null = null;
     let hitFreshWindow = false;
     let hasNextPage = true;
 
-    while (hasNextPage) {
-      if (Date.now() >= deadlineMs) {
-        return { probed, hitFreshWindow, deadlineHit: true };
-      }
-      const page = await this.fetchPackagePage(cursor);
-      for (const info of page.nodes) {
-        const prev = previousByAddress.get(info.address.toLowerCase());
-        if (prev && prev.lastProbedAt && new Date(prev.lastProbedAt).getTime() > freshCutoff) {
-          hitFreshWindow = true;
-          return { probed, hitFreshWindow, deadlineHit: false };
-        }
-        const fact = await this.probeOnePackage(info, displayByPackage, now);
-        probed.push(fact);
+    // Wrapping the entire probe loop in try/catch so mid-walk errors (e.g.
+    // testnet's 40s server timeout on fetchPackagePage, observed 2026-04-24
+    // 02:09 UTC) don't discard hours of probe work. The caller persists
+    // `probed` into a partial snapshot regardless of whether we returned
+    // cleanly or via `error`.
+    try {
+      while (hasNextPage) {
         if (Date.now() >= deadlineMs) {
-          return { probed, hitFreshWindow, deadlineHit: true };
+          return { probed, hitFreshWindow, deadlineHit: true, error: null };
         }
+        const page = await this.fetchPackagePage(cursor);
+        for (const info of page.nodes) {
+          const prev = previousByAddress.get(info.address.toLowerCase());
+          if (prev && prev.lastProbedAt && new Date(prev.lastProbedAt).getTime() > freshCutoff) {
+            hitFreshWindow = true;
+            return { probed, hitFreshWindow, deadlineHit: false, error: null };
+          }
+          const fact = await this.probeOnePackage(info, displayByPackage, now);
+          probed.push(fact);
+          if (Date.now() >= deadlineMs) {
+            return { probed, hitFreshWindow, deadlineHit: true, error: null };
+          }
+        }
+        hasNextPage = page.hasNextPage;
+        cursor = page.endCursor;
+        if (!cursor) break;
       }
-      hasNextPage = page.hasNextPage;
-      cursor = page.endCursor;
-      if (!cursor) break;
+      return { probed, hitFreshWindow, deadlineHit: false, error: null };
+    } catch (e) {
+      return { probed, hitFreshWindow, deadlineHit: false, error: e as Error };
     }
-    return { probed, hitFreshWindow, deadlineHit: false };
   }
 
   /**
@@ -4040,35 +4084,45 @@ export class EcosystemService implements OnModuleInit {
     now: Date,
     deadlineMs: number,
     displayByPackage: Map<string, Array<{ key: string; value: string }>>,
-  ): Promise<{ probed: PackageFact[]; nextCursor: string | null; wrapped: boolean; deadlineHit: boolean }> {
+  ): Promise<{ probed: PackageFact[]; nextCursor: string | null; wrapped: boolean; deadlineHit: boolean; error: Error | null }> {
     const probed: PackageFact[] = [];
     let cursor = startCursor;
     let wrapped = false;
 
-    while (true) {
-      if (Date.now() >= deadlineMs) {
-        return { probed, nextCursor: cursor, wrapped: false, deadlineHit: true };
-      }
-      const page = await this.fetchPackagePage(cursor);
-      for (const info of page.nodes) {
-        const fact = await this.probeOnePackage(info, displayByPackage, now);
-        probed.push(fact);
+    // Same try/catch rationale as runNewestTick — preserve partial probe
+    // work when a mid-walk GraphQL call throws unrecoverably (retries
+    // exhausted). On error, `nextCursor` stays at the pre-fetch value so
+    // the next backfill tick resumes from the same point; retries on the
+    // scheduled next cron usually succeed because the underlying cause
+    // (testnet endpoint load spike) is transient.
+    try {
+      while (true) {
         if (Date.now() >= deadlineMs) {
-          return { probed, nextCursor: page.endCursor, wrapped: false, deadlineHit: true };
+          return { probed, nextCursor: cursor, wrapped: false, deadlineHit: true, error: null };
+        }
+        const page = await this.fetchPackagePage(cursor);
+        for (const info of page.nodes) {
+          const fact = await this.probeOnePackage(info, displayByPackage, now);
+          probed.push(fact);
+          if (Date.now() >= deadlineMs) {
+            return { probed, nextCursor: page.endCursor, wrapped: false, deadlineHit: true, error: null };
+          }
+        }
+        if (!page.hasNextPage) {
+          wrapped = true;
+          cursor = null;
+          break;
+        }
+        cursor = page.endCursor;
+        if (!cursor) {
+          wrapped = true;
+          break;
         }
       }
-      if (!page.hasNextPage) {
-        wrapped = true;
-        cursor = null;
-        break;
-      }
-      cursor = page.endCursor;
-      if (!cursor) {
-        wrapped = true;
-        break;
-      }
+      return { probed, nextCursor: cursor, wrapped, deadlineHit: false, error: null };
+    } catch (e) {
+      return { probed, nextCursor: cursor, wrapped: false, deadlineHit: false, error: e as Error };
     }
-    return { probed, nextCursor: cursor, wrapped, deadlineHit: false };
   }
 
   /**
@@ -4153,12 +4207,14 @@ export class EcosystemService implements OnModuleInit {
       let wrapped = false;
       let deadlineHit = false;
       let nextBackfillCursor: string | null = state.backfillAfterCursor;
+      let probeError: Error | null = null;
 
       if (kind === 'newest') {
         const result = await this.runNewestTick(previousByAddress, now, deadlineMs, displayByPackage);
         freshlyProbed = result.probed;
         hitFreshWindow = result.hitFreshWindow;
         deadlineHit = result.deadlineHit;
+        probeError = result.error;
       } else {
         const result = await this.runBackfillTick(
           state.backfillAfterCursor,
@@ -4170,6 +4226,20 @@ export class EcosystemService implements OnModuleInit {
         wrapped = result.wrapped;
         deadlineHit = result.deadlineHit;
         nextBackfillCursor = result.nextCursor;
+        probeError = result.error;
+      }
+
+      // Persist partial work even when the probe loop errored mid-walk. The
+      // retry policy in `this.graphql()` handles transient testnet timeouts
+      // inside a single call; `probeError` here is the case where retries
+      // exhausted. In that case we still want to save what got probed so
+      // far (could be thousands of packages after a long run) rather than
+      // lose it all. Cursor stays at the pre-fetch value so the next tick
+      // re-attempts the same page — usually succeeds when load subsides.
+      if (probeError) {
+        this.logger.error(
+          `Testnet ${kind}-tick aborted mid-probe after ${freshlyProbed.length} pkgs: ${probeError.message} — saving partial snapshot`,
+        );
       }
 
       // Build merged package set (fresh + copy-forward).
