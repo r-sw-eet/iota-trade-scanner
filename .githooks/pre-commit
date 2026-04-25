@@ -7,6 +7,12 @@
 #     that package are staged, then enforces the ratcheting baseline via
 #     scripts/check-coverage.js. On improvement the baseline file is
 #     updated and staged into the same commit.
+#  3. Runs the api functional suite (real Nest app + in-memory Mongo) when
+#     api/ files are staged. Catches the class of bug unit tests with
+#     mocked Mongo can't see — schema-strip on removed fields, real index
+#     conflicts, validator behavior. Added 2026-04-25 after a commit that
+#     dropped a schema field passed unit tests but broke the functional
+#     suite via Mongoose strict-mode silently stripping the field.
 #
 # Install once with: `make hooks` (sets core.hooksPath to .githooks).
 
@@ -100,8 +106,51 @@ EOF
   fi
 }
 
+# check_functional <dir> <script-name> <staged-path-1> [<staged-path-2> ...]
+#
+# Runs `npm run <script-name>` in <dir> if any staged path matches one of
+# the prefixes. No coverage / baseline interaction — pure pass/fail. Use
+# for suites that boot a real Nest app or hit external resources.
+check_functional() {
+  local dir="$1"
+  local script="$2"
+  shift 2
+
+  local fired=0
+  for p in "$@"; do
+    if staged_under "$p"; then fired=1; break; fi
+  done
+  if [ "$fired" -eq 0 ]; then return 0; fi
+
+  local log="/tmp/itsc-precommit-${dir}-functional.log"
+
+  echo "→ Running $dir $script (functional suite)..."
+  if ! ( cd "$dir" && npm run "$script" --silent >"$log" 2>&1 ); then
+    cat <<EOF >&2
+
+✗ $dir functional suite failed.
+
+  Last 40 lines of output:
+
+EOF
+    tail -n 40 "$log" >&2
+    cat <<EOF >&2
+
+  Full log: $log
+  To bypass just this run (not recommended): git commit --no-verify
+
+EOF
+    exit 1
+  fi
+}
+
 check_lockfile api
 check_lockfile website
 check_coverage api     test:cov             api/src/     api/test/
 check_coverage website test:unit:coverage   website/components/ website/composables/ website/pages/ website/tests/unit/
+# Functional suite — real Nest app + in-memory Mongo. Catches the bug
+# class unit tests with mocked Mongo cannot (schema-strip, index
+# conflicts, validator behavior). Fires only when api/ source or tests
+# are staged.
+check_functional api    test:functional      api/src/     api/test/
 exit 0
