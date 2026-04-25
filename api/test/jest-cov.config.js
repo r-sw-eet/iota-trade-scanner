@@ -21,6 +21,7 @@ module.exports = {
     '!src/backfill-senders.ts',
     '!src/backfill-tx-counts.ts',
     '!src/backfill-holders.ts',
+    '!src/backfill-testnet-from-addresslist.ts',
     '!src/scan-unattributed-cli.ts',
     '!src/scan-other-nets-cli.ts',
     '!src/dry-run-testnet.ts',

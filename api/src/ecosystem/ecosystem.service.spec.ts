@@ -8278,4 +8278,203 @@ describe('EcosystemService', () => {
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to release testnet capture lock'));
     });
   });
+
+  describe('backfillTestnetFromAddressList — one-shot bulk probe entrypoint', () => {
+    const fakeFact = (address: string): any => ({
+      address,
+      deployer: null,
+      storageRebateNanos: 1000,
+      modules: ['m1'],
+      moduleMetrics: [],
+      objectHolderCount: 0,
+      objectCount: 0,
+      transactions: 0,
+      transactionsCapped: false,
+      objectTypeCounts: [],
+      fingerprint: null,
+      publishedAt: null,
+      lastProbedAt: new Date(),
+    });
+
+    beforeEach(() => {
+      jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+    });
+
+    it('probes every address, writes facts under one snapshot, promotes partial → complete with summed storageRebate + duration', async () => {
+      const addresses = ['0xa', '0xb', '0xc', '0xd', '0xe'];
+      jest
+        .spyOn(service as any, 'fetchPackageByAddress')
+        .mockImplementation(async (addr: any) => ({
+          address: addr,
+          modules: { nodes: [] },
+          previousTransactionBlock: null,
+          storageRebate: '0',
+        }));
+      jest
+        .spyOn(service as any, 'probeOnePackage')
+        .mockImplementation(async (info: any) => fakeFact(info.address));
+      const insertSpy = jest.spyOn(service as any, 'insertPackageFacts').mockResolvedValue(undefined);
+
+      const progress: Array<{ done: number; total: number }> = [];
+      const result = await service.backfillTestnetFromAddressList(addresses, {
+        concurrency: 2,
+        onProgress: (done, total) => progress.push({ done, total }),
+      });
+
+      expect(result.probed).toBe(5);
+      expect(result.failures).toEqual([]);
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+
+      // Snapshot created partial up-front
+      const createCalls = (ecoModel.create as jest.Mock).mock.calls;
+      expect(createCalls.length).toBe(1);
+      expect(createCalls[0][0]).toEqual(
+        expect.objectContaining({
+          network: 'testnet',
+          captureStage: 'partial',
+          captureDurationMs: null,
+        }),
+      );
+
+      // Final updateOne promotes to complete with summed rebate + non-null duration
+      const updateCalls = (ecoModel.updateOne as jest.Mock).mock.calls;
+      expect(updateCalls.length).toBeGreaterThanOrEqual(1);
+      const finalUpdate = updateCalls[updateCalls.length - 1];
+      expect(finalUpdate[1].$set).toEqual(
+        expect.objectContaining({
+          captureStage: 'complete',
+          totalStorageRebateNanos: 5000, // 5 facts × 1000 each
+        }),
+      );
+      expect(finalUpdate[1].$set.captureDurationMs).toBeGreaterThanOrEqual(0);
+
+      // Final flush of <CHUNK_FOR_INSERT facts in one insertPackageFacts call
+      expect(insertSpy).toHaveBeenCalledTimes(1);
+      expect(insertSpy.mock.calls[0][1]).toBe('testnet');
+      expect(insertSpy.mock.calls[0][2]).toHaveLength(5);
+
+      // Progress fires once per batch (concurrency=2 → 3 batches: 2/2/1)
+      expect(progress.length).toBe(3);
+      expect(progress[progress.length - 1]).toEqual({ done: 5, total: 5 });
+    });
+
+    it('collects per-address failures (Promise.allSettled) without aborting the whole run', async () => {
+      const addresses = ['0xgood', '0xmissing', '0xboom'];
+      jest
+        .spyOn(service as any, 'fetchPackageByAddress')
+        .mockImplementation(async (addr: any) => {
+          if (addr === '0xmissing') return null; // → "package not found on-chain"
+          if (addr === '0xboom') throw new Error('graphql 500');
+          return { address: addr, modules: { nodes: [] }, previousTransactionBlock: null, storageRebate: '0' };
+        });
+      jest
+        .spyOn(service as any, 'probeOnePackage')
+        .mockImplementation(async (info: any) => fakeFact(info.address));
+      jest.spyOn(service as any, 'insertPackageFacts').mockResolvedValue(undefined);
+
+      const result = await service.backfillTestnetFromAddressList(addresses, { concurrency: 5 });
+
+      expect(result.probed).toBe(1);
+      expect(result.failures).toEqual([
+        { address: '0xmissing', error: 'package not found on-chain' },
+        { address: '0xboom', error: 'graphql 500' },
+      ]);
+    });
+
+    it('flushes packagefacts in chunks of 1000 — multi-chunk address list triggers >1 insertPackageFacts call', async () => {
+      const addresses = Array.from({ length: 1500 }, (_, i) => `0x${i.toString(16)}`);
+      jest
+        .spyOn(service as any, 'fetchPackageByAddress')
+        .mockImplementation(async (addr: any) => ({
+          address: addr,
+          modules: { nodes: [] },
+          previousTransactionBlock: null,
+          storageRebate: '0',
+        }));
+      jest
+        .spyOn(service as any, 'probeOnePackage')
+        .mockImplementation(async (info: any) => fakeFact(info.address));
+      const insertSpy = jest.spyOn(service as any, 'insertPackageFacts').mockResolvedValue(undefined);
+
+      const result = await service.backfillTestnetFromAddressList(addresses, { concurrency: 100 });
+      expect(result.probed).toBe(1500);
+      // First flush ≥1000 mid-walk, final flush at the end with the remainder
+      expect(insertSpy).toHaveBeenCalledTimes(2);
+      const totalInserted = insertSpy.mock.calls.reduce(
+        (s: number, call: any[]) => s + (call[2] as unknown[]).length,
+        0,
+      );
+      expect(totalInserted).toBe(1500);
+    });
+
+    it('empty address list still creates + promotes a snapshot (probed=0, failures=[]); also exercises the default `opts = {}` branch by omitting opts entirely', async () => {
+      const insertSpy = jest.spyOn(service as any, 'insertPackageFacts').mockResolvedValue(undefined);
+
+      // No opts arg → default `opts = {}` parameter branch
+      const result = await service.backfillTestnetFromAddressList([]);
+
+      expect(result.probed).toBe(0);
+      expect(result.failures).toEqual([]);
+      expect((ecoModel.create as jest.Mock).mock.calls.length).toBe(1);
+      expect((ecoModel.updateOne as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(1);
+      expect(insertSpy).not.toHaveBeenCalled();
+    });
+
+    it('handles falsy storageRebateNanos (the `|| 0` branch) without NaN-ing the running total', async () => {
+      jest
+        .spyOn(service as any, 'fetchPackageByAddress')
+        .mockImplementation(async (addr: any) => ({
+          address: addr,
+          modules: { nodes: [] },
+          previousTransactionBlock: null,
+          storageRebate: '0',
+        }));
+      jest
+        .spyOn(service as any, 'probeOnePackage')
+        .mockImplementation(async (info: any) => ({
+          ...fakeFact(info.address),
+          storageRebateNanos: 0, // falsy → `|| 0` branch path 1
+        }));
+      jest.spyOn(service as any, 'insertPackageFacts').mockResolvedValue(undefined);
+
+      await service.backfillTestnetFromAddressList(['0xa', '0xb'], { concurrency: 2 });
+      const updateCalls = (ecoModel.updateOne as jest.Mock).mock.calls;
+      const finalUpdate = updateCalls[updateCalls.length - 1];
+      expect(finalUpdate[1].$set.totalStorageRebateNanos).toBe(0);
+    });
+
+    it('falls back to String(reason) when a probe rejects with a non-Error thrown value', async () => {
+      jest
+        .spyOn(service as any, 'fetchPackageByAddress')
+        .mockRejectedValue('plain-string-rejection');
+      jest.spyOn(service as any, 'insertPackageFacts').mockResolvedValue(undefined);
+
+      const result = await service.backfillTestnetFromAddressList(['0x1'], { concurrency: 1 });
+      expect(result.failures).toEqual([{ address: '0x1', error: 'plain-string-rejection' }]);
+    });
+
+    it('defaults concurrency to 15 when not specified', async () => {
+      jest
+        .spyOn(service as any, 'fetchPackageByAddress')
+        .mockImplementation(async (addr: any) => ({
+          address: addr,
+          modules: { nodes: [] },
+          previousTransactionBlock: null,
+          storageRebate: '0',
+        }));
+      jest
+        .spyOn(service as any, 'probeOnePackage')
+        .mockImplementation(async (info: any) => fakeFact(info.address));
+      jest.spyOn(service as any, 'insertPackageFacts').mockResolvedValue(undefined);
+
+      // 30 addresses → at concurrency=15 we get 2 batches → 2 progress callbacks
+      const addresses = Array.from({ length: 30 }, (_, i) => `0x${i}`);
+      const progress: Array<{ done: number; total: number }> = [];
+      await service.backfillTestnetFromAddressList(addresses, {
+        onProgress: (done, total) => progress.push({ done, total }),
+      });
+      expect(progress.length).toBe(2);
+    });
+  });
 });

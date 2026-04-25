@@ -5266,6 +5266,130 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
+   * One-shot bulk-probe entrypoint: take an explicit list of testnet package
+   * addresses, probe each in parallel batches, and write the result into a
+   * single fresh testnet snapshot. Used by the
+   * `backfill-testnet-from-addresslist` CLI to rebuild testnet coverage
+   * from scratch after the 2026-04-25 cross-network pagination walk
+   * surfaced ~35k packages we'd missed (the apparent "5-month dead window"
+   * Nov 2025 → Mar 2026 was actually peak activity — see
+   * `plans/handoff_2026-04-25.md`).
+   *
+   * Behaviour:
+   *  - Wraps every nested `this.graphql(...)` in
+   *    `graphqlUrlContext.run(testnetUrl)` so helpers that read
+   *    `this.graphqlUrl` (`fetchEntryFunctions`, `probeIdentityFields`,
+   *    etc.) hit testnet, not mainnet — same pattern as `captureTestnetTick`.
+   *  - Creates a `captureStage: 'partial'` snapshot up front, writes facts in
+   *    chunks of `CHUNK_FOR_INSERT` as they're probed, promotes to
+   *    `'complete'` only once all batches are done. The unique
+   *    `(snapshotId, address)` index makes a resume re-insert idempotent.
+   *  - Probes in concurrency-N batches via `Promise.allSettled` so one slow
+   *    or flaky address doesn't stall the rest. Failures collected per-
+   *    address with the error message, not re-thrown.
+   *  - Does NOT acquire the capture lock — this is a manual one-shot, the
+   *    caller is expected to halt the cron externally before invoking.
+   *  - Does NOT touch existing testnet snapshots. The new snapshot stands
+   *    alongside; cleanup is a separate explicit step once the operator has
+   *    eyeballed the new one.
+   */
+  async backfillTestnetFromAddressList(
+    addresses: string[],
+    opts: {
+      concurrency?: number;
+      onProgress?: (done: number, total: number) => void;
+    } = {},
+  ): Promise<{
+    snapshotId: Types.ObjectId;
+    probed: number;
+    failures: Array<{ address: string; error: string }>;
+    durationMs: number;
+  }> {
+    const concurrency = opts.concurrency ?? 15;
+    const CHUNK_FOR_INSERT = 1000;
+    const testnetUrl = GRAPHQL_URL_BY_NETWORK.testnet;
+    return this.graphqlUrlContext.run(testnetUrl, async () => {
+      const startedAt = Date.now();
+      const now = new Date(startedAt);
+      const newId = new Types.ObjectId();
+
+      await this.safeCreate({
+        _id: newId,
+        network: 'testnet',
+        captureStage: 'partial',
+        totalStorageRebateNanos: 0,
+        networkTxTotal: 0,
+        txRates: {},
+        captureDurationMs: null,
+      });
+
+      const displayByPackage = await this.collectDisplayMetadata();
+      const failures: Array<{ address: string; error: string }> = [];
+      let probedCount = 0;
+      let pendingInsert: PackageFact[] = [];
+      let totalStorageRebateNanos = 0;
+
+      for (let i = 0; i < addresses.length; i += concurrency) {
+        const batch = addresses.slice(i, i + concurrency);
+        const results = await Promise.allSettled(
+          batch.map(async (addr) => {
+            const info = await this.fetchPackageByAddress(addr);
+            if (!info) throw new Error('package not found on-chain');
+            return await this.probeOnePackage(info, displayByPackage, now);
+          }),
+        );
+        for (let idx = 0; idx < results.length; idx++) {
+          const r = results[idx];
+          if (r.status === 'fulfilled') {
+            pendingInsert.push(r.value);
+            totalStorageRebateNanos += Number(r.value.storageRebateNanos || 0);
+            probedCount += 1;
+          } else {
+            failures.push({
+              address: batch[idx],
+              error: (r.reason as Error)?.message ?? String(r.reason),
+            });
+          }
+        }
+        if (pendingInsert.length >= CHUNK_FOR_INSERT) {
+          await this.insertPackageFacts(newId, 'testnet', pendingInsert);
+          pendingInsert = [];
+        }
+        opts.onProgress?.(probedCount + failures.length, addresses.length);
+      }
+
+      if (pendingInsert.length > 0) {
+        await this.insertPackageFacts(newId, 'testnet', pendingInsert);
+      }
+
+      const durationMs = Date.now() - startedAt;
+      await this.ecoModel
+        .updateOne(
+          { _id: newId },
+          {
+            $set: {
+              captureStage: 'complete',
+              captureDurationMs: durationMs,
+              totalStorageRebateNanos,
+            },
+          },
+        )
+        .exec();
+
+      this.logger.log(
+        `backfillTestnetFromAddressList: snapshot ${newId.toString()} promoted to complete — probed=${probedCount} failed=${failures.length} durationMs=${durationMs}`,
+      );
+
+      return {
+        snapshotId: newId,
+        probed: probedCount,
+        failures,
+        durationMs,
+      };
+    });
+  }
+
+  /**
    * Cron entrypoint for the testnet priority-sharded tick. Fires every
    * odd UTC hour (between the mainnet even-hour runs) so neither network
    * blocks the other. Only the scanner-host process runs this — the
