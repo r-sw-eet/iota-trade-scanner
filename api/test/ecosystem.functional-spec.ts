@@ -4,6 +4,7 @@ import request from 'supertest';
 import { Model } from 'mongoose';
 import { bootApp, stopApp } from './boot-app';
 import { OnchainSnapshot } from '../src/ecosystem/schemas/onchain-snapshot.schema';
+import { PackageFactDoc } from '../src/ecosystem/schemas/package-fact.schema';
 import { EcosystemService } from '../src/ecosystem/ecosystem.service';
 
 /**
@@ -20,16 +21,19 @@ import { EcosystemService } from '../src/ecosystem/ecosystem.service';
 describe('Ecosystem (functional)', () => {
   let app: INestApplication;
   let ecoModel: Model<OnchainSnapshot>;
+  let pkgFactModel: Model<PackageFactDoc>;
 
   beforeAll(async () => {
     app = await bootApp();
     ecoModel = app.get(getModelToken(OnchainSnapshot.name));
+    pkgFactModel = app.get(getModelToken(PackageFactDoc.name));
   });
 
   afterAll(() => stopApp());
 
   afterEach(async () => {
     await ecoModel.deleteMany({});
+    await pkgFactModel.deleteMany({});
     // Invalidate the in-process classify cache so cross-test seeds don't
     // serve a stale classified view from the prior test's DB contents.
     app.get(EcosystemService).invalidateClassifyCache();
@@ -40,31 +44,37 @@ describe('Ecosystem (functional)', () => {
    * module names so classification produces an empty `l1`/`l2` — the goal
    * is to exercise the `getLatest → classifyFromRaw` pipeline, not to
    * assert a specific project match (that's the unit spec's job).
+   *
+   * Post-2026-04-25 split: the snapshot header carries no `packages` field;
+   * the package fact lives in the `packagefacts` sub-collection keyed by
+   * the snapshot's `_id`.
    */
-  const seedRaw = () =>
-    ecoModel.create({
-      packages: [
-        {
-          address: '0xabc',
-          deployer: '0xdeployer',
-          storageRebateNanos: 1_000_000_000,
-          modules: ['functional_test_module_no_real_def'],
-          moduleMetrics: [
-            {
-              module: 'functional_test_module_no_real_def',
-              events: 5,
-              eventsCapped: false,
-              uniqueSenders: 2,
-            },
-          ],
-          objectHolderCount: 0,
-          fingerprint: null,
-        },
-      ],
+  const seedRaw = async () => {
+    const snap = await ecoModel.create({
       totalStorageRebateNanos: 1_000_000_000,
       networkTxTotal: 1_234_567,
       txRates: { perDay: 500 },
     });
+    await pkgFactModel.create({
+      snapshotId: snap._id,
+      network: 'mainnet',
+      address: '0xabc',
+      deployer: '0xdeployer',
+      storageRebateNanos: 1_000_000_000,
+      modules: ['functional_test_module_no_real_def'],
+      moduleMetrics: [
+        {
+          module: 'functional_test_module_no_real_def',
+          events: 5,
+          eventsCapped: false,
+          uniqueSenders: 2,
+        },
+      ],
+      objectHolderCount: 0,
+      fingerprint: null,
+    });
+    return snap;
+  };
 
   describe('GET /ecosystem', () => {
     it('returns an empty structure when no snapshot exists', async () => {
