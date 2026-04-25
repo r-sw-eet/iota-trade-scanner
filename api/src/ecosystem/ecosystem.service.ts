@@ -366,6 +366,22 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    */
   private capturingByNetwork: Record<string, boolean> = {};
 
+  /**
+   * Set of capture-lock networks THIS process holds. Populated when
+   * `acquireCaptureLock` succeeds, drained when `releaseCaptureLock` runs
+   * or by the shutdown hook. Critical for the shutdown hook: it ONLY
+   * releases locks in this set, so an externally-applied manual halt
+   * lock is preserved when a forked Node process exits.
+   *
+   * Without this guard, the bug observed 2026-04-25 recurs: a manual
+   * `docker exec node -e ...` triggered tick fires `onApplicationShutdown`
+   * on exit which used to call `releaseCaptureLock` unconditionally for
+   * BOTH networks, wiping the operator's far-future halt locks. Cron
+   * then fired unattended, racing with manual triggers, deleting
+   * in-flight partials, leaving orphan packagefacts.
+   */
+  private acquiredLocks: Set<string> = new Set();
+
   /** Returns true while the mainnet capture is actively running. */
   isCapturing(): boolean {
     return this.capturing;
@@ -748,16 +764,20 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    * newest end" — which is exactly the fresh-start behavior the new code
    * needs.
    *
-   * Also deletes any in-flight `captureStage: 'partial'` snapshots + their
-   * packagefacts. Their `captureProgressCursor` was written under forward
-   * semantics and cannot be resumed under backward walk. Manual halt
-   * policy (see `plans/testnet_inversion_thread_state.md`) means there
-   * shouldn't be any live partials when this ships, but the migration
-   * runs defensively so a future re-flip or crash-mid-deploy is safe.
-   *
    * Idempotent — after first successful run the `backfillAfterCursor`
-   * field is gone and no partials exist, so every subsequent call is a
-   * no-op.
+   * field is gone, so every subsequent call is a no-op.
+   *
+   * NOTE: an earlier version of this migration ALSO deleted in-flight
+   * `captureStage: 'partial'` snapshots + their packagefacts as a
+   * defensive cleanup of forward-direction cursors. That was actively
+   * harmful — the migration runs on every Nest boot, including forked
+   * manual-trigger processes, so it could clobber a legitimate
+   * concurrent capture mid-walk and leave orphan packagefacts behind
+   * (observed 2026-04-25 night, 651 orphans created). Removed in favor
+   * of letting the partial-resume flow handle stale cursors naturally:
+   * `finalizeMainnetSnapshot` clears `captureProgressCursor` on
+   * promote, so even a stuck legacy cursor self-resolves after one
+   * wasted capture cycle. The "partial cleanup" was never load-bearing.
    */
   private async runPaginationInversionMigration(): Promise<void> {
     // Rename cursor field on the testnet singleton. `strict: false` is
@@ -778,20 +798,6 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     if (cursorMig.modifiedCount > 0) {
       this.logger.log(
         'pagination-inversion migration: discarded legacy backfillAfterCursor on testnet singleton (old forward-direction value not valid as before: cursor in new code)',
-      );
-    }
-    // Drop any in-flight partials + their orphan pkgfacts.
-    const partials = await this.ecoModel
-      .find({ captureStage: 'partial' })
-      .select({ _id: 1, network: 1, captureProgressCursor: 1 })
-      .lean()
-      .exec();
-    if (partials.length > 0) {
-      const ids = partials.map((p) => p._id);
-      await this.ecoModel.deleteMany({ _id: { $in: ids } }).exec();
-      await this.pkgFactModel.deleteMany({ snapshotId: { $in: ids } }).exec();
-      this.logger.warn(
-        `pagination-inversion migration: deleted ${partials.length} partial snapshot(s) with forward-direction cursor — un-resumable in new code; next cron will start fresh`,
       );
     }
   }
@@ -1616,6 +1622,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     ).exec();
 
     if (ack.modifiedCount === 1) {
+      this.acquiredLocks.add(network);
       return { acquired: true, lockedUntil };
     }
 
@@ -1629,6 +1636,13 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   }
 
   private async releaseCaptureLock(network: string): Promise<void> {
+    // Only release a lock that THIS process actually acquired. Otherwise
+    // a manual halt lock applied externally (operator setting
+    // `lockedUntil: <far-future>` to freeze a network) would be wiped by
+    // any unrelated `releaseCaptureLock` call — including the shutdown
+    // hook of a forked manual-trigger process. See `acquiredLocks` field.
+    if (!this.acquiredLocks.has(network)) return;
+    this.acquiredLocks.delete(network);
     await this.captureLockModel
       .updateOne(
         { _id: network },

@@ -2103,15 +2103,28 @@ describe('EcosystemService', () => {
         expect(result.holder).toBe('unknown');
       });
 
-      it('releaseCaptureLock: clears lockedUntil/lockedAt/holderHostname on the singleton doc', async () => {
+      it('releaseCaptureLock: clears lockedUntil/lockedAt/holderHostname when this process holds the lock', async () => {
         (service as any).releaseCaptureLock.mockRestore();
         const updateOneSpy = jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue({}) });
         captureLockModel.updateOne = updateOneSpy;
+        // Mark the lock as acquired by THIS process — release is now
+        // guarded by per-process tracking (Bug 1 fix, 2026-04-25).
+        (service as any).acquiredLocks.add('testnet');
         await (service as any).releaseCaptureLock('testnet');
         expect(updateOneSpy).toHaveBeenCalledWith(
           { _id: 'testnet' },
           { $set: { lockedUntil: null, lockedAt: null, holderHostname: null } },
         );
+        expect((service as any).acquiredLocks.has('testnet')).toBe(false);
+      });
+
+      it('releaseCaptureLock: no-ops when the lock is held externally (preserves manual halt)', async () => {
+        (service as any).releaseCaptureLock.mockRestore();
+        const updateOneSpy = jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue({}) });
+        captureLockModel.updateOne = updateOneSpy;
+        // acquiredLocks is empty — this process never acquired testnet.
+        await (service as any).releaseCaptureLock('testnet');
+        expect(updateOneSpy).not.toHaveBeenCalled();
       });
     });
 
@@ -7305,34 +7318,63 @@ describe('EcosystemService', () => {
       }
     });
 
-    it('runPaginationInversionMigration unsets legacy backfillAfterCursor + deletes orphan partials', async () => {
-      // Rig the cursor + partial state: one cursor doc still carrying the
-      // old field, one in-flight partial with a forward-direction cursor.
+    it('runPaginationInversionMigration unsets legacy backfillAfterCursor + does NOT touch in-flight partials', async () => {
+      // Bug 2 fix (2026-04-25): the migration used to delete any
+      // captureStage:'partial' doc + its packagefacts on every Nest boot —
+      // which clobbered legitimate concurrent captures (forked manual-
+      // trigger Nest processes boot mid-cron-capture and the migration
+      // ran on each boot). Removed; partial-resume handles stale cursors
+      // naturally via finalizeMainnetSnapshot which clears the cursor on
+      // promote. This test pins the new contract.
       testnetCursorModel.updateOne = jest.fn().mockReturnValue({
         exec: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
       }) as any;
+      // Even if the DB has a partial, the migration should NOT find/delete it.
       ecoModel.find = jest.fn(() => ({
         select: () => ({
           lean: () => ({ exec: jest.fn().mockResolvedValue([{ _id: 'partial-id', network: 'mainnet', captureProgressCursor: 'fwd-cur' }]) }),
         }),
       })) as any;
-      const logSpy = jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
-      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      const deleteManySpy = ecoModel.deleteMany as jest.Mock;
+      deleteManySpy.mockClear();
+      const pkgFactDeleteSpy = pkgFactModel.deleteMany as jest.Mock;
+      pkgFactDeleteSpy.mockClear();
 
       await (service as any).runPaginationInversionMigration();
 
       expect(testnetCursorModel.updateOne).toHaveBeenCalledWith(
         expect.objectContaining({ _id: 'testnet' }),
         expect.objectContaining({ $unset: { backfillAfterCursor: '' }, $set: { backfillBeforeCursor: null } }),
-        // `strict: false` so the $unset actually reaches the wire —
-        // Mongoose default strict mode drops updates for fields not in
-        // the schema. Without this, modifiedCount is 1 but the legacy
-        // field persists. See ecosystem.service.ts:runPaginationInversionMigration.
         { strict: false },
       );
-      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('discarded legacy backfillAfterCursor'));
-      expect(ecoModel.deleteMany).toHaveBeenCalledWith({ _id: { $in: ['partial-id'] } });
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('deleted 1 partial snapshot'));
+      // Partials must remain untouched.
+      expect(deleteManySpy).not.toHaveBeenCalled();
+      expect(pkgFactDeleteSpy).not.toHaveBeenCalled();
+    });
+
+    it('shutdown hook releases ONLY the locks this process acquired (preserves external manual halt)', async () => {
+      // The outer beforeEach mocks releaseCaptureLock to a no-op resolver;
+      // here we want the REAL implementation so we can observe its
+      // internal Mongo writes (or lack thereof). Restore for this test.
+      (service as any).releaseCaptureLock.mockRestore();
+      // Pre-condition: simulate this process holding the testnet lock but
+      // NOT the mainnet lock (mainnet is externally halted by an operator).
+      (service as any).acquiredLocks = new Set(['testnet']);
+      const origNode = process.env.NODE_ENV;
+      delete (process.env as any).NODE_ENV;
+      const updateOneSpy = jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue({}) });
+      captureLockModel.updateOne = updateOneSpy;
+      try {
+        await service.onApplicationShutdown('SIGTERM');
+      } finally {
+        if (origNode !== undefined) process.env.NODE_ENV = origNode;
+      }
+      // Only one updateOne call — for testnet (the lock we acquired).
+      // Mainnet's external halt is preserved.
+      const calls = updateOneSpy.mock.calls;
+      const networksReleased = calls.map((c) => (c[0] as any)._id);
+      expect(networksReleased).toEqual(['testnet']);
+      expect(networksReleased).not.toContain('mainnet');
     });
 
     it('isCapturingTestnet reflects the in-flight guard', async () => {
