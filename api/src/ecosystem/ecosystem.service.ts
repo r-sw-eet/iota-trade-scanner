@@ -5095,7 +5095,17 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       lockAcquired = true;
 
       const state = await this.loadTestnetCursor();
-      const kind: 'newest' | 'backfill' = state.tickCounter % 3 === 0 ? 'newest' : 'backfill';
+      // Phase-1 of priority-shard simplification (2026-04-25): always run
+      // newest mode. Gap-closing's stalest-first probe already covers the
+      // old-territory work backfill used to do, with one fewer cursor to
+      // maintain. Kept `kind` as the union type + downstream branches
+      // intact so a revert is a 1-line flip back to the modulo dispatch;
+      // if newest+gap-close proves sufficient over a few days,
+      // `runBackfillTick` + `backfillBeforeCursor` + the union itself get
+      // deleted in a Phase-2 commit. Cast widens the literal so TS
+      // doesn't narrow follow-on `kind === 'backfill'` checks to dead
+      // code (we want them ready for revert, not deleted by the compiler).
+      const kind = 'newest' as 'newest' | 'backfill';
       this.logger.log(`Testnet tick starting: kind=${kind} tickCounter=${state.tickCounter} effectiveBudget=${effectiveBudgetMin}min`);
 
       // Load previous testnet snapshot so we can (a) check freshness in

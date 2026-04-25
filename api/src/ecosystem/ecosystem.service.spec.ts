@@ -6864,19 +6864,23 @@ describe('EcosystemService', () => {
       expect(runBackfillSpy).not.toHaveBeenCalled();
     });
 
-    it('dispatcher picks BACKFILL when tickCounter % 3 === 1 or 2', async () => {
-      for (const ctr of [1, 2]) {
+    it('Phase-1 (2026-04-25): dispatcher always picks NEWEST regardless of tickCounter; backfill path is unreachable until Phase 2 reverts or deletes', async () => {
+      // Was previously: tickCounter % 3 === 1 or 2 → backfill. Phase 1
+      // simplification stops invoking backfill — gap-closing's stalest-
+      // first probe covers the work. Backfill code stays in place for
+      // 1-line revert; next phase deletes it.
+      for (const ctr of [1, 2, 4, 5, 7, 8]) {
         seedCursor({ tickCounter: ctr });
-        const runNewestSpy = jest.spyOn(service as any, 'runNewestTick');
-        const runBackfillSpy = jest
-          .spyOn(service as any, 'runBackfillTick')
-          .mockResolvedValue({ probed: [], nextCursor: null, wrapped: true, deadlineHit: false });
+        const runNewestSpy = jest
+          .spyOn(service as any, 'runNewestTick')
+          .mockResolvedValue({ probed: [], hitFreshWindow: false, deadlineHit: false });
+        const runBackfillSpy = jest.spyOn(service as any, 'runBackfillTick');
         jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
 
         const result = await service.captureTestnetTick();
-        expect((result as any).kind).toBe('backfill');
-        expect(runBackfillSpy).toHaveBeenCalled();
-        expect(runNewestSpy).not.toHaveBeenCalled();
+        expect((result as any).kind).toBe('newest');
+        expect(runNewestSpy).toHaveBeenCalled();
+        expect(runBackfillSpy).not.toHaveBeenCalled();
         jest.restoreAllMocks();
       }
     });
@@ -7694,7 +7698,11 @@ describe('EcosystemService', () => {
       expect(pageSpy).toHaveBeenCalledTimes(2);
     });
 
-    it('captureTestnetTick persists a partial snapshot + advances cursor even when runBackfillTick returns an error', async () => {
+    // Skipped Phase 1 (2026-04-25): backfill path no longer reachable from
+    // captureTestnetTick (dispatcher hard-coded to 'newest'). Test stays
+    // in source as documentation of the legacy path. Phase 2 deletes
+    // runBackfillTick and this test together.
+    it.skip('captureTestnetTick persists a partial snapshot + advances cursor even when runBackfillTick returns an error', async () => {
       // Wire the tick to look like tickCounter=1 (backfill), have runBackfillTick
       // return partial results with an error — the final doc must still land
       // in onchainsnapshots with the 2 probed packages, and the cursor must
@@ -8191,7 +8199,9 @@ describe('EcosystemService', () => {
       );
     });
 
-    it('captureTestnetTick backfill path updates backfillBeforeCursor (wrapped → null, otherwise next cursor)', async () => {
+    // Skipped Phase 1 (2026-04-25): same as above — backfill path
+    // unreachable from the dispatcher. Phase 2 deletes.
+    it.skip('captureTestnetTick backfill path updates backfillBeforeCursor (wrapped → null, otherwise next cursor)', async () => {
       // Wrapped case.
       seedCursor({ tickCounter: 1, backfillBeforeCursor: 'prev-cursor' });
       jest
