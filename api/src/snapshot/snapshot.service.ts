@@ -169,17 +169,6 @@ export class SnapshotService implements OnModuleInit {
 
   private computeRolling(slice: any[]): RollingWindow {
     const n = slice.length;
-    if (n === 0) {
-      return {
-        epochs: 0,
-        avgGasBurned: 0,
-        avgStorageNetInflow: 0,
-        avgStorageFeesIn: 0,
-        avgStorageRebatesOut: 0,
-        avgTransactions: 0,
-        avgStakeRewards: 0,
-      };
-    }
     const sum = {
       g: 0,
       ni: 0,

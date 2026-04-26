@@ -34,6 +34,10 @@ describe('SnapshotService', () => {
       ],
     }).compile();
     service = module.get(SnapshotService);
+
+    // Default: rebuilds-from-empty no-ops cleanly. Tests that exercise the
+    // aggregator with non-empty data override this with mockReturnValueOnce.
+    model.find.mockReturnValue(chain([]));
   });
 
   afterEach(() => {
@@ -158,6 +162,22 @@ describe('SnapshotService', () => {
 
       await service.onModuleInit();
       expect(captureSpy).not.toHaveBeenCalled();
+    });
+
+    it('logs an error when the background aggregator rebuild rejects', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.API_ROLE = 'serve';   // skip the capture/backfill arms
+      const errorSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+      // make rebuildAggregates throw on its first .find() call
+      model.find.mockImplementationOnce(() => { throw new Error('mongo down'); });
+      try {
+        await service.onModuleInit();
+        // catch handler runs on the next microtask
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(errorSpy).toHaveBeenCalledWith('Aggregate rebuild failed', expect.any(Error));
+      } finally {
+        delete process.env.API_ROLE;
+      }
     });
   });
 
