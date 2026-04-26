@@ -2,20 +2,28 @@ import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
 /**
- * Persistent state for the priority-sharded testnet capture (Phase 4c in
- * `plans/plan_testnet_support.md`). Singleton doc per network — `_id` is
- * the network literal (`'testnet'` today, extensible for devnet). The
- * `tickCounter % 3` decides whether the next tick runs a newest pass
- * (counter % 3 === 0) or a backfill pass (1 or 2). Backfill resumes from
- * `backfillBeforeCursor`; wraps to `null` on `hasPreviousPage: false` (we've
- * reached genesis and start over from the newest end next cycle).
+ * Persistent state for the testnet two-pipeline capture (Phase 2 of
+ * `plans/plan_testnet_tutorial_filter.md`). Singleton doc per network
+ * — `_id` is the network literal (`'testnet'` today, extensible for
+ * devnet). Each tick runs Pipeline A (discovery: paginate newest →
+ * shallow facts + tutorial flag) followed by Pipeline B (deep-probe
+ * stalest non-tutorial in `packagefacts`). The cursor doc only carries
+ * diagnostics now — discovery's bail conditions (freshness window /
+ * genesis / deadline) and deep-probe's stalest-first aggregation are
+ * stateless across ticks.
  *
  * Lightweight collection — O(1) reads and writes per cron tick. Safe to
  * drop; next tick writes fresh state.
  *
- * Field renamed 2026-04-25 from `backfillAfterCursor` during the pagination
- * direction inversion (`plans/plan_pagination_inversion_and_gap_closing.md`).
- * A one-shot migration in `onModuleInit` `$unset`s the old field on deploy.
+ * History:
+ *   - 2026-04-25: field renamed from `backfillAfterCursor` to
+ *     `backfillBeforeCursor` during the pagination-direction inversion
+ *     (`plans/plan_pagination_inversion_and_gap_closing.md`).
+ *   - 2026-04-26: two-pipeline refactor deleted the kind-union dispatcher
+ *     and the `backfillBeforeCursor` field entirely (Pipeline B's
+ *     stalest-first aggregation subsumes the work backfill used to do).
+ *     `runPaginationInversionMigration` `$unset`s both legacy field
+ *     names so old singletons decode cleanly.
  */
 @Schema({ timestamps: true, collection: 'testnetcursors', _id: false })
 export class TestnetCursor extends Document<string, any, any> {
@@ -27,25 +35,13 @@ export class TestnetCursor extends Document<string, any, any> {
   @Prop({ type: String, required: true }) declare _id: string;
 
   /**
-   * Monotonic counter incremented once per tick. `tickCounter % 3`:
-   *   - 0 → newest-tick (paginate from `null` cursor = newest end, stop on fresh)
-   *   - 1 or 2 → backfill-tick (resume from `backfillBeforeCursor`, walk backward into the past)
-   * Gives backfill 66% of ticks so the initial catch-up completes in
-   * 3.5–7 days depending on package count.
+   * Monotonic counter incremented once per tick. Pure diagnostic now
+   * that the kind-union dispatcher is gone — every tick runs the same
+   * two-pipeline flow regardless of value. Surfaced in logs so operator
+   * sweeps over container logs can correlate "Nth tick since boot" with
+   * outcomes.
    */
   @Prop({ type: Number, required: true, default: 0 }) tickCounter: number;
-
-  /**
-   * Opaque GraphQL `before` cursor marking where the backfill paginator
-   * left off (walks newest→oldest). `null` on first use or after a wrap
-   * (paginator returned `hasPreviousPage: false`, reached genesis).
-   * Newest-tick never reads or writes this field.
-   */
-  @Prop({ type: String, default: null }) backfillBeforeCursor: string | null;
-
-  /** Diagnostic: which mode the most recent tick ran. */
-  @Prop({ type: String, enum: ['newest', 'backfill'], default: null })
-  lastTickKind: 'newest' | 'backfill' | null;
 
   /** Diagnostic: when the most recent tick completed (wall-clock). */
   @Prop({ type: Date, default: null }) lastTickAt: Date | null;

@@ -373,8 +373,6 @@ describe('EcosystemService', () => {
       create: jest.fn().mockResolvedValue({
         _id: 'testnet',
         tickCounter: 0,
-        backfillBeforeCursor: null,
-        lastTickKind: null,
         lastTickAt: null,
         lastTickPackagesProbed: 0,
       }),
@@ -6808,30 +6806,36 @@ describe('EcosystemService', () => {
     });
   });
 
-  // ---------- Phase 4c: testnet priority-sharded capture ----------
+  // ---------- Testnet two-pipeline capture (discovery + deep probe) ----------
 
-  describe('testnet priority-sharded capture (Phase 4c)', () => {
-    // Minimal PackageInfo-shaped object. `probeOnePackage` reads
-    // `pkg.address`, `pkg.modules.nodes`, `pkg.storageRebate`, and
+  describe('testnet two-pipeline capture', () => {
+    // Minimal PackageInfo-shaped object — same fields `fetchPackagePage`
+    // returns plus what `probeOnePackage` reads. `pkg.address`,
+    // `pkg.modules.nodes`, `pkg.storageRebate`, and
     // `pkg.previousTransactionBlock.{sender,effects}` — everything else
     // comes from subsequent GraphQL queries.
-    const pkgInfo = (address: string, modules: string[] = []) => ({
+    const pkgInfo = (
+      address: string,
+      modules: string[] = [],
+      extra: { deployer?: string; publishedAt?: string; storageRebate?: string } = {},
+    ) => ({
       address,
-      storageRebate: '0',
+      storageRebate: extra.storageRebate ?? '0',
       modules: { nodes: modules.map((m) => ({ name: m })) },
-      previousTransactionBlock: null,
+      previousTransactionBlock:
+        extra.deployer || extra.publishedAt
+          ? {
+              sender: extra.deployer ? { address: extra.deployer } : null,
+              effects: extra.publishedAt ? { timestamp: extra.publishedAt } : null,
+            }
+          : null,
     });
 
     /** Preseed the testnet cursor doc so the dispatcher reads a known tickCounter. */
-    const seedCursor = (state: {
-      tickCounter: number;
-      backfillBeforeCursor?: string | null;
-    }) => {
+    const seedCursor = (state: { tickCounter: number }) => {
       const doc = {
         _id: 'testnet',
         tickCounter: state.tickCounter,
-        backfillBeforeCursor: state.backfillBeforeCursor ?? null,
-        lastTickKind: null,
         lastTickAt: null,
         lastTickPackagesProbed: 0,
       };
@@ -6847,143 +6851,921 @@ describe('EcosystemService', () => {
       ecoModel.create = jest.fn().mockResolvedValue({ _id: 'new-testnet-snap' });
       // Reset flags in case a prior test left capturingByNetwork latched.
       (service as any).capturingByNetwork = {};
+      // The new flow runs Pipeline B (which calls aggregate) on every
+      // tick. Default: no candidates so deep-probe is a silent no-op
+      // unless a test seeds the aggregate explicitly.
+      pkgFactModel.aggregate = jest.fn(() => ({ exec: jest.fn().mockResolvedValue([]) })) as any;
     });
 
-    it('dispatcher picks NEWEST when tickCounter % 3 === 0', async () => {
-      seedCursor({ tickCounter: 0 });
-      // No previous pkg, paginator returns empty → runNewestTick exits fast.
-      const runNewestSpy = jest
-        .spyOn(service as any, 'runNewestTick')
-        .mockResolvedValue({ probed: [], hitFreshWindow: false, deadlineHit: false });
-      const runBackfillSpy = jest.spyOn(service as any, 'runBackfillTick');
-      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+    // ----- Pipeline A: runTestnetDiscoveryTick -----
 
-      const result = await service.captureTestnetTick();
-      expect((result as any).kind).toBe('newest');
-      expect(runNewestSpy).toHaveBeenCalled();
-      expect(runBackfillSpy).not.toHaveBeenCalled();
-    });
-
-    it('Phase-1 (2026-04-25): dispatcher always picks NEWEST regardless of tickCounter; backfill path is unreachable until Phase 2 reverts or deletes', async () => {
-      // Was previously: tickCounter % 3 === 1 or 2 → backfill. Phase 1
-      // simplification stops invoking backfill — gap-closing's stalest-
-      // first probe covers the work. Backfill code stays in place for
-      // 1-line revert; next phase deletes it.
-      for (const ctr of [1, 2, 4, 5, 7, 8]) {
-        seedCursor({ tickCounter: ctr });
-        const runNewestSpy = jest
-          .spyOn(service as any, 'runNewestTick')
-          .mockResolvedValue({ probed: [], hitFreshWindow: false, deadlineHit: false });
-        const runBackfillSpy = jest.spyOn(service as any, 'runBackfillTick');
-        jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
-
-        const result = await service.captureTestnetTick();
-        expect((result as any).kind).toBe('newest');
-        expect(runNewestSpy).toHaveBeenCalled();
-        expect(runBackfillSpy).not.toHaveBeenCalled();
-        jest.restoreAllMocks();
-      }
-    });
-
-    it('newest-tick stops when it hits a package with lastProbedAt inside the freshness window', async () => {
-      // Seed one "previous" package whose lastProbedAt is 1h ago — well
-      // within the 18h freshness window. The paginator returns that same
-      // address on the first page; `runNewestTick` must short-circuit
-      // without probing it.
-      const freshAddress = '0xfresh';
-      const freshFact: any = {
-        address: freshAddress,
-        modules: ['m'],
-        moduleMetrics: [],
-        storageRebateNanos: 0,
-        lastProbedAt: new Date(Date.now() - 60 * 60 * 1000), // 1h ago
-      };
-      const previousByAddress = new Map<string, any>([[freshAddress.toLowerCase(), freshFact]]);
-      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
-        nodes: [pkgInfo(freshAddress, ['m'])],
-        hasPreviousPage: false,
-        startCursor: null,
+    describe('runTestnetDiscoveryTick', () => {
+      it('builds shallow facts from the paginator newest-first; isTutorial set per the catalog; lastProbedAt left null', async () => {
+        // Three packages: two unique (non-tutorial) and one whose modules
+        // match a catalog signature (`'fixed18|sfixed18|uint_macro'`).
+        jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+          nodes: [
+            pkgInfo('0xreal1', ['unique_real_a'], { deployer: '0xDEPL', publishedAt: '2026-04-20T00:00:00Z', storageRebate: '1000' }),
+            pkgInfo('0xworkshop', ['fixed18', 'sfixed18', 'uint_macro'], { deployer: '0xATTENDEE', storageRebate: '500' }),
+            pkgInfo('0xreal2', ['unique_real_b']),
+          ],
+          hasPreviousPage: false,
+          startCursor: null,
+        });
+        const probeSpy = jest.spyOn(service as any, 'probeOnePackage');
+        const fetchEntrySpy = jest.spyOn(service as any, 'fetchEntryFunctions');
+        const now = new Date('2026-04-26T18:00:00Z');
+        const result = await (service as any).runTestnetDiscoveryTick({
+          previousByAddress: new Map(),
+          freshnessWindowMs: 18 * 60 * 60 * 1000,
+          deadlineMs: Date.now() + 60_000,
+          now,
+        });
+        expect(result.discovered).toHaveLength(3);
+        expect(result.wrapped).toBe(true);
+        expect(result.hitFreshWindow).toBe(false);
+        expect(result.deadlineHit).toBe(false);
+        expect(result.error).toBeNull();
+        // Shallow facts only — no probe / no GraphQL second pass.
+        expect(probeSpy).not.toHaveBeenCalled();
+        expect(fetchEntrySpy).not.toHaveBeenCalled();
+        // isTutorial discriminator wired in correctly.
+        const byAddr = new Map(result.discovered.map((p: any) => [p.address, p]));
+        expect((byAddr.get('0xreal1') as any).isTutorial).toBe(false);
+        expect((byAddr.get('0xworkshop') as any).isTutorial).toBe(true);
+        expect((byAddr.get('0xreal2') as any).isTutorial).toBe(false);
+        // lastProbedAt is the explicit "needs deep probe" signal.
+        for (const fact of result.discovered) {
+          expect(fact.lastProbedAt).toBeNull();
+        }
+        // Cheap-discoverable fields populated; deep fields default.
+        expect((byAddr.get('0xreal1') as any).deployer).toBe('0xdepl');
+        expect((byAddr.get('0xreal1') as any).storageRebateNanos).toBe(1000);
+        expect((byAddr.get('0xreal1') as any).publishedAt).toEqual(new Date('2026-04-20T00:00:00Z'));
+        expect((byAddr.get('0xreal1') as any).moduleMetrics).toEqual([]);
+        expect((byAddr.get('0xreal1') as any).fingerprint).toBeNull();
       });
-      const probeSpy = jest.spyOn(service as any, 'probeOnePackage');
-      const result = await (service as any).runNewestTick(
-        previousByAddress,
-        new Date(),
-        Date.now() + 60_000,
-        new Map(),
-      );
-      expect(result.hitFreshWindow).toBe(true);
-      expect(result.probed).toHaveLength(0);
-      expect(probeSpy).not.toHaveBeenCalled();
+
+      it('bails on the freshness window when an in-window deep-probed address appears (partial set, hitFreshWindow=true)', async () => {
+        const freshAddress = '0xfresh';
+        const olderAddress = '0xolder';
+        // Previous deep-probe was 1h ago — well inside 18h window.
+        const previousByAddress = new Map<string, any>([
+          [
+            freshAddress.toLowerCase(),
+            { address: freshAddress, modules: [], moduleMetrics: [], storageRebateNanos: 0, lastProbedAt: new Date(Date.now() - 60 * 60 * 1000) },
+          ],
+        ]);
+        jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+          nodes: [pkgInfo(olderAddress, ['m']), pkgInfo(freshAddress, ['m'])],
+          hasPreviousPage: true,
+          startCursor: 'cur-1',
+        });
+        const result = await (service as any).runTestnetDiscoveryTick({
+          previousByAddress,
+          freshnessWindowMs: 18 * 60 * 60 * 1000,
+          deadlineMs: Date.now() + 60_000,
+          now: new Date(),
+        });
+        // Only the older one made it in; the fresh-window check stopped
+        // the walk before adding the second.
+        expect(result.hitFreshWindow).toBe(true);
+        expect(result.discovered.map((p: any) => p.address)).toEqual([olderAddress]);
+        expect(result.wrapped).toBe(false);
+        expect(result.deadlineHit).toBe(false);
+      });
+
+      it('bails on genesis (hasPreviousPage:false) with wrapped=true', async () => {
+        jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+          nodes: [pkgInfo('0xa'), pkgInfo('0xb')],
+          hasPreviousPage: false,
+          startCursor: null,
+        });
+        const result = await (service as any).runTestnetDiscoveryTick({
+          previousByAddress: new Map(),
+          freshnessWindowMs: 18 * 60 * 60 * 1000,
+          deadlineMs: Date.now() + 60_000,
+          now: new Date(),
+        });
+        expect(result.wrapped).toBe(true);
+        expect(result.discovered).toHaveLength(2);
+      });
+
+      it('bails on a defensive null startCursor (hasPreviousPage:true, startCursor:null) with wrapped=true', async () => {
+        // Defensive branch — paginator can't advance, so treat as wrap.
+        jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+          nodes: [pkgInfo('0xx')],
+          hasPreviousPage: true,
+          startCursor: null,
+        });
+        const result = await (service as any).runTestnetDiscoveryTick({
+          previousByAddress: new Map(),
+          freshnessWindowMs: 18 * 60 * 60 * 1000,
+          deadlineMs: Date.now() + 60_000,
+          now: new Date(),
+        });
+        expect(result.wrapped).toBe(true);
+        expect(result.discovered).toHaveLength(1);
+      });
+
+      it('bails on deadline at the top of the page-fetch loop (no fetchPackagePage call)', async () => {
+        const fetchSpy = jest.spyOn(service as any, 'fetchPackagePage');
+        const result = await (service as any).runTestnetDiscoveryTick({
+          previousByAddress: new Map(),
+          freshnessWindowMs: 18 * 60 * 60 * 1000,
+          deadlineMs: Date.now() - 1,
+          now: new Date(),
+        });
+        expect(result.deadlineHit).toBe(true);
+        expect(result.discovered).toHaveLength(0);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+
+      it('bails on deadline mid-page after a node is appended', async () => {
+        jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+          nodes: [pkgInfo('0xa'), pkgInfo('0xb')],
+          hasPreviousPage: true,
+          startCursor: 'more',
+        });
+        // Advance Date.now per call so the inner-loop check trips after
+        // the first node is appended.
+        const origNow = Date.now;
+        let t = 0;
+        jest.spyOn(Date, 'now').mockImplementation(() => (t += 600));
+        const dl = 1000;
+        try {
+          const result = await (service as any).runTestnetDiscoveryTick({
+            previousByAddress: new Map(),
+            freshnessWindowMs: 18 * 60 * 60 * 1000,
+            deadlineMs: dl,
+            now: new Date(),
+          });
+          expect(result.deadlineHit).toBe(true);
+          expect(result.discovered.length).toBeGreaterThanOrEqual(1);
+          expect(result.discovered.length).toBeLessThanOrEqual(2);
+          expect(result.wrapped).toBe(false);
+        } finally {
+          (Date.now as any).mockRestore?.();
+          Date.now = origNow;
+        }
+      });
+
+      it('returns partial discovered + non-null error when fetchPackagePage throws (retries exhausted)', async () => {
+        // Mid-walk throw — first page yields one node, second page throws.
+        jest
+          .spyOn(service as any, 'fetchPackagePage')
+          .mockResolvedValueOnce({
+            nodes: [pkgInfo('0xok', ['m'])],
+            hasPreviousPage: true,
+            startCursor: 'cur-1',
+          })
+          .mockRejectedValueOnce(new Error('Query request timed out. Limit: 40s'));
+        const result = await (service as any).runTestnetDiscoveryTick({
+          previousByAddress: new Map(),
+          freshnessWindowMs: 18 * 60 * 60 * 1000,
+          deadlineMs: Date.now() + 60_000,
+          now: new Date(),
+        });
+        expect(result.discovered).toHaveLength(1);
+        expect(result.discovered[0].address).toBe('0xok');
+        expect(result.error).not.toBeNull();
+        expect((result.error as Error).message).toMatch(/timed out/i);
+        expect(result.wrapped).toBe(false);
+        expect(result.hitFreshWindow).toBe(false);
+        expect(result.deadlineHit).toBe(false);
+      });
+
+      it('shallow-discovered facts (lastProbedAt:null) DO NOT trip the freshness window — only deep-probed history qualifies', async () => {
+        // Regression guard: re-discovering an already-shallow-known
+        // address must not bail the walk. Otherwise Pipeline A and B
+        // would deadlock (B never runs on a snapshot whose A bailed).
+        const shallowAddress = '0xshallow';
+        const previousByAddress = new Map<string, any>([
+          [
+            shallowAddress.toLowerCase(),
+            { address: shallowAddress, modules: ['m'], moduleMetrics: [], storageRebateNanos: 0, lastProbedAt: null },
+          ],
+        ]);
+        jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+          nodes: [pkgInfo(shallowAddress, ['m']), pkgInfo('0xnew')],
+          hasPreviousPage: false,
+          startCursor: null,
+        });
+        const result = await (service as any).runTestnetDiscoveryTick({
+          previousByAddress,
+          freshnessWindowMs: 18 * 60 * 60 * 1000,
+          deadlineMs: Date.now() + 60_000,
+          now: new Date(),
+        });
+        expect(result.hitFreshWindow).toBe(false);
+        expect(result.discovered.map((p: any) => p.address)).toEqual([shallowAddress, '0xnew']);
+      });
     });
 
-    it('backfill-tick wraps `backfillBeforeCursor` to null on hasPreviousPage: false', async () => {
+    // ----- Pipeline B: runTestnetDeepProbeTick -----
+
+    describe('runTestnetDeepProbeTick', () => {
+      it('returns deadlineHit immediately when the budget is already gone', async () => {
+        const aggSpy = pkgFactModel.aggregate;
+        const result = await (service as any).runTestnetDeepProbeTick({
+          now: new Date(),
+          deadlineMs: Date.now() - 1,
+          displayByPackage: new Map(),
+        });
+        expect(result.deadlineHit).toBe(true);
+        expect(result.probed).toEqual([]);
+        // Aggregate not even invoked when the deadline check trips first.
+        expect(aggSpy).not.toHaveBeenCalled();
+      });
+
+      it('returns exhaustedCandidates=true when the aggregate yields no addresses', async () => {
+        pkgFactModel.aggregate = jest.fn(() => ({ exec: jest.fn().mockResolvedValue([]) })) as any;
+        const result = await (service as any).runTestnetDeepProbeTick({
+          now: new Date(),
+          deadlineMs: Date.now() + 60_000,
+          displayByPackage: new Map(),
+        });
+        expect(result.exhaustedCandidates).toBe(true);
+        expect(result.probed).toEqual([]);
+      });
+
+      it('aggregate is a simple full-sweep — $match (testnet + non-tutorial) + $group, no $sort/$limit', async () => {
+        // The new shape re-probes every non-tutorial address per tick;
+        // staleness ordering and the 500-cap are gone. Mock records the
+        // pipeline so we can pin the structural shape.
+        const execSpy = jest.fn().mockResolvedValue([]);
+        const aggSpy = jest.fn(() => ({ exec: execSpy })) as any;
+        pkgFactModel.aggregate = aggSpy;
+        await (service as any).runTestnetDeepProbeTick({
+          now: new Date(),
+          deadlineMs: Date.now() + 60_000,
+          displayByPackage: new Map(),
+        });
+        const pipeline = aggSpy.mock.calls[0][0] as any[];
+        // Match stage pins network + non-tutorial filter.
+        expect(pipeline[0]).toEqual({ $match: { network: 'testnet', isTutorial: false } });
+        // No $sort stages — order doesn't matter for a full sweep.
+        expect(pipeline.some((s: any) => s.$sort)).toBe(false);
+        // No $limit stages — cap removed.
+        expect(pipeline.some((s: any) => s.$limit)).toBe(false);
+        // $group reduces to one row per address; no projected fields beyond _id.
+        const groupStage = pipeline.find((s: any) => s.$group);
+        expect(groupStage).toEqual({ $group: { _id: '$address' } });
+      });
+
+      it('probes the full non-tutorial pool with vanish-skip (concurrency=1 for deterministic ordering)', async () => {
+        pkgFactModel.aggregate = jest.fn(() => ({
+          exec: jest.fn().mockResolvedValue([
+            { _id: '0xa' },
+            { _id: '0xb' },
+            { _id: '0xvanished' },
+            { _id: '0xc' },
+          ]),
+        })) as any;
+        jest.spyOn(service as any, 'fetchPackageByAddress').mockImplementation(async (addr: any) => {
+          if (addr === '0xvanished') return null;
+          return {
+            address: addr,
+            storageRebate: '0',
+            modules: { nodes: [{ name: 'm' }] },
+            previousTransactionBlock: null,
+          };
+        });
+        const probeSpy = jest.spyOn(service as any, 'probeOnePackage').mockImplementation(
+          async (info: any, _d: any, now: Date, network: string) => ({
+            address: info.address,
+            deployer: null,
+            storageRebateNanos: 0,
+            modules: ['m'],
+            moduleMetrics: [],
+            objectHolderCount: 0,
+            objectCount: 0,
+            transactions: 0,
+            transactionsCapped: false,
+            objectTypeCounts: [],
+            fingerprint: null,
+            publishedAt: null,
+            lastProbedAt: now,
+            isTutorial: false,
+            __seenNetwork: network,
+          }),
+        );
+        const result = await (service as any).runTestnetDeepProbeTick({
+          now: new Date(),
+          deadlineMs: Date.now() + 60_000,
+          displayByPackage: new Map(),
+          concurrency: 1,
+        });
+        // Every non-vanished address probed; vanished one silently skipped.
+        expect(result.probed.map((p: any) => p.address)).toEqual(['0xa', '0xb', '0xc']);
+        expect(result.exhaustedCandidates).toBe(true);
+        expect(result.deadlineHit).toBe(false);
+        expect(result.failures).toEqual([]);
+        // probeOnePackage gets the testnet network argument so its
+        // tutorial-shortcut never fires (the upstream $match filter is
+        // the primary guarantee — this is belt-and-suspenders).
+        expect(probeSpy.mock.calls[0][3]).toBe('testnet');
+      });
+
+      it('records per-address failures + warns for probe throws without aborting the whole run', async () => {
+        pkgFactModel.aggregate = jest.fn(() => ({
+          exec: jest.fn().mockResolvedValue([
+            { _id: '0xflake' },
+            { _id: '0xok' },
+          ]),
+        })) as any;
+        // Echo the queried address so probeOnePackage's `info.address` is
+        // distinct per row — otherwise both probes report the same address.
+        jest.spyOn(service as any, 'fetchPackageByAddress').mockImplementation(async (addr: any) => ({
+          address: addr,
+          storageRebate: '0',
+          modules: { nodes: [{ name: 'm' }] },
+          previousTransactionBlock: null,
+        }));
+        const probeSpy = jest.spyOn(service as any, 'probeOnePackage');
+        probeSpy.mockImplementationOnce(async () => {
+          throw new Error('simulated probe fail');
+        });
+        probeSpy.mockImplementation(async (info: any, _d: any, now: Date) => ({
+          address: info.address,
+          deployer: null,
+          storageRebateNanos: 0,
+          modules: ['m'],
+          moduleMetrics: [],
+          objectHolderCount: 0,
+          objectCount: 0,
+          transactions: 0,
+          transactionsCapped: false,
+          objectTypeCounts: [],
+          fingerprint: null,
+          publishedAt: null,
+          lastProbedAt: now,
+          isTutorial: false,
+        }));
+        const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+        const result = await (service as any).runTestnetDeepProbeTick({
+          now: new Date(),
+          deadlineMs: Date.now() + 60_000,
+          displayByPackage: new Map(),
+          concurrency: 1,
+        });
+        expect(result.probed.map((p: any) => p.address)).toEqual(['0xok']);
+        expect(result.failures).toEqual([{ address: '0xflake', error: 'simulated probe fail' }]);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('testnet deep-probe: skipped 0xflake'));
+      });
+
+      it('bails mid-walk when the deadline trips between batches', async () => {
+        // Three "addresses" — at concurrency=1 the deadline check fires
+        // before each batch (i.e. before each probe). The first probe
+        // pushes the clock past the deadline so the second iteration
+        // bails with deadlineHit=true.
+        pkgFactModel.aggregate = jest.fn(() => ({
+          exec: jest.fn().mockResolvedValue([
+            { _id: '0xfirst' },
+            { _id: '0xsecond' },
+            { _id: '0xthird' },
+          ]),
+        })) as any;
+        jest.spyOn(service as any, 'fetchPackageByAddress').mockImplementation(async (addr: any) => ({
+          address: addr,
+          storageRebate: '0',
+          modules: { nodes: [{ name: 'm' }] },
+          previousTransactionBlock: null,
+        }));
+        let t = 1_000_000_000;
+        jest.spyOn(Date, 'now').mockImplementation(() => t);
+        const deadlineMs = t + 1;
+        jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (info: any, _d: any, now: Date) => {
+          t += 500;
+          return {
+            address: info.address,
+            deployer: null,
+            storageRebateNanos: 0,
+            modules: [],
+            moduleMetrics: [],
+            objectHolderCount: 0,
+            objectCount: 0,
+            transactions: 0,
+            transactionsCapped: false,
+            objectTypeCounts: [],
+            fingerprint: null,
+            publishedAt: null,
+            lastProbedAt: now,
+            isTutorial: false,
+          };
+        });
+        const result = await (service as any).runTestnetDeepProbeTick({
+          now: new Date(),
+          deadlineMs,
+          displayByPackage: new Map(),
+          concurrency: 1,
+        });
+        expect(result.deadlineHit).toBe(true);
+        expect(result.probed.length).toBeGreaterThanOrEqual(1);
+        expect(result.probed.length).toBeLessThan(3);
+        expect(result.exhaustedCandidates).toBe(false);
+      });
+
+      it('concurrency-15 batches via Promise.allSettled — 30 addresses with 5 sprinkled failures returns probed=25 + failures.length=5, no abort', async () => {
+        const addresses = Array.from({ length: 30 }, (_, i) => `0xaddr${i.toString().padStart(2, '0')}`);
+        const failingSet = new Set(['0xaddr03', '0xaddr07', '0xaddr15', '0xaddr22', '0xaddr29']);
+        pkgFactModel.aggregate = jest.fn(() => ({
+          exec: jest.fn().mockResolvedValue(addresses.map((a) => ({ _id: a }))),
+        })) as any;
+        const fetchSpy = jest.spyOn(service as any, 'fetchPackageByAddress').mockImplementation(async (addr: any) => ({
+          address: addr,
+          storageRebate: '0',
+          modules: { nodes: [{ name: 'm' }] },
+          previousTransactionBlock: null,
+        }));
+        jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (info: any, _d: any, now: Date) => {
+          if (failingSet.has(info.address)) {
+            throw new Error(`probe failed for ${info.address}`);
+          }
+          return {
+            address: info.address,
+            deployer: null,
+            storageRebateNanos: 0,
+            modules: ['m'],
+            moduleMetrics: [],
+            objectHolderCount: 0,
+            objectCount: 0,
+            transactions: 0,
+            transactionsCapped: false,
+            objectTypeCounts: [],
+            fingerprint: null,
+            publishedAt: null,
+            lastProbedAt: now,
+            isTutorial: false,
+          };
+        });
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+
+        const result = await (service as any).runTestnetDeepProbeTick({
+          now: new Date(),
+          deadlineMs: Date.now() + 60_000,
+          displayByPackage: new Map(),
+          concurrency: 15,
+        });
+
+        // Every address attempted (no early abort on partial batch failures).
+        expect(fetchSpy).toHaveBeenCalledTimes(30);
+        expect(result.probed.length).toBe(25);
+        expect(result.failures.length).toBe(5);
+        expect(new Set(result.failures.map((f: any) => f.address))).toEqual(failingSet);
+        expect(result.exhaustedCandidates).toBe(true);
+        expect(result.deadlineHit).toBe(false);
+      });
+
+      it('concurrency=1 produces serial ordering — max-in-flight never exceeds 1', async () => {
+        const addresses = ['0xa', '0xb', '0xc', '0xd', '0xe'];
+        pkgFactModel.aggregate = jest.fn(() => ({
+          exec: jest.fn().mockResolvedValue(addresses.map((a) => ({ _id: a }))),
+        })) as any;
+        let inFlight = 0;
+        let maxInFlight = 0;
+        jest.spyOn(service as any, 'fetchPackageByAddress').mockImplementation(async (addr: any) => {
+          inFlight += 1;
+          if (inFlight > maxInFlight) maxInFlight = inFlight;
+          // Yield so a parallel run would have multiple in flight here.
+          await Promise.resolve();
+          await Promise.resolve();
+          inFlight -= 1;
+          return {
+            address: addr,
+            storageRebate: '0',
+            modules: { nodes: [{ name: 'm' }] },
+            previousTransactionBlock: null,
+          };
+        });
+        jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (info: any, _d: any, now: Date) => ({
+          address: info.address,
+          deployer: null,
+          storageRebateNanos: 0,
+          modules: ['m'],
+          moduleMetrics: [],
+          objectHolderCount: 0,
+          objectCount: 0,
+          transactions: 0,
+          transactionsCapped: false,
+          objectTypeCounts: [],
+          fingerprint: null,
+          publishedAt: null,
+          lastProbedAt: now,
+          isTutorial: false,
+        }));
+
+        const result = await (service as any).runTestnetDeepProbeTick({
+          now: new Date(),
+          deadlineMs: Date.now() + 60_000,
+          displayByPackage: new Map(),
+          concurrency: 1,
+        });
+
+        expect(result.probed.length).toBe(5);
+        expect(maxInFlight).toBe(1);
+      });
+    });
+
+    // ----- captureTestnetTick: end-to-end two-pipeline flow -----
+
+    it('captureTestnetTick: empty discovery + empty deep-probe → header-only snapshot, cursor advances', async () => {
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
       jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
         nodes: [],
         hasPreviousPage: false,
-        startCursor: 'cursor-that-should-be-ignored',
+        startCursor: null,
       });
-      const result = await (service as any).runBackfillTick(
-        'resume-from-here',
-        new Date(),
-        Date.now() + 60_000,
-        new Map(),
+
+      const result = await service.captureTestnetTick();
+
+      // Header doc tagged testnet, no `packages` field embedded.
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ network: 'testnet', captureStage: 'complete' }),
       );
-      expect(result.wrapped).toBe(true);
-      expect(result.nextCursor).toBeNull();
+      const createArg = (ecoModel.create as jest.Mock).mock.calls[0][0];
+      expect(createArg.packages).toBeUndefined();
+      // Empty discovered + no deep-probed + no copy-forward → no insertMany.
+      expect(pkgFactModel.insertMany).not.toHaveBeenCalled();
+      // Cursor advances; no `lastTickKind` / `backfillBeforeCursor` fields
+      // — those are dead now.
+      expect(testnetCursorModel.updateOne).toHaveBeenCalledWith(
+        { _id: 'testnet' },
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            tickCounter: 1,
+            lastTickPackagesProbed: 0,
+          }),
+        }),
+        { upsert: true },
+      );
+      const updateArg = (testnetCursorModel.updateOne as jest.Mock).mock.calls[0][1];
+      expect(updateArg.$set.lastTickKind).toBeUndefined();
+      expect(updateArg.$set.backfillBeforeCursor).toBeUndefined();
+
+      expect((result as any).discovered).toBe(0);
+      expect((result as any).deepProbed).toBe(0);
+      expect((result as any).wrapped).toBe(true);
     });
 
-    it('copy-forward snapshot contains re-probed + previously-known packages (both carry lastProbedAt)', () => {
-      const oldTime = new Date('2026-04-20T00:00:00Z');
-      const now = new Date('2026-04-23T00:00:00Z');
-      const previous: any[] = Array.from({ length: 10 }, (_, i) => ({
-        address: `0xprev${i}`,
-        storageRebateNanos: 0,
-        modules: [],
-        moduleMetrics: [],
-        lastProbedAt: oldTime,
+    it('captureTestnetTick: discovery yields 5 (3 tutorial + 2 unique) — all 5 land in packagefacts; only 2 have isTutorial:false', async () => {
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [
+          pkgInfo('0xreal_a', ['bespoke_a']),
+          pkgInfo('0xtut1', ['fixed18', 'sfixed18', 'uint_macro']),
+          pkgInfo('0xtut2', ['faucet']),
+          pkgInfo('0xreal_b', ['unique_real_module']),
+          pkgInfo('0xtut3', ['nft']),
+        ],
+        hasPreviousPage: false,
+        startCursor: null,
+      });
+
+      await service.captureTestnetTick();
+
+      // First insertMany call — Pipeline A's shallow facts. Subsequent
+      // calls would belong to deep-probe / copy-forward (none here).
+      expect(pkgFactModel.insertMany).toHaveBeenCalled();
+      const inserted = (pkgFactModel.insertMany as jest.Mock).mock.calls[0][0] as any[];
+      expect(inserted).toHaveLength(5);
+      const tutorialFlags = new Map(inserted.map((d) => [d.address, d.isTutorial]));
+      expect(tutorialFlags.get('0xreal_a')).toBe(false);
+      expect(tutorialFlags.get('0xtut1')).toBe(true);
+      expect(tutorialFlags.get('0xtut2')).toBe(true);
+      expect(tutorialFlags.get('0xreal_b')).toBe(false);
+      expect(tutorialFlags.get('0xtut3')).toBe(true);
+      // Discovery does no deep-probe — every shallow fact has lastProbedAt:null.
+      for (const d of inserted) expect(d.lastProbedAt).toBeNull();
+    });
+
+    it('captureTestnetTick: shallow fact discovered then immediately deep-probed in the same tick (delete-then-insert overwrite)', async () => {
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      // Discovery surfaces one new package.
+      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
+        nodes: [pkgInfo('0xfresh_real', ['unique_real'], { deployer: '0xDEPL', storageRebate: '777' })],
+        hasPreviousPage: false,
+        startCursor: null,
+      });
+      // Pipeline B's aggregate finds the same address — full sweep
+      // grabs every non-tutorial fact, including the freshly-shallow
+      // row Pipeline A just inserted — and the deep-probe upgrades it.
+      pkgFactModel.aggregate = jest.fn(() => ({
+        exec: jest.fn().mockResolvedValue([{ _id: '0xfresh_real' }]),
+      })) as any;
+      const fetchSpy = jest.spyOn(service as any, 'fetchPackageByAddress').mockResolvedValue({
+        address: '0xfresh_real',
+        storageRebate: '777',
+        modules: { nodes: [{ name: 'unique_real' }] },
+        previousTransactionBlock: null,
+      });
+      jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (info: any, _d: any, now: Date) => ({
+        address: info.address,
+        deployer: '0xdepl',
+        storageRebateNanos: 777,
+        modules: ['unique_real'],
+        moduleMetrics: [{ module: 'unique_real', events: 5, eventsCapped: false, uniqueSenders: 2, entryFunctions: ['exec'], eventTypes: ['Did'] }],
+        objectHolderCount: 3,
+        objectCount: 4,
+        transactions: 9,
+        transactionsCapped: false,
+        objectTypeCounts: [{ type: 't', objectHolderCount: 3, listedCount: 0, objectHolderCountCapped: false, objectCount: 4, objectCountCapped: false }],
+        fingerprint: null,
+        publishedAt: null,
+        lastProbedAt: now,
+        isTutorial: false,
       }));
-      const freshlyProbed: any[] = [
-        { ...previous[0], lastProbedAt: now },
-        { ...previous[1], lastProbedAt: now },
-        { ...previous[2], lastProbedAt: now },
-      ];
-      const merged = (service as any).buildTestnetSnapshotPackages(freshlyProbed, previous);
-      expect(merged).toHaveLength(10);
-      // First three are fresh (now), rest preserve the older timestamp.
-      const byAddr = new Map<string, any>(merged.map((p: any) => [p.address, p]));
-      for (let i = 0; i < 3; i++) {
-        expect(byAddr.get(`0xprev${i}`)!.lastProbedAt).toEqual(now);
-      }
-      for (let i = 3; i < 10; i++) {
-        expect(byAddr.get(`0xprev${i}`)!.lastProbedAt).toEqual(oldTime);
-      }
+      const deleteSpy = pkgFactModel.deleteMany;
+
+      const result = await service.captureTestnetTick();
+
+      // Pipeline B selected the freshly-discovered shallow row first.
+      expect(fetchSpy).toHaveBeenCalledWith('0xfresh_real');
+      // Delete-then-insert pattern: shallow row deleted before deep-probed row inserted.
+      expect(deleteSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          snapshotId: expect.anything(),
+          address: { $in: ['0xfresh_real'] },
+        }),
+      );
+      // Two insertMany calls expected: shallow (1 row) then deep-probed (1 row).
+      const inserts = (pkgFactModel.insertMany as jest.Mock).mock.calls;
+      expect(inserts.length).toBeGreaterThanOrEqual(2);
+      const shallowInsert = inserts[0][0] as any[];
+      const deepInsert = inserts[1][0] as any[];
+      expect(shallowInsert[0].address).toBe('0xfresh_real');
+      expect(shallowInsert[0].moduleMetrics).toEqual([]);
+      expect(shallowInsert[0].lastProbedAt).toBeNull();
+      expect(deepInsert[0].address).toBe('0xfresh_real');
+      expect(deepInsert[0].moduleMetrics).toHaveLength(1);
+      expect(deepInsert[0].lastProbedAt).not.toBeNull();
+      expect(deepInsert[0].objectHolderCount).toBe(3);
+
+      expect((result as any).discovered).toBe(1);
+      expect((result as any).deepProbed).toBe(1);
+      // Total = discoveredKept (0, since deep-probed shadowed) + deepProbed (1) + carried (0) = 1
+      expect((result as any).totalPackagesInSnapshot).toBe(1);
     });
 
-    it('testnet capture in flight is guarded; second call returns without re-entering', async () => {
+    it('captureTestnetTick: deadline mid-Pipeline-A → Pipeline B does NOT run; snapshot still promoted with what was discovered', async () => {
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      // Discovery returns 1 fact and signals deadlineHit. Pipeline B
+      // must skip because Date.now() >= deadlineMs at the gate.
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockImplementation(async (opts: any) => {
+        // Push the clock past the deadline so the Pipeline-B gate
+        // (`Date.now() < deadlineMs`) is false.
+        jest.spyOn(Date, 'now').mockImplementation(() => opts.deadlineMs + 1);
+        return {
+          discovered: [{
+            address: '0xdiscovered',
+            deployer: null,
+            storageRebateNanos: 0,
+            modules: [],
+            moduleMetrics: [],
+            objectHolderCount: 0,
+            objectCount: 0,
+            transactions: 0,
+            transactionsCapped: false,
+            objectTypeCounts: [],
+            fingerprint: null,
+            publishedAt: null,
+            lastProbedAt: null,
+            isTutorial: false,
+          }],
+          hitFreshWindow: false,
+          deadlineHit: true,
+          wrapped: false,
+          error: null,
+        };
+      });
+      const deepSpy = jest.spyOn(service as any, 'runTestnetDeepProbeTick');
+
+      const result = await service.captureTestnetTick();
+
+      expect(deepSpy).not.toHaveBeenCalled();
+      expect((result as any).deadlineHit).toBe(true);
+      expect((result as any).discovered).toBe(1);
+      expect((result as any).deepProbed).toBe(0);
+      // Header still promoted — partial work survives.
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ network: 'testnet', captureStage: 'complete' }),
+      );
+    });
+
+    it('captureTestnetTick: deadline mid-Pipeline-B → returns partial probed; snapshot still promoted', async () => {
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [],
+        hitFreshWindow: true,
+        deadlineHit: false,
+        wrapped: false,
+        error: null,
+      });
+      const deepSpy = jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [{
+          address: '0xpartial',
+          deployer: null,
+          storageRebateNanos: 0,
+          modules: [],
+          moduleMetrics: [],
+          objectHolderCount: 0,
+          objectCount: 0,
+          transactions: 0,
+          transactionsCapped: false,
+          objectTypeCounts: [],
+          fingerprint: null,
+          publishedAt: null,
+          lastProbedAt: new Date(),
+          isTutorial: false,
+        }],
+        deadlineHit: true,
+        exhaustedCandidates: false,
+        failures: [],
+      });
+
+      const result = await service.captureTestnetTick();
+
+      expect(deepSpy).toHaveBeenCalled();
+      expect((result as any).deepProbed).toBe(1);
+      expect((result as any).deadlineHit).toBe(true);
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ network: 'testnet', captureStage: 'complete' }),
+      );
+    });
+
+    it('captureTestnetTick: Pipeline A errors → Pipeline B still tries with whatever budget remains', async () => {
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [],
+        hitFreshWindow: false,
+        deadlineHit: false,
+        wrapped: false,
+        error: new Error('Query request timed out. Limit: 40s'),
+      });
+      const deepSpy = jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [],
+        deadlineHit: false,
+        exhaustedCandidates: true,
+        failures: [],
+      });
+      const errSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+
+      await service.captureTestnetTick();
+
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('discovery aborted mid-walk'));
+      // Pipeline B still ran since the budget hadn't been spent.
+      expect(deepSpy).toHaveBeenCalled();
+      expect(ecoModel.create).toHaveBeenCalled();
+    });
+
+    it('captureTestnetTick: discovery deadlineHit + !hitFreshWindow + !wrapped fires logCaptureGap', async () => {
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      const probedAt = new Date('2026-04-22T00:00:00Z');
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [
+          { address: '0xa', publishedAt: new Date('2026-04-22T01:00:00Z'), deployer: null, modules: [], moduleMetrics: [], storageRebateNanos: 0, objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false, objectTypeCounts: [], fingerprint: null, lastProbedAt: null, isTutorial: false },
+          { address: '0xb', publishedAt: probedAt, deployer: null, modules: [], moduleMetrics: [], storageRebateNanos: 0, objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false, objectTypeCounts: [], fingerprint: null, lastProbedAt: null, isTutorial: false },
+        ],
+        hitFreshWindow: false,
+        deadlineHit: true,
+        wrapped: false,
+        error: null,
+      });
+      // Pipeline B is unreachable when deadlineHit fires before B even
+      // gets a chance — so only stub for safety.
+      jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+      });
+      const logGapSpy = jest.spyOn(service as any, 'logCaptureGap').mockResolvedValue(undefined);
+
+      await service.captureTestnetTick();
+
+      expect(logGapSpy).toHaveBeenCalledWith(
+        'testnet',
+        expect.objectContaining({
+          probedThisTick: 2,
+          oldestProbedPublishedAt: probedAt,
+        }),
+        expect.stringContaining('coverage falling behind'),
+      );
+    });
+
+    it('captureTestnetTick: discovery error suppresses the gap WARN (not a capacity signal)', async () => {
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [],
+        hitFreshWindow: false,
+        deadlineHit: true,
+        wrapped: false,
+        error: new Error('Query request timed out. Limit: 40s'),
+      });
+      jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+      });
+      jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+      const logGapSpy = jest.spyOn(service as any, 'logCaptureGap').mockResolvedValue(undefined);
+
+      await service.captureTestnetTick();
+      expect(logGapSpy).not.toHaveBeenCalled();
+    });
+
+    it('captureTestnetTick: copy-forward includes only addresses NOT touched by either pipeline', async () => {
+      seedCursor({ tickCounter: 0 });
+      // Three previous packages; one will be re-discovered, one re-probed,
+      // one untouched.
+      const oldTime = new Date('2026-04-20T00:00:00Z');
+      const previousDoc = {
+        _id: new MongooseTypes.ObjectId(),
+        packages: [
+          { address: '0xrediscover', deployer: null, storageRebateNanos: 100, modules: ['old'], moduleMetrics: [], objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false, objectTypeCounts: [], fingerprint: null, publishedAt: null, lastProbedAt: oldTime, isTutorial: false },
+          { address: '0xreprobe', deployer: null, storageRebateNanos: 200, modules: ['old'], moduleMetrics: [], objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false, objectTypeCounts: [], fingerprint: null, publishedAt: null, lastProbedAt: oldTime, isTutorial: false },
+          { address: '0xuntouched', deployer: null, storageRebateNanos: 300, modules: ['old'], moduleMetrics: [], objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false, objectTypeCounts: [], fingerprint: null, publishedAt: null, lastProbedAt: oldTime, isTutorial: false },
+        ],
+        networkTxTotal: 999,
+        txRates: { perDay: 7 },
+      };
+      ecoModel.findOne = jest.fn(() => ({
+        sort: () => ({ lean: () => ({ exec: async () => previousDoc }) }),
+      }));
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [{
+          address: '0xrediscover', deployer: null, storageRebateNanos: 0, modules: [], moduleMetrics: [],
+          objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false,
+          objectTypeCounts: [], fingerprint: null, publishedAt: null, lastProbedAt: null, isTutorial: false,
+        }],
+        hitFreshWindow: false,
+        deadlineHit: false,
+        wrapped: true,
+        error: null,
+      });
+      jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [{
+          address: '0xreprobe', deployer: null, storageRebateNanos: 250, modules: ['m'],
+          moduleMetrics: [], objectHolderCount: 0, objectCount: 0, transactions: 0,
+          transactionsCapped: false, objectTypeCounts: [], fingerprint: null, publishedAt: null,
+          lastProbedAt: new Date(), isTutorial: false,
+        }],
+        deadlineHit: false,
+        exhaustedCandidates: true,
+        failures: [],
+      });
+
+      const result = await service.captureTestnetTick();
+
+      // Three insertMany calls: shallow discovery, deep-probed, copy-forward.
+      const inserts = (pkgFactModel.insertMany as jest.Mock).mock.calls;
+      const carriedInsert = inserts.find((c) =>
+        (c[0] as any[]).some((p) => p.address === '0xuntouched'),
+      );
+      expect(carriedInsert).toBeDefined();
+      const carried = carriedInsert![0] as any[];
+      expect(carried).toHaveLength(1);
+      expect(carried[0].address).toBe('0xuntouched');
+      expect(carried[0].lastProbedAt).toEqual(oldTime); // never rewinds to null
+
+      // Total = 1 shallow-discovered (kept since not deep-probed) + 1
+      // deep-probed (different address) + 1 carried-forward = 3.
+      expect((result as any).totalPackagesInSnapshot).toBe(3);
+      // header carries forward networkTxTotal + txRates from previous.
+      expect(ecoModel.create).toHaveBeenCalledWith(
+        expect.objectContaining({ networkTxTotal: 999, txRates: { perDay: 7 } }),
+      );
+    });
+
+    it('captureTestnetTick: in-flight guard returns skip without re-entering', async () => {
       (service as any).capturingByNetwork['testnet'] = true;
-      const runNewestSpy = jest.spyOn(service as any, 'runNewestTick');
+      const discoverySpy = jest.spyOn(service as any, 'runTestnetDiscoveryTick');
       const result = await service.captureTestnetTick();
       expect(result).toEqual({ skipped: true, reason: 'in-flight' });
-      expect(runNewestSpy).not.toHaveBeenCalled();
+      expect(discoverySpy).not.toHaveBeenCalled();
     });
 
-    it('parallel guards: mainnet `capturing: true` does NOT block a testnet tick, and vice versa', async () => {
-      // Mainnet guard set; testnet tick should still proceed.
+    it('captureTestnetTick: parallel guards (mainnet capturing flag does NOT block testnet, and vice versa)', async () => {
       (service as any).capturing = true;
       seedCursor({ tickCounter: 0 });
-      jest
-        .spyOn(service as any, 'runNewestTick')
-        .mockResolvedValue({ probed: [], hitFreshWindow: false, deadlineHit: false });
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [], hitFreshWindow: false, deadlineHit: false, wrapped: true, error: null,
+      });
+      jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+      });
       jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
 
       const result = await service.captureTestnetTick();
       expect((result as any).skipped).toBeUndefined();
-      expect((result as any).kind).toBe('newest');
 
       (service as any).capturing = false;
 
-      // Reverse: testnet guard set; mainnet capture proceeds (mocked away
-      // to avoid the full captureRaw path). Assert no "in-flight" skip.
+      // Reverse: testnet flag set; mainnet capture proceeds.
       (service as any).capturingByNetwork['testnet'] = true;
       const captureRawSpy = jest
         .spyOn(service as any, 'captureRaw')
@@ -6991,39 +7773,6 @@ describe('EcosystemService', () => {
       await service.capture();
       expect(captureRawSpy).toHaveBeenCalled();
       (service as any).capturingByNetwork['testnet'] = false;
-    });
-
-    it('testnet tick writes an OnchainSnapshot tagged network=testnet and updates the cursor', async () => {
-      seedCursor({ tickCounter: 0 });
-      jest
-        .spyOn(service as any, 'runNewestTick')
-        .mockResolvedValue({ probed: [], hitFreshWindow: true, deadlineHit: false });
-      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
-
-      await service.captureTestnetTick();
-
-      // Post-split: header-only create tagged testnet; packages live in
-      // `packagefacts` (empty batch here since the newest-tick probed
-      // nothing). No `packages` field on the snapshot doc — the whole
-      // point of the refactor.
-      expect(ecoModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({ network: 'testnet', captureStage: 'complete' }),
-      );
-      const createArg = (ecoModel.create as jest.Mock).mock.calls[0][0];
-      expect(createArg.packages).toBeUndefined();
-      // Empty probed + empty previous → no insertMany call.
-      expect(pkgFactModel.insertMany).not.toHaveBeenCalled();
-      expect(testnetCursorModel.updateOne).toHaveBeenCalledWith(
-        { _id: 'testnet' },
-        expect.objectContaining({
-          $set: expect.objectContaining({
-            tickCounter: 1,
-            lastTickKind: 'newest',
-            lastTickPackagesProbed: 0,
-          }),
-        }),
-        { upsert: true },
-      );
     });
 
     // ---------- pagination inversion + gap-closing (2026-04-25) ----------
@@ -7140,64 +7889,6 @@ describe('EcosystemService', () => {
         kind: 'mainnet-capture-gap',
         network: 'mainnet',
       }));
-    });
-
-    it('captureTestnetTick: newest-tick deadlineHit + !hitFreshWindow fires logCaptureGap (empty probed + non-empty probed branches)', async () => {
-      // Empty-probed branch: no freshly-probed pkgs, oldestProbedAt=null.
-      seedCursor({ tickCounter: 0 });
-      jest.spyOn(service as any, 'runNewestTick').mockResolvedValue({
-        probed: [], hitFreshWindow: false, deadlineHit: true, error: null,
-      });
-      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
-      const logGapSpy = jest.spyOn(service as any, 'logCaptureGap').mockResolvedValue(undefined);
-
-      await service.captureTestnetTick();
-      expect(logGapSpy).toHaveBeenCalledWith(
-        'testnet',
-        expect.objectContaining({ probedThisTick: 0, oldestProbedPublishedAt: null }),
-        expect.stringContaining('coverage falling behind'),
-      );
-
-      // Non-empty probed branch: exercises the ternary that reads the last
-      // probed pkg's publishedAt as `oldestProbedPublishedAt`.
-      logGapSpy.mockClear();
-      (service as any).capturingByNetwork['testnet'] = false;
-      seedCursor({ tickCounter: 0 });
-      const oldestTs = new Date('2026-04-20T00:00:00Z');
-      (service as any).runNewestTick = jest.fn().mockResolvedValue({
-        probed: [
-          { address: '0xa', publishedAt: new Date('2026-04-22T00:00:00Z'), deployer: null, modules: [], moduleMetrics: [], storageRebateNanos: 0, objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false, objectTypeCounts: [], fingerprint: null, lastProbedAt: new Date() },
-          { address: '0xb', publishedAt: oldestTs, deployer: null, modules: [], moduleMetrics: [], storageRebateNanos: 0, objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false, objectTypeCounts: [], fingerprint: null, lastProbedAt: new Date() },
-        ],
-        hitFreshWindow: false,
-        deadlineHit: true,
-        error: null,
-      });
-      await service.captureTestnetTick();
-      expect(logGapSpy).toHaveBeenCalledWith(
-        'testnet',
-        expect.objectContaining({ probedThisTick: 2, oldestProbedPublishedAt: oldestTs }),
-        expect.any(String),
-      );
-    });
-
-    it('captureTestnetTick: newest-tick hitFreshWindow=true + budget remaining invokes runGapClosing; non-empty result logs', async () => {
-      seedCursor({ tickCounter: 0 });
-      jest.spyOn(service as any, 'runNewestTick').mockResolvedValue({
-        probed: [], hitFreshWindow: true, deadlineHit: false, error: null,
-      });
-      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
-      const gapSpy = jest.spyOn(service as any, 'runGapClosing').mockResolvedValue({
-        probed: [
-          { address: '0xgap1', deployer: null, modules: [], moduleMetrics: [], storageRebateNanos: 0, objectHolderCount: 0, objectCount: 0, transactions: 0, transactionsCapped: false, objectTypeCounts: [], fingerprint: null, publishedAt: null, lastProbedAt: new Date() } as any,
-        ],
-        exhaustedCandidates: true,
-        deadlineHit: false,
-      });
-      const logSpy = jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
-      await service.captureTestnetTick();
-      expect(gapSpy).toHaveBeenCalledWith('testnet', expect.any(Date), expect.any(Number), expect.any(Map));
-      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Testnet gap-closing probed 1 stale pkgs'));
     });
 
     it('captureRaw: mainnet deadlineHit + !wrapped fires logCaptureGap', async () => {
@@ -7322,18 +8013,18 @@ describe('EcosystemService', () => {
       }
     });
 
-    it('runPaginationInversionMigration unsets legacy backfillAfterCursor + does NOT touch in-flight partials', async () => {
-      // Bug 2 fix (2026-04-25): the migration used to delete any
-      // captureStage:'partial' doc + its packagefacts on every Nest boot —
-      // which clobbered legitimate concurrent captures (forked manual-
-      // trigger Nest processes boot mid-cron-capture and the migration
-      // ran on each boot). Removed; partial-resume handles stale cursors
-      // naturally via finalizeMainnetSnapshot which clears the cursor on
-      // promote. This test pins the new contract.
+    it('runPaginationInversionMigration $unsets all three legacy testnet-cursor fields + does NOT touch in-flight partials', async () => {
+      // Two bugs fixed by this method, both pinned here:
+      //  1. (2026-04-25) the migration used to delete `captureStage:'partial'`
+      //     docs + their packagefacts on every Nest boot, which clobbered
+      //     legitimate concurrent captures. Removed.
+      //  2. (2026-04-26) the two-pipeline refactor obsoleted
+      //     `backfillBeforeCursor` and `lastTickKind`. The migration now
+      //     `$unset`s both alongside `backfillAfterCursor` so old
+      //     singletons decode under the smaller schema.
       testnetCursorModel.updateOne = jest.fn().mockReturnValue({
         exec: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
       }) as any;
-      // Even if the DB has a partial, the migration should NOT find/delete it.
       ecoModel.find = jest.fn(() => ({
         select: () => ({
           lean: () => ({ exec: jest.fn().mockResolvedValue([{ _id: 'partial-id', network: 'mainnet', captureProgressCursor: 'fwd-cur' }]) }),
@@ -7346,11 +8037,23 @@ describe('EcosystemService', () => {
 
       await (service as any).runPaginationInversionMigration();
 
-      expect(testnetCursorModel.updateOne).toHaveBeenCalledWith(
-        expect.objectContaining({ _id: 'testnet' }),
-        expect.objectContaining({ $unset: { backfillAfterCursor: '' }, $set: { backfillBeforeCursor: null } }),
-        { strict: false },
-      );
+      const call = (testnetCursorModel.updateOne as jest.Mock).mock.calls[0];
+      expect(call[0]._id).toBe('testnet');
+      // Filter must `$or` over every legacy field so a one-of-three
+      // dirty doc still gets cleaned up.
+      expect(call[0].$or).toEqual([
+        { backfillAfterCursor: { $exists: true } },
+        { backfillBeforeCursor: { $exists: true } },
+        { lastTickKind: { $exists: true } },
+      ]);
+      expect(call[1]).toEqual({
+        $unset: {
+          backfillAfterCursor: '',
+          backfillBeforeCursor: '',
+          lastTickKind: '',
+        },
+      });
+      expect(call[2]).toEqual({ strict: false });
       // Partials must remain untouched.
       expect(deleteManySpy).not.toHaveBeenCalled();
       expect(pkgFactDeleteSpy).not.toHaveBeenCalled();
@@ -7420,12 +8123,12 @@ describe('EcosystemService', () => {
         }),
       }));
       seedCursor({ tickCounter: 0 });
-      const runNewestSpy = jest.spyOn(service as any, 'runNewestTick');
+      const discoverySpy = jest.spyOn(service as any, 'runTestnetDiscoveryTick');
 
       const result = await service.captureTestnetTick();
 
       expect(result).toEqual({ skipped: true, reason: 'mainnet-active' });
-      expect(runNewestSpy).not.toHaveBeenCalled();
+      expect(discoverySpy).not.toHaveBeenCalled();
       // Testnet lock NOT acquired — don't stomp future ticks either.
       expect((captureLockModel.updateOne as jest.Mock)).not.toHaveBeenCalled();
     });
@@ -7442,8 +8145,11 @@ describe('EcosystemService', () => {
         }),
       }));
       seedCursor({ tickCounter: 0 });
-      jest.spyOn(service as any, 'runNewestTick').mockResolvedValue({
-        probed: [], hitFreshWindow: true, deadlineHit: false, error: null,
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [], hitFreshWindow: true, deadlineHit: false, wrapped: false, error: null,
+      });
+      jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
       });
       jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
 
@@ -7451,7 +8157,8 @@ describe('EcosystemService', () => {
 
       // Did proceed — would have returned a proper result object, not a skip.
       expect((result as any).skipped).toBeUndefined();
-      expect((result as any).kind).toBe('newest');
+      expect((result as any).discovered).toBe(0);
+      expect((result as any).deepProbed).toBe(0);
     });
 
     it('testnetCron is a no-op in test mode (NODE_ENV=test)', async () => {
@@ -7492,16 +8199,19 @@ describe('EcosystemService', () => {
       }
     });
 
-    it('loadTestnetCursor creates the singleton doc on first boot and returns an existing one otherwise', async () => {
+    it('loadTestnetCursor creates the singleton doc on first boot and returns an existing one otherwise; create payload omits the legacy fields', async () => {
       // First call: findById → null, triggers create.
       testnetCursorModel.findById = jest.fn(() => ({ exec: jest.fn().mockResolvedValue(null) }));
       const fresh = { _id: 'testnet', tickCounter: 0 };
       testnetCursorModel.create = jest.fn().mockResolvedValue(fresh);
       let result = await (service as any).loadTestnetCursor();
       expect(result).toEqual(fresh);
-      expect(testnetCursorModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({ _id: 'testnet', tickCounter: 0 }),
-      );
+      const createArg = (testnetCursorModel.create as jest.Mock).mock.calls[0][0];
+      expect(createArg._id).toBe('testnet');
+      expect(createArg.tickCounter).toBe(0);
+      // Two-pipeline cleanup: these fields no longer exist in the schema.
+      expect(createArg.backfillBeforeCursor).toBeUndefined();
+      expect(createArg.lastTickKind).toBeUndefined();
 
       // Second call: findById → existing.
       const existing = { _id: 'testnet', tickCounter: 42 };
@@ -7559,8 +8269,8 @@ describe('EcosystemService', () => {
         sort: () => ({ lean: () => ({ exec: async () => null }) }),
       }) as any;
       ecoModel.create.mockResolvedValue({} as any);
-      testnetCursorModel.findOne = jest.fn().mockReturnValue({
-        exec: async () => ({ _id: 'testnet', tickCounter: 0, backfillBeforeCursor: null }),
+      testnetCursorModel.findById = jest.fn().mockReturnValue({
+        exec: async () => ({ _id: 'testnet', tickCounter: 0 }),
       }) as any;
       testnetCursorModel.updateOne = jest.fn().mockReturnValue({ exec: async () => ({}) }) as any;
 
@@ -7615,10 +8325,16 @@ describe('EcosystemService', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
-    it('runNewestTick returns partial probed + error when fetchPackagePage throws mid-walk (retries exhausted)', async () => {
-      // Symmetric to the runBackfillTick partial-probed test below. Newest
-      // tick catches the same class of error and preserves probe work done
-      // before the throw.
+    it('captureTestnetTick: discovery error is logged + persisted partial; pipeline B still runs', async () => {
+      // Symmetric to the old `runNewestTick`/`runBackfillTick` partial-error
+      // tests, restated for the two-pipeline contract: a Pipeline-A throw
+      // (retries exhausted on `fetchPackagePage`) produces a non-null
+      // `error` field on the discovery result, the captureTestnetTick
+      // body logs it loudly, and Pipeline B still gets its turn with the
+      // remaining budget. The shallow facts gathered before the throw
+      // also land in the snapshot.
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
       jest
         .spyOn(service as any, 'fetchPackagePage')
         .mockResolvedValueOnce({
@@ -7627,128 +8343,22 @@ describe('EcosystemService', () => {
           startCursor: 'cur-1',
         })
         .mockRejectedValueOnce(new Error('Query request timed out. Limit: 40s'));
-      jest.spyOn(service as any, 'probeOnePackage').mockResolvedValue({
-        address: '0xrn1',
-        deployer: '0xd',
-        modules: ['m1'],
-        storageRebateNanos: 0,
-        moduleMetrics: [],
-        objectHolderCount: 0,
-        objectCount: 0,
-        objectTypeCounts: {},
-        transactions: 0,
-        transactionsCapped: false,
-        fingerprint: null,
-        publishedAt: null,
-        lastProbedAt: new Date(),
-      });
-      const result = await (service as any).runNewestTick(
-        new Map(), // empty previousByAddress (no fresh-window hits)
-        new Date(),
-        Date.now() + 10 * 60 * 1000,
-        new Map(),
-      );
-      expect(result.probed).toHaveLength(1);
-      expect(result.error).not.toBeNull();
-      expect((result.error as Error).message).toMatch(/timed out/i);
-      expect(result.hitFreshWindow).toBe(false);
-      expect(result.deadlineHit).toBe(false);
-    });
-
-    it('runBackfillTick returns partial probed + error when fetchPackagePage throws mid-walk (retries exhausted)', async () => {
-      // First page succeeds with 2 packages probed; second page throws
-      // (simulating testnet's 40s timeout exhausting retries). Expect:
-      // probed contains the 2 packages from page 1, error is non-null,
-      // nextCursor stays at the pre-failed-fetch value ('cur-1').
-      const pageSpy = jest
-        .spyOn(service as any, 'fetchPackagePage')
-        .mockResolvedValueOnce({
-          nodes: [pkgInfo('0xrb1', ['m1']), pkgInfo('0xrb2', ['m1'])],
-          hasPreviousPage: true,
-          startCursor: 'cur-1',
-        })
-        .mockRejectedValueOnce(new Error('Query request timed out. Limit: 40s'));
-      jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (info: any) => ({
-        address: info.address,
-        deployer: '0xd',
-        modules: ['m1'],
-        storageRebateNanos: 0,
-        moduleMetrics: [],
-        objectHolderCount: 0,
-        objectCount: 0,
-        objectTypeCounts: {},
-        transactions: 0,
-        transactionsCapped: false,
-        fingerprint: null,
-        publishedAt: null,
-        lastProbedAt: new Date(),
-      }));
-      const result = await (service as any).runBackfillTick(
-        'cur-0',
-        new Date(),
-        Date.now() + 10 * 60 * 1000, // 10 min budget — plenty
-        new Map(),
-      );
-      expect(result.probed).toHaveLength(2);
-      expect(result.error).not.toBeNull();
-      expect((result.error as Error).message).toMatch(/timed out/i);
-      expect(result.nextCursor).toBe('cur-1'); // advanced past page 1 (which succeeded)
-      expect(result.wrapped).toBe(false);
-      expect(result.deadlineHit).toBe(false);
-      expect(pageSpy).toHaveBeenCalledTimes(2);
-    });
-
-    // Skipped Phase 1 (2026-04-25): backfill path no longer reachable from
-    // captureTestnetTick (dispatcher hard-coded to 'newest'). Test stays
-    // in source as documentation of the legacy path. Phase 2 deletes
-    // runBackfillTick and this test together.
-    it.skip('captureTestnetTick persists a partial snapshot + advances cursor even when runBackfillTick returns an error', async () => {
-      // Wire the tick to look like tickCounter=1 (backfill), have runBackfillTick
-      // return partial results with an error — the final doc must still land
-      // in onchainsnapshots with the 2 probed packages, and the cursor must
-      // still be updated so subsequent ticks advance.
-      testnetCursorModel.findById = jest.fn().mockReturnValue({
-        exec: async () => ({ _id: 'testnet', tickCounter: 1, backfillBeforeCursor: 'cur-0' }),
-      }) as any;
-      testnetCursorModel.updateOne = jest.fn().mockReturnValue({ exec: async () => ({}) }) as any;
-      ecoModel.findOne = jest.fn().mockReturnValue({
-        sort: () => ({ lean: () => ({ exec: async () => null }) }),
-      }) as any;
-      ecoModel.create.mockResolvedValue({} as any);
-      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
-      const partial = [
-        { address: '0xpa1', deployer: '0xd', modules: ['m1'], storageRebateNanos: 0, moduleMetrics: [], objectHolderCount: 0, objectCount: 0, objectTypeCounts: {}, transactions: 0, transactionsCapped: false, fingerprint: null, publishedAt: null, lastProbedAt: new Date() },
-        { address: '0xpa2', deployer: '0xd', modules: ['m1'], storageRebateNanos: 0, moduleMetrics: [], objectHolderCount: 0, objectCount: 0, objectTypeCounts: {}, transactions: 0, transactionsCapped: false, fingerprint: null, publishedAt: null, lastProbedAt: new Date() },
-      ];
-      jest.spyOn(service as any, 'runBackfillTick').mockResolvedValue({
-        probed: partial,
-        nextCursor: 'cur-0', // cursor stays (fetch threw on cur-0's target page)
-        wrapped: false,
-        deadlineHit: false,
-        error: new Error('Query request timed out. Limit: 40s'),
-      });
       const errorSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
+      const deepSpy = jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+      });
 
-      const result = await (service as any).captureTestnetTick();
+      await service.captureTestnetTick();
 
-      expect((result as any).skipped).toBeUndefined();
-      // Post-split: the probed partial packages land in `packagefacts` via
-      // `insertMany`, not on the snapshot header. The header doc itself
-      // is packages-free; assert on both sides.
-      expect(ecoModel.create).toHaveBeenCalledWith(expect.objectContaining({
-        network: 'testnet',
-        captureStage: 'complete',
-      }));
-      const createArg = (ecoModel.create as jest.Mock).mock.calls[0][0];
-      expect(createArg.packages).toBeUndefined();
-      expect(pkgFactModel.insertMany).toHaveBeenCalled();
-      const insertedBatch = (pkgFactModel.insertMany as jest.Mock).mock.calls[0][0] as any[];
-      expect(insertedBatch.map((p) => p.address)).toEqual(
-        expect.arrayContaining(partial.map((p) => p.address)),
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('discovery aborted mid-walk after 1 pkgs'),
       );
-      expect(insertedBatch[0].network).toBe('testnet');
-      expect(testnetCursorModel.updateOne).toHaveBeenCalled();
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('aborted mid-probe after 2 pkgs'));
+      // Pipeline B still ran since budget remained.
+      expect(deepSpy).toHaveBeenCalled();
+      // Shallow fact persisted.
+      const inserts = (pkgFactModel.insertMany as jest.Mock).mock.calls;
+      expect(inserts.length).toBeGreaterThanOrEqual(1);
+      expect((inserts[0][0] as any[])[0].address).toBe('0xrn1');
     });
 
     it('fetchPackagePage builds the correct GraphQL query shape and parses pageInfo (newest-first)', async () => {
@@ -7918,330 +8528,121 @@ describe('EcosystemService', () => {
       });
     });
 
-    it('runNewestTick probes packages with no prior lastProbedAt until the paginator drains', async () => {
-      const probeSpy = jest
-        .spyOn(service as any, 'probeOnePackage')
-        .mockImplementation(async (pkg: any, _d: any, now: Date) => ({
-          address: pkg.address,
-          deployer: null,
-          storageRebateNanos: 0,
-          modules: [],
-          moduleMetrics: [],
-          objectHolderCount: 0,
-          objectCount: 0,
-          transactions: 0,
-          transactionsCapped: false,
-          objectTypeCounts: [],
-          fingerprint: null,
-          publishedAt: null,
-          lastProbedAt: now,
-        }));
-      jest
-        .spyOn(service as any, 'fetchPackagePage')
-        .mockResolvedValueOnce({
-          nodes: [pkgInfo('0xa'), pkgInfo('0xb')],
-          hasPreviousPage: true,
-          startCursor: 'next',
-        })
-        .mockResolvedValueOnce({
-          nodes: [pkgInfo('0xc')],
-          hasPreviousPage: false,
-          startCursor: null,
-        });
-      const result = await (service as any).runNewestTick(
-        new Map(),
-        new Date(),
-        Date.now() + 60_000,
-        new Map(),
-      );
-      expect(result.probed).toHaveLength(3);
-      expect(result.hitFreshWindow).toBe(false);
-      expect(result.deadlineHit).toBe(false);
-      expect(probeSpy).toHaveBeenCalledTimes(3);
-    });
-
-    it('runNewestTick stops on deadline exhaustion before draining the paginator', async () => {
-      // Deadline already passed → first loop iteration returns immediately.
-      jest.spyOn(service as any, 'fetchPackagePage');
-      const result = await (service as any).runNewestTick(
-        new Map(),
-        new Date(),
-        Date.now() - 1,
-        new Map(),
-      );
-      expect(result.deadlineHit).toBe(true);
-      expect(result.probed).toHaveLength(0);
-    });
-
-    it('runBackfillTick drains pages forward, probing every package, and wraps on hasPreviousPage: false', async () => {
-      const probeSpy = jest
-        .spyOn(service as any, 'probeOnePackage')
-        .mockImplementation(async (pkg: any, _d: any, now: Date) => ({
-          address: pkg.address,
-          deployer: null,
-          storageRebateNanos: 0,
-          modules: [],
-          moduleMetrics: [],
-          objectHolderCount: 0,
-          objectCount: 0,
-          transactions: 0,
-          transactionsCapped: false,
-          objectTypeCounts: [],
-          fingerprint: null,
-          publishedAt: null,
-          lastProbedAt: now,
-        }));
-      jest
-        .spyOn(service as any, 'fetchPackagePage')
-        .mockResolvedValueOnce({
-          nodes: [pkgInfo('0xbf1')],
-          hasPreviousPage: true,
-          startCursor: 'mid',
-        })
-        .mockResolvedValueOnce({
-          nodes: [pkgInfo('0xbf2')],
-          hasPreviousPage: false,
-          startCursor: 'end',
-        });
-      const result = await (service as any).runBackfillTick(
-        'start-here',
-        new Date(),
-        Date.now() + 60_000,
-        new Map(),
-      );
-      expect(probeSpy).toHaveBeenCalledTimes(2);
-      expect(result.wrapped).toBe(true);
-      expect(result.nextCursor).toBeNull();
-      expect(result.probed).toHaveLength(2);
-    });
-
-    it('runNewestTick hits the deadline right after probing a package mid-page', async () => {
-      // Probe completes, then the inner-loop deadline check trips. Covers
-      // the `if (Date.now() >= deadlineMs)` branch that fires after a
-      // successful probe rather than at the top of the page-fetch loop.
-      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
-        nodes: [pkgInfo('0xslow1'), pkgInfo('0xslow2')],
-        hasPreviousPage: true,
-        startCursor: 'more',
-      });
-      let calls = 0;
-      jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (pkg: any) => {
-        calls++;
-        return {
-          address: pkg.address,
-          deployer: null,
-          storageRebateNanos: 0,
-          modules: [],
-          moduleMetrics: [],
-          objectHolderCount: 0,
-          objectCount: 0,
-          transactions: 0,
-          transactionsCapped: false,
-          objectTypeCounts: [],
-          fingerprint: null,
-          publishedAt: null,
-          lastProbedAt: new Date(),
-        };
-      });
-      // Deadline set so that after one probe Date.now() is past it. We
-      // simulate that by overriding Date.now to advance on each call.
-      const origNow = Date.now;
-      let t = 0;
-      const dl = 1000;
-      jest.spyOn(Date, 'now').mockImplementation(() => (t += 600));
-      try {
-        const result = await (service as any).runNewestTick(
-          new Map(),
-          new Date(),
-          dl,
-          new Map(),
-        );
-        expect(result.deadlineHit).toBe(true);
-        expect(calls).toBeGreaterThanOrEqual(1);
-      } finally {
-        (Date.now as any).mockRestore?.();
-        Date.now = origNow;
-      }
-    });
-
-    it('runBackfillTick hits the deadline right after probing a package mid-page', async () => {
-      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
-        nodes: [pkgInfo('0xslow1'), pkgInfo('0xslow2')],
-        hasPreviousPage: true,
-        startCursor: 'more',
-      });
-      jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (pkg: any) => ({
-        address: pkg.address,
-        deployer: null,
-        storageRebateNanos: 0,
-        modules: [],
-        moduleMetrics: [],
-        objectHolderCount: 0,
-        objectCount: 0,
-        transactions: 0,
-        transactionsCapped: false,
-        objectTypeCounts: [],
-        fingerprint: null,
-        publishedAt: null,
-        lastProbedAt: new Date(),
-      }));
-      const origNow = Date.now;
-      let t = 0;
-      const dl = 1000;
-      jest.spyOn(Date, 'now').mockImplementation(() => (t += 600));
-      try {
-        const result = await (service as any).runBackfillTick(
-          'start',
-          new Date(),
-          dl,
-          new Map(),
-        );
-        expect(result.deadlineHit).toBe(true);
-        expect(result.wrapped).toBe(false);
-        expect(result.nextCursor).toBe('more');
-      } finally {
-        (Date.now as any).mockRestore?.();
-        Date.now = origNow;
-      }
-    });
-
-    it('runBackfillTick treats null endCursor with hasNextPage=true as an implicit wrap', async () => {
-      // Defensive branch: if a paginator ever returns `hasPreviousPage: true`
-      // but `startCursor: null`, we can't advance — treat it as a wrap so
-      // the next tick restarts rather than spinning on the same stale
-      // cursor value.
-      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
-        nodes: [],
-        hasPreviousPage: true,
-        startCursor: null,
-      });
-      const result = await (service as any).runBackfillTick(
-        'start',
-        new Date(),
-        Date.now() + 60_000,
-        new Map(),
-      );
-      expect(result.wrapped).toBe(true);
-    });
-
-    it('runBackfillTick deadline exhaustion mid-page: returns current cursor, not wrapped', async () => {
-      jest.spyOn(service as any, 'probeOnePackage').mockImplementation(async (pkg: any) => ({
-        address: pkg.address,
-        deployer: null,
-        storageRebateNanos: 0,
-        modules: [],
-        moduleMetrics: [],
-        objectHolderCount: 0,
-        objectCount: 0,
-        transactions: 0,
-        transactionsCapped: false,
-        objectTypeCounts: [],
-        fingerprint: null,
-        publishedAt: null,
-        lastProbedAt: new Date(),
-      }));
-      jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
-        nodes: [pkgInfo('0xbudget')],
-        hasPreviousPage: true,
-        startCursor: 'still-going',
-      });
-      // Deadline is already past → the loop's deadline check at the top of
-      // each iteration returns before fetchPackagePage is even called.
-      const result = await (service as any).runBackfillTick(
-        'resume',
-        new Date(),
-        Date.now() - 1,
-        new Map(),
-      );
-      expect(result.deadlineHit).toBe(true);
-      expect(result.wrapped).toBe(false);
-    });
-
-    it('captureTestnetTick end-to-end: newest tick with a previous snapshot copy-forwards un-touched packages', async () => {
-      seedCursor({ tickCounter: 0 });
-      // Previous testnet snapshot has 3 packages; we freshly probe one.
-      const oldTime = new Date('2026-04-20T00:00:00Z');
-      const previousDoc = {
-        packages: [
-          { address: '0xstale1', modules: [], moduleMetrics: [], storageRebateNanos: 100, lastProbedAt: oldTime },
-          { address: '0xstale2', modules: [], moduleMetrics: [], storageRebateNanos: 200, lastProbedAt: oldTime },
-          { address: '0xstale3', modules: [], moduleMetrics: [], storageRebateNanos: 300, lastProbedAt: oldTime },
-        ],
-        networkTxTotal: 123,
-        txRates: { perDay: 5 },
+    it('probeOnePackage stamps isTutorial:false on the full-pipeline result', async () => {
+      // Default-network probe (mainnet) produces a non-tutorial fact regardless
+      // of modules — `isTutorial` must be present and false on the deep-probe path.
+      const info = {
+        address: '0xreal',
+        storageRebate: '100',
+        modules: { nodes: [{ name: 'bespoke' }] },
+        previousTransactionBlock: null,
       };
-      ecoModel.findOne = jest.fn(() => ({
-        sort: () => ({ lean: () => ({ exec: async () => previousDoc }) }),
-      }));
+      jest.spyOn(service as any, 'fetchEntryFunctions').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'countEvents').mockResolvedValue({ count: 0, capped: false });
+      jest.spyOn(service as any, 'updateSendersForModule').mockResolvedValue(0);
       jest
-        .spyOn(service as any, 'runNewestTick')
-        .mockImplementation(async (_prev: any, now: Date) => ({
-          probed: [
-            { address: '0xfresh', modules: [], moduleMetrics: [], storageRebateNanos: 500, lastProbedAt: now },
-          ],
-          hitFreshWindow: true,
-          deadlineHit: false,
-        }));
-      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
-
-      const result = await service.captureTestnetTick();
-      expect((result as any).kind).toBe('newest');
-      expect((result as any).packagesProbed).toBe(1);
-      // 3 previous + 1 fresh, all distinct addresses = 4 total in new snapshot.
-      expect((result as any).totalPackagesInSnapshot).toBe(4);
-      // Mongo create carries network=testnet + networkTxTotal propagated.
-      expect(ecoModel.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          network: 'testnet',
-          networkTxTotal: 123,
-          txRates: { perDay: 5 },
-        }),
-      );
+        .spyOn(service as any, 'probeIdentityFields')
+        .mockResolvedValue({ identifiers: [], objectType: null });
+      jest
+        .spyOn(service as any, 'probeTxEffects')
+        .mockResolvedValue({ identifiers: [], objectType: null });
+      jest
+        .spyOn(service as any, 'updateTxCountForPackage')
+        .mockResolvedValue({ total: 0, capped: false });
+      jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([]);
+      const fact = await (service as any).probeOnePackage(info, new Map(), new Date());
+      expect(fact.isTutorial).toBe(false);
     });
 
-    // Skipped Phase 1 (2026-04-25): same as above — backfill path
-    // unreachable from the dispatcher. Phase 2 deletes.
-    it.skip('captureTestnetTick backfill path updates backfillBeforeCursor (wrapped → null, otherwise next cursor)', async () => {
-      // Wrapped case.
-      seedCursor({ tickCounter: 1, backfillBeforeCursor: 'prev-cursor' });
+    it('probeOnePackage early-returns a shallow fact when modules match the testnet tutorial catalog', async () => {
+      // Catalog entry `'fixed18|sfixed18|uint_macro'` (49-signature mined set).
+      const now = new Date('2026-04-26T19:00:00Z');
+      const info = {
+        address: '0xworkshopPkg',
+        storageRebate: '500',
+        modules: { nodes: [{ name: 'sfixed18' }, { name: 'fixed18' }, { name: 'uint_macro' }] },
+        previousTransactionBlock: {
+          sender: { address: '0xATTENDEE' },
+          effects: { timestamp: '2026-01-15T12:34:56Z' },
+        },
+      };
+      // Spy on every deep-probe helper — none should be called when the early-return fires.
+      const fetchEntrySpy = jest.spyOn(service as any, 'fetchEntryFunctions');
+      const countEventsSpy = jest.spyOn(service as any, 'countEvents');
+      const sampleEventTypesSpy = jest.spyOn(service as any, 'sampleEventTypes');
+      const probeIdentitySpy = jest.spyOn(service as any, 'probeIdentityFields');
+      const probeTxSpy = jest.spyOn(service as any, 'probeTxEffects');
+      const updateTxSpy = jest.spyOn(service as any, 'updateTxCountForPackage');
+      const captureObjSpy = jest.spyOn(service as any, 'captureObjectTypesForPackage');
+      const updateSendersSpy = jest.spyOn(service as any, 'updateSendersForModule');
+
+      const fact = await (service as any).probeOnePackage(info, new Map(), now, 'testnet');
+
+      expect(fact.address).toBe('0xworkshopPkg');
+      expect(fact.deployer).toBe('0xattendee');
+      expect(fact.storageRebateNanos).toBe(500);
+      expect(fact.modules).toEqual(['sfixed18', 'fixed18', 'uint_macro']);
+      expect(fact.publishedAt).toEqual(new Date('2026-01-15T12:34:56Z'));
+      expect(fact.lastProbedAt).toEqual(now);
+      expect(fact.isTutorial).toBe(true);
+
+      // Heavy fields all default/empty.
+      expect(fact.moduleMetrics).toEqual([]);
+      expect(fact.objectHolderCount).toBe(0);
+      expect(fact.objectCount).toBe(0);
+      expect(fact.transactions).toBe(0);
+      expect(fact.transactionsCapped).toBe(false);
+      expect(fact.objectTypeCounts).toEqual([]);
+      expect(fact.fingerprint).toBeNull();
+
+      // Critically: no deep-probe helper was invoked.
+      expect(fetchEntrySpy).not.toHaveBeenCalled();
+      expect(countEventsSpy).not.toHaveBeenCalled();
+      expect(sampleEventTypesSpy).not.toHaveBeenCalled();
+      expect(probeIdentitySpy).not.toHaveBeenCalled();
+      expect(probeTxSpy).not.toHaveBeenCalled();
+      expect(updateTxSpy).not.toHaveBeenCalled();
+      expect(captureObjSpy).not.toHaveBeenCalled();
+      expect(updateSendersSpy).not.toHaveBeenCalled();
+    });
+
+    it('probeOnePackage runs the full pipeline on mainnet even when modules match a catalog signature', async () => {
+      // Sanity check: the catalog is testnet-only. A mainnet package whose
+      // modules happen to coincide with a workshop signature must still get
+      // the full deep-probe treatment (mainnet has no workshop population).
+      const info = {
+        address: '0xmainnetCoincidence',
+        storageRebate: '1',
+        modules: { nodes: [{ name: 'faucet' }] }, // catalog entry on testnet
+        previousTransactionBlock: null,
+      };
+      const fetchEntrySpy = jest
+        .spyOn(service as any, 'fetchEntryFunctions')
+        .mockResolvedValue(new Map([['faucet', ['drip']]]));
+      jest.spyOn(service as any, 'countEvents').mockResolvedValue({ count: 0, capped: false });
+      jest.spyOn(service as any, 'updateSendersForModule').mockResolvedValue(0);
       jest
-        .spyOn(service as any, 'runBackfillTick')
-        .mockResolvedValue({ probed: [], nextCursor: 'useless-when-wrapped', wrapped: true, deadlineHit: false });
-      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
-
-      await service.captureTestnetTick();
-      expect(testnetCursorModel.updateOne).toHaveBeenCalledWith(
-        { _id: 'testnet' },
-        expect.objectContaining({
-          $set: expect.objectContaining({
-            backfillBeforeCursor: null,
-            lastTickKind: 'backfill',
-          }),
-        }),
-        { upsert: true },
-      );
-
-      // Not-wrapped case.
-      jest.restoreAllMocks();
-      seedCursor({ tickCounter: 2, backfillBeforeCursor: 'prev-cursor' });
+        .spyOn(service as any, 'probeIdentityFields')
+        .mockResolvedValue({ identifiers: [], objectType: null });
       jest
-        .spyOn(service as any, 'runBackfillTick')
-        .mockResolvedValue({ probed: [], nextCursor: 'advanced', wrapped: false, deadlineHit: false });
-      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
-      // Reset create mock for second tick.
-      ecoModel.create = jest.fn().mockResolvedValue({ _id: 'snap-2' });
-      testnetCursorModel.updateOne = jest.fn(() => ({ exec: jest.fn().mockResolvedValue({}) }));
+        .spyOn(service as any, 'probeTxEffects')
+        .mockResolvedValue({ identifiers: [], objectType: null });
+      const updateTxSpy = jest
+        .spyOn(service as any, 'updateTxCountForPackage')
+        .mockResolvedValue({ total: 0, capped: false });
+      const captureObjSpy = jest
+        .spyOn(service as any, 'captureObjectTypesForPackage')
+        .mockResolvedValue([]);
 
-      await service.captureTestnetTick();
-      expect(testnetCursorModel.updateOne).toHaveBeenCalledWith(
-        { _id: 'testnet' },
-        expect.objectContaining({
-          $set: expect.objectContaining({
-            backfillBeforeCursor: 'advanced',
-          }),
-        }),
-        { upsert: true },
-      );
+      const fact = await (service as any).probeOnePackage(info, new Map(), new Date(), 'mainnet');
+
+      expect(fact.isTutorial).toBe(false);
+      expect(fetchEntrySpy).toHaveBeenCalled();
+      expect(updateTxSpy).toHaveBeenCalled();
+      expect(captureObjSpy).toHaveBeenCalled();
+      // moduleMetrics populated normally.
+      expect(fact.moduleMetrics).toHaveLength(1);
+      expect(fact.moduleMetrics[0].entryFunctions).toEqual(['drip']);
     });
 
     it('captureTestnetTick skips with "cross-process lock held" when acquire returns acquired:false', async () => {
@@ -8250,27 +8651,30 @@ describe('EcosystemService', () => {
         holder: 'another-host',
         lockedUntil: new Date(Date.now() + 60_000),
       });
-      const runNewestSpy = jest.spyOn(service as any, 'runNewestTick');
+      const discoverySpy = jest.spyOn(service as any, 'runTestnetDiscoveryTick');
       const result = await service.captureTestnetTick();
       expect(result).toEqual({ skipped: true, reason: expect.stringContaining('cross-process lock held by another-host') });
-      expect(runNewestSpy).not.toHaveBeenCalled();
+      expect(discoverySpy).not.toHaveBeenCalled();
     });
 
     it('captureTestnetTick skip-log falls back to "unknown"/"?" when acquireCaptureLock returns no holder / no lockedUntil', async () => {
       (service as any).acquireCaptureLock.mockResolvedValue({ acquired: false });
       const logSpy = jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
-      const runNewestSpy = jest.spyOn(service as any, 'runNewestTick');
+      const discoverySpy = jest.spyOn(service as any, 'runTestnetDiscoveryTick');
       const result = await service.captureTestnetTick();
       expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/lock held by unknown until \?;/));
       expect(result).toEqual({ skipped: true, reason: expect.stringContaining('cross-process lock held by unknown') });
-      expect(runNewestSpy).not.toHaveBeenCalled();
+      expect(discoverySpy).not.toHaveBeenCalled();
     });
 
     it('swallows a testnet release-lock error in finally', async () => {
-      seedCursor({ tickCounter: 0, backfillBeforeCursor: null });
-      jest
-        .spyOn(service as any, 'runNewestTick')
-        .mockResolvedValue({ probed: [], hitFreshWindow: false, deadlineHit: false, error: null });
+      seedCursor({ tickCounter: 0 });
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [], hitFreshWindow: false, deadlineHit: false, wrapped: true, error: null,
+      });
+      jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+      });
       jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
       (service as any).releaseCaptureLock.mockRejectedValue(new Error('mongo blip'));
       const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});

@@ -241,6 +241,15 @@ export class PackageFact {
    * snapshots. Invariant: never rewinds to null once set (plan invariant 7).
    */
   @Prop({ type: Date, default: null }) lastProbedAt: Date | null;
+
+  /**
+   * Testnet workshop/tutorial-scaffold marker. Mirror of the field on
+   * `PackageFactDoc` (kept 1:1 per the comment above). Set at probe time
+   * when `modules` matches a curated signature in
+   * `testnet-tutorial-signatures.ts`. Always `false` on mainnet/devnet.
+   * See `plans/plan_testnet_tutorial_filter.md`.
+   */
+  @Prop({ type: Boolean, default: false }) isTutorial: boolean;
 }
 
 @Schema({ timestamps: true, collection: 'onchainsnapshots' })

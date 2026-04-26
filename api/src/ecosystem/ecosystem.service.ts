@@ -27,6 +27,7 @@ import { CaptureLock } from './schemas/capture-lock.schema';
 import { AlertsService } from '../alerts/alerts.service';
 import { ALL_PROJECTS, ProjectDefinition, Category, Subcategory } from './projects';
 import { ALL_TEAMS, Team, getTeam } from './teams';
+import { isTutorialModuleSet } from './testnet-tutorial-signatures';
 
 /**
  * Whether a project has any synchronous match criterion — i.e. can be matched
@@ -458,16 +459,32 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   private static readonly CAPTURE_CRITICAL_MS = 100 * 60 * 1000;
   private static readonly CAPTURE_HARD_TIMEOUT_MS = 125 * 60 * 1000;
 
-  // ----- Phase 4c constants (testnet priority-sharded capture) -----
+  // ----- Testnet two-pipeline capture constants -----
 
   /**
-   * Newest-tick freshness window. When the newest paginator hits a
-   * package whose stored `lastProbedAt > now - 18h`, the algorithm has
-   * caught up with recent work and stops. 18h = 3 ticks × 6h interval,
-   * so we never miss newly-published packages for more than one tick.
-   * See `plans/plan_testnet_support.md § Phase 4c`.
+   * Pipeline-A freshness window. When the discovery paginator hits an
+   * address that's already in the previous snapshot AND was deep-probed
+   * within this window (`lastProbedAt > now - this`), discovery has
+   * caught up with recent work and bails — everything beyond is older
+   * known territory that Pipeline B's full-sweep deep-probe will pick
+   * up. 18h = 3 ticks × 6h interval, so we never miss newly-published
+   * packages for more than one tick.
+   *
+   * Note: this only fires when the prior fact has a non-null
+   * `lastProbedAt`. Shallow-discovered facts (Pipeline A's own output)
+   * carry `lastProbedAt: null`, so they never trip this check — only
+   * deep-probed history matters for "caught up?"
    */
   private static readonly TESTNET_FRESHNESS_WINDOW_MS = 18 * 60 * 60 * 1000;
+
+  /**
+   * Default concurrency for Pipeline B's parallel batches. Mirrors
+   * `backfillTestnetFromAddressList` — ~15 in-flight `fetchPackageByAddress`
+   * + `probeOnePackage` calls keeps the testnet GraphQL endpoint busy
+   * without tripping its rate limit. Math: 7,798 non-tutorial packages
+   * × ~3-4s/probe ÷ 15 ≈ ~33 min, comfortably inside the 90-min budget.
+   */
+  private static readonly TESTNET_DEEP_PROBE_CONCURRENCY = 15;
 
   /**
    * Upper-bound per-tick budget. The effective deadline is computed at
@@ -755,17 +772,23 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
-   * One-shot transition migration for the 2026-04-25 pagination-direction
-   * inversion. The old `testnetcursors.backfillAfterCursor` encoded a
-   * forward-walk position from genesis; the new code walks newest→oldest
-   * via `before:` cursors. The old value is not a valid `before:` cursor
-   * (encoding is direction-specific), so on first boot of the new code we
-   * discard it. Null-valued `backfillBeforeCursor` means "start from the
-   * newest end" — which is exactly the fresh-start behavior the new code
-   * needs.
+   * One-shot transition migration covering two consecutive testnet-cursor
+   * field renames:
    *
-   * Idempotent — after first successful run the `backfillAfterCursor`
-   * field is gone, so every subsequent call is a no-op.
+   *   - 2026-04-25 (pagination-direction inversion): the old
+   *     `backfillAfterCursor` encoded a forward-walk position from
+   *     genesis; the next code walked newest→oldest via `before:`
+   *     cursors. The old value was not a valid `before:` cursor
+   *     (encoding is direction-specific) so it was discarded.
+   *   - 2026-04-26 (two-pipeline refactor): `backfillBeforeCursor`
+   *     itself is now obsolete — Pipeline B's stalest-first aggregation
+   *     over `packagefacts` subsumes the work the backfill cursor used
+   *     to drive. `lastTickKind` likewise gone — every tick runs the
+   *     same A→B flow. We `$unset` both alongside `backfillAfterCursor`
+   *     so old singletons decode cleanly under the new (smaller) schema.
+   *
+   * Idempotent — after first successful run the legacy fields are gone,
+   * so every subsequent call is a no-op.
    *
    * NOTE: an earlier version of this migration ALSO deleted in-flight
    * `captureStage: 'partial'` snapshots + their packagefacts as a
@@ -780,24 +803,34 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    * wasted capture cycle. The "partial cleanup" was never load-bearing.
    */
   private async runPaginationInversionMigration(): Promise<void> {
-    // Rename cursor field on the testnet singleton. `strict: false` is
-    // required for the `$unset` to reach the wire — Mongoose's default
-    // strict mode silently drops updates referencing fields that no
-    // longer exist in the schema, so without this the legacy field
-    // persists even after migrateOne returns `modifiedCount: 1` (the
-    // `$set backfillBeforeCursor` still lands). Observed during the
-    // 2026-04-25 deploy; cleaned up manually then — this option keeps
-    // any future re-run clean without requiring a mongosh fallback.
+    // `strict: false` is required for the `$unset` clauses to reach the
+    // wire — Mongoose's default strict mode silently drops updates
+    // referencing fields that no longer exist in the schema. The match
+    // filter uses `$or` so we touch any singleton that still carries
+    // either legacy field, and skip the no-op case for already-clean docs.
     const cursorMig = await this.testnetCursorModel
       .updateOne(
-        { _id: 'testnet', backfillAfterCursor: { $exists: true } as never },
-        { $unset: { backfillAfterCursor: '' } as never, $set: { backfillBeforeCursor: null } as never },
+        {
+          _id: 'testnet',
+          $or: [
+            { backfillAfterCursor: { $exists: true } as never },
+            { backfillBeforeCursor: { $exists: true } as never },
+            { lastTickKind: { $exists: true } as never },
+          ],
+        } as never,
+        {
+          $unset: {
+            backfillAfterCursor: '',
+            backfillBeforeCursor: '',
+            lastTickKind: '',
+          } as never,
+        },
         { strict: false },
       )
       .exec();
     if (cursorMig.modifiedCount > 0) {
       this.logger.log(
-        'pagination-inversion migration: discarded legacy backfillAfterCursor on testnet singleton (old forward-direction value not valid as before: cursor in new code)',
+        'testnet-cursor migration: dropped legacy fields (backfillAfterCursor / backfillBeforeCursor / lastTickKind) — two-pipeline flow stores no per-tick cursor state',
       );
     }
   }
@@ -3310,6 +3343,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       startCursor: resumeCursor,
       displayByPackage,
       now: new Date(),
+      network: 'mainnet',
       deadlineMs,
       claimedAddresses,
       onCheckpoint,
@@ -4475,21 +4509,39 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     return view;
   }
 
-  // ===================== Phase 4c — testnet priority-sharded capture =====================
+  // ===================== Testnet two-pipeline capture =====================
   //
-  // See `plans/plan_testnet_support.md § Phase 4c` for the full design. Summary:
-  //   - Every 3rd tick is a **newest** pass (paginate from null, probe until a
-  //     package's `lastProbedAt > now - 18h` signals we've caught up).
-  //   - The 2 intervening ticks are **backfill** passes (resume from the
-  //     persistent `backfillBeforeCursor`; wrap to null on `hasPreviousPage: false`).
-  //   - Each tick writes one new `OnchainSnapshot` doc: fresh probes this tick
-  //     + copy-forward of un-touched packages from the previous testnet snapshot.
-  //   - 90-min tick budget; 1-of-3 ratio gives backfill 66% of ticks.
+  // See `plans/plan_testnet_tutorial_filter.md § Phase 2` for the full
+  // architecture. Each tick fires two stages back-to-back:
+  //
+  //   - **Pipeline A — discovery.** Paginate `packages(last:50, before:)`
+  //     newest-first. Per node we build a SHALLOW PackageFact (address,
+  //     deployer, modules, publishedAt, storageRebateNanos) and stamp
+  //     `isTutorial` from `isTutorialModuleSet`. No deep-probes here:
+  //     `lastProbedAt` is left `null` as the signal "Pipeline B should
+  //     pick this up." Bail conditions:
+  //       * encountered an address already deep-probed within
+  //         `TESTNET_FRESHNESS_WINDOW_MS` (i.e. we caught up),
+  //       * `hasPreviousPage: false` (genesis),
+  //       * `Date.now() >= deadlineMs`.
+  //   - **Pipeline B — deep probe.** Aggregate `packagefacts` for every
+  //     non-tutorial address on testnet (full sweep, no staleness
+  //     ordering, no cap). Each candidate goes through `probeOnePackage`
+  //     — `isTutorial: false` is guaranteed by the filter, so the early-
+  //     return path can never fire and every probe runs the full
+  //     pipeline. Probed in concurrency-15 batches via Promise.allSettled;
+  //     bounded by the remaining tick budget after Pipeline A.
+  //
+  // The kind-union dispatcher (`tickCounter % 3` newest vs backfill) is
+  // gone (Phase 2 deferred-cleanup commit, 2026-04-26): every tick is a
+  // discovery+deep-probe pair, no persistent backfill cursor needed.
+  // Stalest-first aggregation in Pipeline B subsumes the backfill walk.
   //
   // Non-goal: atomic point-in-time — testnet GraphQL is ~40× slower than
-  // mainnet (12s vs 0.3s per `packages(first:50)` page), so full-fleet atomic
-  // capture doesn't fit a cron cycle. Growth queries on testnet reflect what
-  // was re-probed in between two snapshots, not literal on-chain change.
+  // mainnet (12s vs 0.3s per `packages(last:50)` page), so full-fleet
+  // atomic capture doesn't fit a cron cycle. Growth queries on testnet
+  // reflect what was re-probed in between two snapshots, not literal
+  // on-chain change.
 
   /**
    * Load or create the singleton `TestnetCursor` state doc. The `_id` is the
@@ -4503,8 +4555,6 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     const created = await this.testnetCursorModel.create({
       _id: id,
       tickCounter: 0,
-      backfillBeforeCursor: null,
-      lastTickKind: null,
       lastTickAt: null,
       lastTickPackagesProbed: 0,
     });
@@ -4522,12 +4572,39 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     pkg: PackageInfo,
     displayByPackage: Map<string, Array<{ key: string; value: string }>>,
     now: Date = new Date(),
+    network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
   ): Promise<PackageFact> {
     const deployer = pkg.previousTransactionBlock?.sender?.address?.toLowerCase() ?? null;
     const modules = (pkg.modules?.nodes || []).map((m) => m.name);
     const storageRebateNanos = Number(pkg.storageRebate || 0);
     const publishedIso = pkg.previousTransactionBlock?.effects?.timestamp ?? null;
     const publishedAt = publishedIso ? new Date(publishedIso) : null;
+
+    // Phase A — testnet workshop/tutorial early-return. When the package's
+    // module set matches a curated catalog signature, skip the deep-probe
+    // pipeline (entry-fns, events, identity, tx counts, object-types) and
+    // return a shallow PackageFact with only the cheap-discoverable fields.
+    // The catalog is testnet-only (mainnet has no workshop population), so
+    // mainnet/devnet captures always fall through to the full pipeline.
+    // See `plans/plan_testnet_tutorial_filter.md`.
+    if (isTutorialModuleSet(modules, network)) {
+      return {
+        address: pkg.address,
+        deployer,
+        storageRebateNanos,
+        modules,
+        moduleMetrics: [],
+        objectHolderCount: 0,
+        objectCount: 0,
+        transactions: 0,
+        transactionsCapped: false,
+        objectTypeCounts: [],
+        fingerprint: null,
+        publishedAt,
+        lastProbedAt: now,
+        isTutorial: true,
+      } as PackageFact;
+    }
 
     const entryFunctionsByModule = await this.fetchEntryFunctions(pkg.address);
     const moduleMetrics: ModuleMetrics[] = [];
@@ -4593,6 +4670,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       fingerprint,
       publishedAt,
       lastProbedAt: now,
+      isTutorial: false,
     } as PackageFact;
   }
 
@@ -4659,52 +4737,49 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
-   * Unified paginate-and-probe loop. Shared by:
+   * Mainnet's atomic-sweep paginate-and-probe loop. Walks the
+   * `packages` connection newest-first, probes each non-framework
+   * package, and surfaces a checkpoint hook so the resumable-mainnet
+   * flow can persist progress at page boundaries.
    *
-   *   | Caller                | claimedAddresses | deadlineMs  | previousByAddress | freshnessWindowMs | onCheckpoint |
-   *   |-----------------------|------------------|-------------|-------------------|-------------------|--------------|
-   *   | mainnet `captureRaw`  | set              | —           | —                 | —                 | commit-3     |
-   *   | testnet newest-tick   | —                | 90min       | prev snap map     | 18h               | —            |
-   *   | testnet backfill-tick | —                | 90min       | —                 | —                 | —            |
+   * Testnet does NOT use this helper anymore — the two-pipeline
+   * `runTestnetDiscoveryTick` + `runTestnetDeepProbeTick` (Phase 2 of
+   * `plans/plan_testnet_tutorial_filter.md`) replaced the
+   * paginate-and-deep-probe-interleaved flow with a discovery walk
+   * that builds shallow facts only, plus a full-sweep deep probe
+   * over `packagefacts`. Mainnet kept this helper because its 751-pkg
+   * fleet is small enough for a single atomic walk per cron cycle and
+   * the resumable-checkpoint flow still buys crash-resilience.
    *
-   * Behaviour in one place:
-   *   - When `claimedAddresses` is provided AND the package address is in the
-   *     chain-primitive framework space (`0x0000…0***`) AND unclaimed → skip.
-   *     (Mainnet filter; testnet scans every package.)
-   *   - When `previousByAddress` + `freshnessWindowMs` are provided AND the
-   *     prior entry's `lastProbedAt > now - freshnessWindowMs` → early-exit
-   *     with `hitFreshWindow: true`. (Testnet newest-tick watermark.)
-   *   - When `deadlineMs` is provided AND `Date.now() >= deadlineMs` at the
-   *     top of a page fetch or after a probe → early-exit with
-   *     `deadlineHit: true`.
-   *   - Each `probeOnePackage` is try/catch'd individually (mainnet
-   *     per-package resilience — one flaky probe doesn't discard hours of
-   *     work; testnet benefits too).
-   *   - When a page fetch fails (after `this.graphql`'s own retries are
-   *     exhausted), returns with `error` set and `nextCursor` at the
-   *     pre-fetch position so the next invocation resumes correctly.
+   * Behaviour:
+   *   - Framework filter — addresses in the chain-primitive space
+   *     (`0x0000…0***`) AND unclaimed by any project def are silently
+   *     skipped.
+   *   - Deadline — at the top of each page-fetch and after each
+   *     successful probe; bails with `deadlineHit: true` and
+   *     `nextCursor` set so the next tick can resume cleanly.
+   *   - Each `probeOnePackage` is try/catch'd individually so one
+   *     flaky probe doesn't discard hours of work.
+   *   - When a page fetch fails (after `this.graphql`'s own retries
+   *     are exhausted), returns with `error` set and `nextCursor` at
+   *     the pre-fetch position so the next invocation resumes correctly.
    *
    * `onCheckpoint` + `checkpointEveryN` wire in the resumable-mainnet
    * flow: after every `checkpointEveryN` probed packages (counted since
    * the last checkpoint), the helper calls `onCheckpoint(batch, cursor)`
    * with the newly-probed tail and the paginator cursor that's safe to
-   * resume from (`page.endCursor` of the last fully-iterated page).
-   * Checkpoints fire only at page boundaries so the written cursor
-   * always matches the position AFTER every package in `batch` — a
-   * crash-resume from that cursor re-fetches the next page, not the
+   * resume from. Checkpoints fire only at page boundaries so the written
+   * cursor always matches the position AFTER every package in `batch` —
+   * a crash-resume from that cursor re-fetches the next page, not the
    * already-checkpointed one.
-   *
-   * The return shape is a superset of what the three call sites need; each
-   * picks off the fields it cares about.
    */
   private async probePaginator(opts: {
     startCursor: string | null;
     displayByPackage: Map<string, Array<{ key: string; value: string }>>;
     now: Date;
-    deadlineMs?: number;
-    previousByAddress?: Map<string, PackageFact>;
-    freshnessWindowMs?: number;
-    claimedAddresses?: Set<string>;
+    network: 'mainnet' | 'testnet' | 'devnet';
+    deadlineMs: number;
+    claimedAddresses: Set<string>;
     onCheckpoint?: (batch: PackageFact[], cursor: string | null) => Promise<void>;
     checkpointEveryN?: number;
   }): Promise<{
@@ -4712,7 +4787,6 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     nextCursor: string | null;
     wrapped: boolean;
     deadlineHit: boolean;
-    hitFreshWindow: boolean;
     error: Error | null;
     failedPackages: { address: string; error: string }[];
   }> {
@@ -4720,20 +4794,16 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       startCursor,
       displayByPackage,
       now,
+      network,
       deadlineMs,
-      previousByAddress,
-      freshnessWindowMs,
       claimedAddresses,
       onCheckpoint,
       checkpointEveryN,
     } = opts;
     const probed: PackageFact[] = [];
     const failedPackages: { address: string; error: string }[] = [];
-    const freshCutoff =
-      previousByAddress && freshnessWindowMs ? now.getTime() - freshnessWindowMs : null;
     let cursor = startCursor;
     let wrapped = false;
-    let hitFreshWindow = false;
     // Track how many probed packages have already been flushed via
     // `onCheckpoint` so each flush ships only the un-checkpointed tail.
     let lastCheckpointed = 0;
@@ -4748,48 +4818,38 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
 
     try {
       while (true) {
-        if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
-          return { probed, nextCursor: cursor, wrapped: false, deadlineHit: true, hitFreshWindow, error: null, failedPackages };
+        if (Date.now() >= deadlineMs) {
+          return { probed, nextCursor: cursor, wrapped: false, deadlineHit: true, error: null, failedPackages };
         }
         const page = await this.fetchPackagePage(cursor);
         // Nodes are newest-first within the page (see fetchPackagePage
-        // doc-comment on the reverse). Iteration order therefore matches
-        // the "newest first" walk the testnet priority-shard expects.
+        // doc-comment on the reverse).
         for (const info of page.nodes) {
-          // Mainnet framework filter — silent skip.
+          // Framework filter — silent skip when a 0x000…0*** address
+          // hasn't been opted-in by any project def's packageAddresses.
           if (
-            claimedAddresses &&
             info.address.startsWith('0x000000000000000000000000000000000000000000000000000000000000000') &&
             !claimedAddresses.has(info.address.toLowerCase())
           ) {
             continue;
           }
-          // Testnet newest-tick freshness watermark — stop as soon as we
-          // see a package we probed within the freshness window.
-          if (freshCutoff !== null && previousByAddress) {
-            const prev = previousByAddress.get(info.address.toLowerCase());
-            if (prev && prev.lastProbedAt && new Date(prev.lastProbedAt).getTime() > freshCutoff) {
-              hitFreshWindow = true;
-              return { probed, nextCursor: cursor, wrapped: false, deadlineHit: false, hitFreshWindow, error: null, failedPackages };
-            }
-          }
           try {
-            const fact = await this.probeOnePackage(info, displayByPackage, now);
+            const fact = await this.probeOnePackage(info, displayByPackage, now, network);
             probed.push(fact);
           } catch (e) {
             const err = e as Error;
             this.logger.warn(`probePaginator: skipped ${info.address} — ${err.message}`);
             failedPackages.push({ address: info.address, error: err.message });
           }
-          if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
-            return { probed, nextCursor: page.startCursor, wrapped: false, deadlineHit: true, hitFreshWindow, error: null, failedPackages };
+          if (Date.now() >= deadlineMs) {
+            return { probed, nextCursor: page.startCursor, wrapped: false, deadlineHit: true, error: null, failedPackages };
           }
         }
-        // Page fully processed — advance cursor, then optionally checkpoint
-        // with the post-advance cursor. Writing the post-advance cursor
-        // means a crash-resume fetches the NEXT page, not this one. Walk
-        // direction is newest → oldest; `hasPreviousPage: false` marks
-        // genesis (we've reached the oldest package in the connection).
+        // Page fully processed — advance cursor, then optionally
+        // checkpoint with the post-advance cursor. Writing the
+        // post-advance cursor means a crash-resume fetches the NEXT
+        // page, not this one. Walk direction is newest → oldest;
+        // `hasPreviousPage: false` marks genesis (oldest package).
         if (!page.hasPreviousPage) {
           wrapped = true;
           cursor = null;
@@ -4798,16 +4858,17 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         }
         cursor = page.startCursor;
         if (!cursor) {
-          // Defensive: hasPreviousPage:true with null startCursor — treat as wrap.
+          // Defensive: hasPreviousPage:true with null startCursor —
+          // treat as wrap so the next tick restarts cleanly.
           wrapped = true;
           await maybeCheckpoint(cursor);
           break;
         }
         await maybeCheckpoint(cursor);
       }
-      return { probed, nextCursor: cursor, wrapped, deadlineHit: false, hitFreshWindow, error: null, failedPackages };
+      return { probed, nextCursor: cursor, wrapped, deadlineHit: false, error: null, failedPackages };
     } catch (e) {
-      return { probed, nextCursor: cursor, wrapped: false, deadlineHit: false, hitFreshWindow, error: e as Error, failedPackages };
+      return { probed, nextCursor: cursor, wrapped: false, deadlineHit: false, error: e as Error, failedPackages };
     }
   }
 
@@ -4905,7 +4966,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
           // handle gracefully) — skip without failing the whole pass.
           continue;
         }
-        const fact = await this.probeOnePackage(info, displayByPackage, now);
+        const fact = await this.probeOnePackage(info, displayByPackage, now, network);
         probed.push(fact);
       } catch (e) {
         this.logger.warn(
@@ -4941,88 +5002,224 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
-   * Thin wrapper for the testnet priority-sharded newest-tick. See
-   * `probePaginator` for the full behaviour matrix.
-   */
-  private async runNewestTick(
-    previousByAddress: Map<string, PackageFact>,
-    now: Date,
-    deadlineMs: number,
-    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
-  ): Promise<{ probed: PackageFact[]; hitFreshWindow: boolean; deadlineHit: boolean; error: Error | null }> {
-    const result = await this.probePaginator({
-      startCursor: null,
-      displayByPackage,
-      now,
-      deadlineMs,
-      previousByAddress,
-      freshnessWindowMs: EcosystemService.TESTNET_FRESHNESS_WINDOW_MS,
-    });
-    return {
-      probed: result.probed,
-      hitFreshWindow: result.hitFreshWindow,
-      deadlineHit: result.deadlineHit,
-      error: result.error,
-    };
-  }
-
-  /**
-   * Thin wrapper for the testnet priority-sharded backfill tick. See
-   * `probePaginator` for the full behaviour matrix.
-   */
-  private async runBackfillTick(
-    startCursor: string | null,
-    now: Date,
-    deadlineMs: number,
-    displayByPackage: Map<string, Array<{ key: string; value: string }>>,
-  ): Promise<{ probed: PackageFact[]; nextCursor: string | null; wrapped: boolean; deadlineHit: boolean; error: Error | null }> {
-    const result = await this.probePaginator({
-      startCursor,
-      displayByPackage,
-      now,
-      deadlineMs,
-    });
-    return {
-      probed: result.probed,
-      nextCursor: result.nextCursor,
-      wrapped: result.wrapped,
-      deadlineHit: result.deadlineHit,
-      error: result.error,
-    };
-  }
-
-  /**
-   * Merge freshly-probed packages this tick with copy-forwards from the
-   * previous testnet snapshot. Copy-forward preserves the older
-   * `lastProbedAt` (invariant 7 — never rewinds to null). Packages that
-   * appear in both are represented once, using the fresh probe.
-   */
-  private buildTestnetSnapshotPackages(
-    freshlyProbed: PackageFact[],
-    previous: PackageFact[],
-  ): PackageFact[] {
-    const byAddress = new Map<string, PackageFact>();
-    for (const p of previous) byAddress.set(p.address.toLowerCase(), p);
-    for (const p of freshlyProbed) byAddress.set(p.address.toLowerCase(), p);
-    return Array.from(byAddress.values());
-  }
-
-  /**
-   * Run one testnet priority-sharded capture tick. Decides `newest` vs
-   * `backfill` based on `tickCounter % 3`, dispatches, writes a new
-   * `OnchainSnapshot` with `network: 'testnet'`, updates the cursor doc.
-   * Public for CLI/test access; cron hook below invokes it via
-   * `testnetCron()` with the scanner-host guard.
+   * Pipeline A — discovery walk over testnet packages. Newest-first
+   * pagination, no per-package deep-probing, no `displayByPackage`
+   * lookups, no `probeOnePackage` calls. For each package node we
+   * build a shallow `PackageFact` carrying only the fields cheaply
+   * available from `fetchPackagePage`'s response — address, deployer,
+   * modules, publishedAt, storageRebate — plus an `isTutorial` flag
+   * via `isTutorialModuleSet`. Heavy fields default to empty/zero;
+   * `lastProbedAt: null` is the signal Pipeline B uses to find these
+   * facts (null sorts first under ascending `lastProbedAt`).
    *
-   * No Mongo write / no guard acquisition happens if the service is bound
-   * to a non-mainnet network — meaning the testnet scanner process would
-   * run this method; the mainnet-bound process's cron hook is guarded by
-   * `this.network === 'mainnet'` so only the scanner host fires it.
-   * (Web-host `API_ROLE=serve` gates schedule registration out entirely.)
+   * Bail conditions:
+   *   - **Freshness window** — encountered an address present in
+   *     `previousByAddress` whose `lastProbedAt > now - freshnessWindowMs`.
+   *     Means we've caught up with deep-probed history; everything beyond
+   *     is older known territory that Pipeline B will reach if budget
+   *     allows. Returns `hitFreshWindow: true`.
+   *   - **Genesis** — `hasPreviousPage: false`. Returns `wrapped: true`.
+   *   - **Deadline** — `Date.now() >= deadlineMs`. Returns `deadlineHit: true`.
+   *
+   * Each `fetchPackagePage` call is wrapped in try/catch; on retry-exhaust
+   * we bail with whatever was discovered so far + an `error` field set, so
+   * Pipeline B can still try in the remaining budget.
+   */
+  private async runTestnetDiscoveryTick(opts: {
+    previousByAddress: Map<string, PackageFact>;
+    freshnessWindowMs: number;
+    deadlineMs: number;
+    now: Date;
+  }): Promise<{
+    discovered: PackageFact[];
+    hitFreshWindow: boolean;
+    deadlineHit: boolean;
+    wrapped: boolean;
+    error: Error | null;
+  }> {
+    const { previousByAddress, freshnessWindowMs, deadlineMs, now } = opts;
+    const discovered: PackageFact[] = [];
+    const freshCutoff = now.getTime() - freshnessWindowMs;
+    let cursor: string | null = null;
+    let hitFreshWindow = false;
+    let wrapped = false;
+
+    try {
+      while (true) {
+        if (Date.now() >= deadlineMs) {
+          return { discovered, hitFreshWindow, deadlineHit: true, wrapped, error: null };
+        }
+        const page = await this.fetchPackagePage(cursor);
+        // Nodes are newest-first within the page (see `fetchPackagePage`
+        // doc-comment on the reverse). Iteration order matches the
+        // newest-first walk discovery expects.
+        for (const info of page.nodes) {
+          // Freshness watermark — stop as soon as we see a package
+          // already deep-probed within the window. Note this is `null`-safe:
+          // a previously-discovered shallow fact has `lastProbedAt: null`
+          // which fails the `> freshCutoff` guard, so re-discovery of an
+          // un-probed fact does NOT trip the window — only deep-probed
+          // history qualifies as "caught up."
+          const prev = previousByAddress.get(info.address.toLowerCase());
+          if (prev && prev.lastProbedAt && new Date(prev.lastProbedAt).getTime() > freshCutoff) {
+            hitFreshWindow = true;
+            return { discovered, hitFreshWindow, deadlineHit: false, wrapped, error: null };
+          }
+          const modules = (info.modules?.nodes || []).map((m) => m.name);
+          const deployer = info.previousTransactionBlock?.sender?.address?.toLowerCase() ?? null;
+          const publishedIso = info.previousTransactionBlock?.effects?.timestamp ?? null;
+          const fact: PackageFact = {
+            address: info.address,
+            deployer,
+            storageRebateNanos: Number(info.storageRebate || 0),
+            modules,
+            moduleMetrics: [],
+            objectHolderCount: 0,
+            objectCount: 0,
+            transactions: 0,
+            transactionsCapped: false,
+            objectTypeCounts: [],
+            fingerprint: null,
+            publishedAt: publishedIso ? new Date(publishedIso) : null,
+            // `null` is the explicit signal that this fact has been
+            // discovered but not deep-probed yet. Pipeline B's full-
+            // sweep aggregation re-probes every non-tutorial address
+            // each tick, so this row will be upgraded the same tick
+            // it was discovered (delete-then-insert overwrite).
+            lastProbedAt: null,
+            isTutorial: isTutorialModuleSet(modules, 'testnet'),
+          };
+          discovered.push(fact);
+          if (Date.now() >= deadlineMs) {
+            return { discovered, hitFreshWindow, deadlineHit: true, wrapped, error: null };
+          }
+        }
+        if (!page.hasPreviousPage) {
+          wrapped = true;
+          break;
+        }
+        cursor = page.startCursor;
+        if (!cursor) {
+          // Defensive: hasPreviousPage:true with null startCursor — treat
+          // as wrap so the next tick restarts cleanly rather than spinning.
+          wrapped = true;
+          break;
+        }
+      }
+      return { discovered, hitFreshWindow, deadlineHit: false, wrapped, error: null };
+    } catch (e) {
+      return { discovered, hitFreshWindow, deadlineHit: false, wrapped, error: e as Error };
+    }
+  }
+
+  /**
+   * Pipeline B — deep probe of every non-tutorial testnet fact. Reads
+   * `packagefacts` filtered to `network: 'testnet', isTutorial: false`,
+   * groups by address (full pool, no cap, no staleness ordering), and
+   * re-probes each via `fetchPackageByAddress` + `probeOnePackage`.
+   *
+   * Mirrors mainnet's "every 2h, every package" semantics: each tick
+   * re-walks the entire pool rather than picking off a stalest subset.
+   * 7,798 non-tutorial packages × ~3-4s/probe ÷ concurrency-15 ≈ ~33 min,
+   * comfortably inside the 90-min testnet tick budget.
+   *
+   * Tutorial-flagged packages never appear in the candidate set thanks to
+   * the `isTutorial: false` filter on the aggregate match — `probeOnePackage`'s
+   * early-return path is therefore unreachable here, and every probe runs
+   * the full deep pipeline (entry-fns, events, identity, tx counts,
+   * object-types).
+   *
+   * Concurrency-batched via `Promise.allSettled` so one slow/flaky address
+   * doesn't stall the rest. Mirrors `backfillTestnetFromAddressList`'s
+   * pattern. Per-batch deadline check honors the dynamic budget without
+   * leaving in-flight probes stranded — we let the batch settle, then
+   * bail on the next iteration.
+   *
+   * Returns probed facts for the caller to upsert into the new snapshot,
+   * plus per-address failures for diagnostics.
+   */
+  private async runTestnetDeepProbeTick(opts: {
+    now: Date;
+    deadlineMs: number;
+    displayByPackage: Map<string, Array<{ key: string; value: string }>>;
+    concurrency?: number;
+  }): Promise<{
+    probed: PackageFact[];
+    deadlineHit: boolean;
+    exhaustedCandidates: boolean;
+    failures: Array<{ address: string; error: string }>;
+  }> {
+    const { now, deadlineMs, displayByPackage } = opts;
+    const concurrency = opts.concurrency ?? EcosystemService.TESTNET_DEEP_PROBE_CONCURRENCY;
+    const probed: PackageFact[] = [];
+    const failures: Array<{ address: string; error: string }> = [];
+    if (Date.now() >= deadlineMs) {
+      return { probed, deadlineHit: true, exhaustedCandidates: false, failures };
+    }
+    const candidates: Array<{ _id: string }> = await this.pkgFactModel
+      .aggregate([
+        { $match: { network: 'testnet', isTutorial: false } },
+        // Full sweep — order doesn't matter when we re-probe the entire
+        // pool every tick. No $sort, no $limit.
+        { $group: { _id: '$address' } },
+      ])
+      .exec();
+    if (candidates.length === 0) {
+      return { probed, deadlineHit: false, exhaustedCandidates: true, failures };
+    }
+    this.logger.log(
+      `testnet deep-probe: ${candidates.length} candidate address(es) (full sweep, concurrency=${concurrency})`,
+    );
+    for (let i = 0; i < candidates.length; i += concurrency) {
+      if (Date.now() >= deadlineMs) {
+        return { probed, deadlineHit: true, exhaustedCandidates: false, failures };
+      }
+      const batch = candidates.slice(i, i + concurrency);
+      const results = await Promise.allSettled(
+        batch.map(async (row) => {
+          const info = await this.fetchPackageByAddress(row._id);
+          if (!info) {
+            // Package vanished from chain source — return null sentinel
+            // so the outer loop can skip without recording a failure.
+            return null;
+          }
+          return await this.probeOnePackage(info, displayByPackage, now, 'testnet');
+        }),
+      );
+      for (let idx = 0; idx < results.length; idx++) {
+        const r = results[idx];
+        if (r.status === 'fulfilled') {
+          if (r.value !== null) probed.push(r.value);
+          // `null` => vanish-skip; nothing recorded.
+        } else {
+          const err = r.reason as Error;
+          const message = err?.message ?? String(r.reason);
+          this.logger.warn(`testnet deep-probe: skipped ${batch[idx]._id} — ${message}`);
+          failures.push({ address: batch[idx]._id, error: message });
+        }
+      }
+    }
+    return { probed, deadlineHit: false, exhaustedCandidates: true, failures };
+  }
+
+  /**
+   * Run one testnet capture tick — Pipeline A (discovery) followed by
+   * Pipeline B (deep-probe stalest). Writes a new `OnchainSnapshot`
+   * with `network: 'testnet', captureStage: 'complete'`, populates
+   * `packagefacts` under that snapshot id, advances the diagnostic
+   * cursor doc. Public for CLI/test access; cron hook below invokes
+   * it via `testnetCron()` with the scanner-host guard.
+   *
+   * No Mongo write / no guard acquisition happens if the service is
+   * bound to a non-mainnet network — meaning the testnet scanner
+   * process would run this method; the mainnet-bound process's cron
+   * hook is guarded by `this.network === 'mainnet'` so only the
+   * scanner host fires it. (Web-host `API_ROLE=serve` gates schedule
+   * registration out entirely.)
    */
   public async captureTestnetTick(): Promise<{
-    kind: 'newest' | 'backfill';
-    packagesProbed: number;
+    discovered: number;
+    deepProbed: number;
     totalPackagesInSnapshot: number;
     durationMs: number;
     wrapped: boolean;
@@ -5095,21 +5292,13 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       lockAcquired = true;
 
       const state = await this.loadTestnetCursor();
-      // Phase-1 of priority-shard simplification (2026-04-25): always run
-      // newest mode. Gap-closing's stalest-first probe already covers the
-      // old-territory work backfill used to do, with one fewer cursor to
-      // maintain. Kept `kind` as the union type + downstream branches
-      // intact so a revert is a 1-line flip back to the modulo dispatch;
-      // if newest+gap-close proves sufficient over a few days,
-      // `runBackfillTick` + `backfillBeforeCursor` + the union itself get
-      // deleted in a Phase-2 commit. Cast widens the literal so TS
-      // doesn't narrow follow-on `kind === 'backfill'` checks to dead
-      // code (we want them ready for revert, not deleted by the compiler).
-      const kind = 'newest' as 'newest' | 'backfill';
-      this.logger.log(`Testnet tick starting: kind=${kind} tickCounter=${state.tickCounter} effectiveBudget=${effectiveBudgetMin}min`);
+      this.logger.log(
+        `Testnet tick starting: tickCounter=${state.tickCounter} effectiveBudget=${effectiveBudgetMin}min`,
+      );
 
-      // Load previous testnet snapshot so we can (a) check freshness in
-      // newest-tick, (b) copy-forward un-touched packages into the new doc.
+      // Load previous testnet snapshot so we can:
+      //   (a) check freshness in Pipeline A,
+      //   (b) copy-forward un-touched packages into the new snapshot.
       const previousDoc = await this.ecoModel
         .findOne({ network: 'testnet' })
         .sort({ createdAt: -1 })
@@ -5120,103 +5309,133 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       for (const p of previousPackages) previousByAddress.set(p.address.toLowerCase(), p);
 
       // Display metadata pre-pass — same rationale as `captureRaw`. Cheap
-      // compared to per-package probes and gets us `display.*` identifiers
-      // for free.
+      // compared to per-package probes; populates `display.*` identifiers
+      // for the deep-probe pipeline.
       const displayByPackage = await this.collectDisplayMetadata();
 
-      let freshlyProbed: PackageFact[] = [];
-      let hitFreshWindow = false;
-      let wrapped = false;
-      let deadlineHit = false;
-      let nextBackfillCursor: string | null = state.backfillBeforeCursor;
-      let probeError: Error | null = null;
+      // Pre-generate the new snapshot id so Pipeline A and Pipeline B can
+      // both write `packagefacts` rows under the same parent before the
+      // header gets `safeCreate`d at the end. This mirrors the mainnet
+      // pattern (`captureRaw` + `finalizeMainnetSnapshot`): facts first,
+      // header last.
+      const newId = new Types.ObjectId();
 
-      if (kind === 'newest') {
-        const result = await this.runNewestTick(previousByAddress, now, deadlineMs, displayByPackage);
-        freshlyProbed = result.probed;
-        hitFreshWindow = result.hitFreshWindow;
-        deadlineHit = result.deadlineHit;
-        probeError = result.error;
-      } else {
-        const result = await this.runBackfillTick(
-          state.backfillBeforeCursor,
+      // ----- Pipeline A: discovery -----
+      const discovery = await this.runTestnetDiscoveryTick({
+        previousByAddress,
+        freshnessWindowMs: EcosystemService.TESTNET_FRESHNESS_WINDOW_MS,
+        deadlineMs,
+        now,
+      });
+      const { discovered, hitFreshWindow, wrapped } = discovery;
+      let deadlineHit = discovery.deadlineHit;
+      const discoveryError = discovery.error;
+      if (discoveryError) {
+        this.logger.error(
+          `Testnet discovery aborted mid-walk after ${discovered.length} pkgs: ${discoveryError.message} — falling through to deep-probe with what we have`,
+        );
+      }
+
+      // Persist Pipeline A's shallow facts immediately so a mid-tick
+      // crash leaves something readable rather than an empty header.
+      // `lastProbedAt: null` on every shallow fact keeps the deep-probe
+      // ordering invariant.
+      if (discovered.length > 0) {
+        await this.insertPackageFacts(newId, 'testnet', discovered);
+      }
+
+      // Discovery-budget gap WARN: ran out of time before reaching
+      // freshness window OR genesis. Means capacity is falling behind
+      // testnet's production rate — log loudly and persist for ops
+      // visibility once log rotation kicks in. Skip the warning when
+      // discovery errored (already logged loudly above) — `deadlineHit`
+      // there is incidental, not a capacity signal.
+      if (deadlineHit && !hitFreshWindow && !wrapped && !discoveryError) {
+        const oldestProbedAt = discovered.length > 0
+          ? discovered[discovered.length - 1]?.publishedAt ?? null
+          : null;
+        await this.logCaptureGap('testnet', {
+          probedThisTick: discovered.length,
+          oldestProbedPublishedAt: oldestProbedAt,
+          durationBudgetMs: deadlineMs - startedAt,
+        }, `testnet discovery exhausted ${Math.round((deadlineMs-startedAt)/60000)}min budget after ${discovered.length} pkgs without reaching previously-probed range — coverage falling behind production rate`);
+      }
+
+      // ----- Pipeline B: deep probe stalest -----
+      // Skip cleanly if we've already burned the budget. Otherwise hand
+      // the rest of the tick to the stalest-first probe, including when
+      // discovery errored — it might still find addresses we discovered
+      // partially or in earlier ticks.
+      let deepProbed: PackageFact[] = [];
+      let deepProbeFailures: Array<{ address: string; error: string }> = [];
+      if (Date.now() < deadlineMs) {
+        const dp = await this.runTestnetDeepProbeTick({
           now,
           deadlineMs,
           displayByPackage,
-        );
-        freshlyProbed = result.probed;
-        wrapped = result.wrapped;
-        deadlineHit = result.deadlineHit;
-        nextBackfillCursor = result.nextCursor;
-        probeError = result.error;
-      }
-
-      // Persist partial work even when the probe loop errored mid-walk. The
-      // retry policy in `this.graphql()` handles transient testnet timeouts
-      // inside a single call; `probeError` here is the case where retries
-      // exhausted. In that case we still want to save what got probed so
-      // far (could be thousands of packages after a long run) rather than
-      // lose it all. Cursor stays at the pre-fetch value so the next tick
-      // re-attempts the same page — usually succeeds when load subsides.
-      if (probeError) {
-        this.logger.error(
-          `Testnet ${kind}-tick aborted mid-probe after ${freshlyProbed.length} pkgs: ${probeError.message} — saving partial snapshot`,
-        );
-      }
-
-      // Gap WARN + schemaAlert: newest-tick exhausted its budget without
-      // reaching the freshness window. Means capacity is falling behind
-      // testnet's production rate — log loudly and persist. See
-      // `plans/plan_pagination_inversion_and_gap_closing.md § 3`.
-      if (kind === 'newest' && deadlineHit && !hitFreshWindow && !probeError) {
-        const oldestProbedAt = freshlyProbed.length > 0
-          ? freshlyProbed[freshlyProbed.length - 1]?.publishedAt ?? null
-          : null;
-        await this.logCaptureGap('testnet', {
-          probedThisTick: freshlyProbed.length,
-          oldestProbedPublishedAt: oldestProbedAt,
-          durationBudgetMs: deadlineMs - startedAt,
-        }, `testnet newest-tick exhausted ${Math.round((deadlineMs-startedAt)/60000)}min budget after ${freshlyProbed.length} pkgs without reaching previously-probed range — coverage falling behind production rate`);
-      }
-
-      // Gap-closing: if newest-tick exited early via the freshness window
-      // and budget remains, use the spare time to re-probe the stalest
-      // addresses. Uniform for both tick kinds (Decision 4); on backfill
-      // there is no fresh-window signal so we only run gap-closing when
-      // backfill wrapped (reached genesis) and budget remains.
-      let gapClosed: PackageFact[] = [];
-      const shouldRunGapClosing =
-        !probeError &&
-        ((kind === 'newest' && hitFreshWindow) || (kind === 'backfill' && wrapped));
-      if (shouldRunGapClosing && Date.now() < deadlineMs) {
-        const gc = await this.runGapClosing('testnet', now, deadlineMs, displayByPackage);
-        gapClosed = gc.probed;
-        if (gapClosed.length > 0) {
+        });
+        deepProbed = dp.probed;
+        deepProbeFailures = dp.failures;
+        if (dp.deadlineHit) deadlineHit = true;
+        if (deepProbed.length > 0) {
           this.logger.log(
-            `Testnet gap-closing probed ${gapClosed.length} stale pkgs (deadlineHit=${gc.deadlineHit} exhaustedCandidates=${gc.exhaustedCandidates})`,
+            `Testnet deep-probe finished: probed=${deepProbed.length} failures=${deepProbeFailures.length} deadlineHit=${dp.deadlineHit} exhaustedCandidates=${dp.exhaustedCandidates}`,
           );
         }
       }
 
-      // Build merged package set (fresh + gap-closed + copy-forward). Order
-      // matters: gap-closed pkgs must win over copy-forward (they're newly
-      // probed) but lose to freshly-probed-this-tick (fresher still).
-      const merged = this.buildTestnetSnapshotPackages(
-        [...freshlyProbed, ...gapClosed],
-        previousPackages,
-      );
+      // Pipeline B writes its results into this same snapshot. Some of
+      // those addresses already have a shallow fact from Pipeline A
+      // (the freshly-discovered case — null lastProbedAt sorted first
+      // and got picked up immediately); the unique
+      // `(snapshotId, address)` index would reject a second insert. So:
+      // delete the shallow rows for those addresses, then insert the
+      // deep-probed replacements. Two writes total but each one is
+      // already covered by existing mocks/indexes — simpler than
+      // introducing `bulkWrite(replaceOne, upsert: true)` for the same
+      // effect.
+      if (deepProbed.length > 0) {
+        const deepProbedAddresses = deepProbed.map((p) => p.address);
+        await this.pkgFactModel
+          .deleteMany({ snapshotId: newId, address: { $in: deepProbedAddresses } })
+          .exec();
+        await this.insertPackageFacts(newId, 'testnet', deepProbed);
+      }
 
-      const totalStorageRebateNanos = merged.reduce((s, p) => s + Number(p.storageRebateNanos || 0), 0);
+      // ----- Copy-forward: anything we did NOT touch this tick -----
+      // Preserves the older `lastProbedAt` (invariant: never rewinds
+      // to null once set) and the heavy fields from the previous
+      // snapshot's deep probe. Order doesn't matter here — these
+      // addresses are disjoint from discovered ∪ deepProbed by
+      // construction.
+      const touchedAddresses = new Set<string>();
+      for (const p of discovered) touchedAddresses.add(p.address.toLowerCase());
+      for (const p of deepProbed) touchedAddresses.add(p.address.toLowerCase());
+      const carriedForward = previousPackages.filter(
+        (p) => !touchedAddresses.has(p.address.toLowerCase()),
+      );
+      if (carriedForward.length > 0) {
+        await this.insertPackageFacts(newId, 'testnet', carriedForward);
+      }
+
+      // Build the totals header from the union of (discovered minus
+      // deep-probed-already, deep-probed, carried-forward). The
+      // discovered list still contains shallow rows that Pipeline B
+      // overwrote in `packagefacts`; for the totals we want the
+      // deep-probed shape to win.
+      const deepProbedAddrSet = new Set(deepProbed.map((p) => p.address.toLowerCase()));
+      const discoveredKept = discovered.filter(
+        (p) => !deepProbedAddrSet.has(p.address.toLowerCase()),
+      );
+      const totalPackagesInSnapshot =
+        discoveredKept.length + deepProbed.length + carriedForward.length;
+      const totalStorageRebateNanos = [
+        ...discoveredKept,
+        ...deepProbed,
+        ...carriedForward,
+      ].reduce((s, p) => s + Number(p.storageRebateNanos || 0), 0);
       const durationMs = Date.now() - startedAt;
 
-      // Write packagefacts first (sub-collection), header last — if the
-      // header create fails we leave orphan facts behind but never an
-      // empty-looking snapshot header. Pre-generated `_id` threads through
-      // both writes. This is the exact pattern that averts the 2026-04-24
-      // BSON-ceiling crash: the 9230-pkg payload lives in its own docs,
-      // the header stays under 5 KiB.
-      const newId = new Types.ObjectId();
-      await this.insertPackageFacts(newId, 'testnet', merged);
       await this.safeCreate({
         _id: newId,
         network: 'testnet',
@@ -5227,28 +5446,30 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         captureDurationMs: durationMs,
       });
 
-      // Update cursor state for the next tick.
-      const cursorUpdate: Partial<TestnetCursor> = {
-        tickCounter: state.tickCounter + 1,
-        lastTickKind: kind,
-        lastTickAt: new Date(),
-        lastTickPackagesProbed: freshlyProbed.length,
-      };
-      if (kind === 'backfill') {
-        cursorUpdate.backfillBeforeCursor = wrapped ? null : nextBackfillCursor;
-      }
+      // Diagnostic cursor advance — pure observability now that the
+      // kind-union dispatcher is gone.
       await this.testnetCursorModel
-        .updateOne({ _id: 'testnet' }, { $set: cursorUpdate }, { upsert: true })
+        .updateOne(
+          { _id: 'testnet' },
+          {
+            $set: {
+              tickCounter: state.tickCounter + 1,
+              lastTickAt: new Date(),
+              lastTickPackagesProbed: discovered.length + deepProbed.length,
+            },
+          },
+          { upsert: true },
+        )
         .exec();
 
       this.logger.log(
-        `Testnet tick done: kind=${kind} probed=${freshlyProbed.length} total=${merged.length} wrapped=${wrapped} hitFreshWindow=${hitFreshWindow} deadlineHit=${deadlineHit} durationMs=${durationMs}`,
+        `Testnet tick done: discovered=${discovered.length} deepProbed=${deepProbed.length} total=${totalPackagesInSnapshot} wrapped=${wrapped} hitFreshWindow=${hitFreshWindow} deadlineHit=${deadlineHit} durationMs=${durationMs}`,
       );
 
       return {
-        kind,
-        packagesProbed: freshlyProbed.length,
-        totalPackagesInSnapshot: merged.length,
+        discovered: discovered.length,
+        deepProbed: deepProbed.length,
+        totalPackagesInSnapshot,
         durationMs,
         wrapped,
         deadlineHit,
@@ -5335,7 +5556,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
           batch.map(async (addr) => {
             const info = await this.fetchPackageByAddress(addr);
             if (!info) throw new Error('package not found on-chain');
-            return await this.probeOnePackage(info, displayByPackage, now);
+            return await this.probeOnePackage(info, displayByPackage, now, 'testnet');
           }),
         );
         for (let idx = 0; idx < results.length; idx++) {
