@@ -6877,7 +6877,6 @@ describe('EcosystemService', () => {
         const now = new Date('2026-04-26T18:00:00Z');
         const result = await (service as any).runTestnetDiscoveryTick({
           previousByAddress: new Map(),
-          freshnessWindowMs: 18 * 60 * 60 * 1000,
           deadlineMs: Date.now() + 60_000,
           now,
         });
@@ -6923,7 +6922,6 @@ describe('EcosystemService', () => {
         });
         const result = await (service as any).runTestnetDiscoveryTick({
           previousByAddress,
-          freshnessWindowMs: 18 * 60 * 60 * 1000,
           deadlineMs: Date.now() + 60_000,
           now: new Date(),
         });
@@ -6943,7 +6941,6 @@ describe('EcosystemService', () => {
         });
         const result = await (service as any).runTestnetDiscoveryTick({
           previousByAddress: new Map(),
-          freshnessWindowMs: 18 * 60 * 60 * 1000,
           deadlineMs: Date.now() + 60_000,
           now: new Date(),
         });
@@ -6960,7 +6957,6 @@ describe('EcosystemService', () => {
         });
         const result = await (service as any).runTestnetDiscoveryTick({
           previousByAddress: new Map(),
-          freshnessWindowMs: 18 * 60 * 60 * 1000,
           deadlineMs: Date.now() + 60_000,
           now: new Date(),
         });
@@ -6972,7 +6968,6 @@ describe('EcosystemService', () => {
         const fetchSpy = jest.spyOn(service as any, 'fetchPackagePage');
         const result = await (service as any).runTestnetDiscoveryTick({
           previousByAddress: new Map(),
-          freshnessWindowMs: 18 * 60 * 60 * 1000,
           deadlineMs: Date.now() - 1,
           now: new Date(),
         });
@@ -6996,8 +6991,7 @@ describe('EcosystemService', () => {
         try {
           const result = await (service as any).runTestnetDiscoveryTick({
             previousByAddress: new Map(),
-            freshnessWindowMs: 18 * 60 * 60 * 1000,
-            deadlineMs: dl,
+              deadlineMs: dl,
             now: new Date(),
           });
           expect(result.deadlineHit).toBe(true);
@@ -7022,7 +7016,6 @@ describe('EcosystemService', () => {
           .mockRejectedValueOnce(new Error('Query request timed out. Limit: 40s'));
         const result = await (service as any).runTestnetDiscoveryTick({
           previousByAddress: new Map(),
-          freshnessWindowMs: 18 * 60 * 60 * 1000,
           deadlineMs: Date.now() + 60_000,
           now: new Date(),
         });
@@ -7035,30 +7028,32 @@ describe('EcosystemService', () => {
         expect(result.deadlineHit).toBe(false);
       });
 
-      it('shallow-discovered facts (lastProbedAt:null) DO NOT trip the freshness window — only deep-probed history qualifies', async () => {
-        // Regression guard: re-discovering an already-shallow-known
-        // address must not bail the walk. Otherwise Pipeline A and B
-        // would deadlock (B never runs on a snapshot whose A bailed).
-        const shallowAddress = '0xshallow';
+      it('any known address (even shallow with lastProbedAt:null) bails immediately — Pipeline A only discovers unseen packages', async () => {
+        // Pipeline A's job is discovery, not re-write. Hitting any address
+        // already in `previousByAddress` means we've reached known territory
+        // — anything beyond is older known stuff Pipeline B / copy-forward
+        // already cover. Walking past would write shallow facts that
+        // overwrite richer prior data.
+        const knownAddress = '0xknown';
         const previousByAddress = new Map<string, any>([
           [
-            shallowAddress.toLowerCase(),
-            { address: shallowAddress, modules: ['m'], moduleMetrics: [], storageRebateNanos: 0, lastProbedAt: null },
+            knownAddress.toLowerCase(),
+            { address: knownAddress, modules: ['m'], moduleMetrics: [], storageRebateNanos: 0, lastProbedAt: null },
           ],
         ]);
         jest.spyOn(service as any, 'fetchPackagePage').mockResolvedValue({
-          nodes: [pkgInfo(shallowAddress, ['m']), pkgInfo('0xnew')],
-          hasPreviousPage: false,
-          startCursor: null,
+          nodes: [pkgInfo('0xnew'), pkgInfo(knownAddress, ['m'])],
+          hasPreviousPage: true,
+          startCursor: 'cur-1',
         });
         const result = await (service as any).runTestnetDiscoveryTick({
           previousByAddress,
-          freshnessWindowMs: 18 * 60 * 60 * 1000,
           deadlineMs: Date.now() + 60_000,
           now: new Date(),
         });
-        expect(result.hitFreshWindow).toBe(false);
-        expect(result.discovered.map((p: any) => p.address)).toEqual([shallowAddress, '0xnew']);
+        // Walked the new one, then bailed at the known shallow.
+        expect(result.hitFreshWindow).toBe(true);
+        expect(result.discovered.map((p: any) => p.address)).toEqual(['0xnew']);
       });
     });
 

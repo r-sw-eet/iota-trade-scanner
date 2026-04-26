@@ -462,22 +462,6 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   // ----- Testnet two-pipeline capture constants -----
 
   /**
-   * Pipeline-A freshness window. When the discovery paginator hits an
-   * address that's already in the previous snapshot AND was deep-probed
-   * within this window (`lastProbedAt > now - this`), discovery has
-   * caught up with recent work and bails — everything beyond is older
-   * known territory that Pipeline B's full-sweep deep-probe will pick
-   * up. 18h = 3 ticks × 6h interval, so we never miss newly-published
-   * packages for more than one tick.
-   *
-   * Note: this only fires when the prior fact has a non-null
-   * `lastProbedAt`. Shallow-discovered facts (Pipeline A's own output)
-   * carry `lastProbedAt: null`, so they never trip this check — only
-   * deep-probed history matters for "caught up?"
-   */
-  private static readonly TESTNET_FRESHNESS_WINDOW_MS = 18 * 60 * 60 * 1000;
-
-  /**
    * Default concurrency for Pipeline B's parallel batches. Mirrors
    * `backfillTestnetFromAddressList` — ~15 in-flight `fetchPackageByAddress`
    * + `probeOnePackage` calls keeps the testnet GraphQL endpoint busy
@@ -4520,8 +4504,8 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   //     `isTutorial` from `isTutorialModuleSet`. No deep-probes here:
   //     `lastProbedAt` is left `null` as the signal "Pipeline B should
   //     pick this up." Bail conditions:
-  //       * encountered an address already deep-probed within
-  //         `TESTNET_FRESHNESS_WINDOW_MS` (i.e. we caught up),
+  //       * encountered an address already in `previousByAddress` (we've
+  //         hit known territory; everything beyond is already in DB),
   //       * `hasPreviousPage: false` (genesis),
   //       * `Date.now() >= deadlineMs`.
   //   - **Pipeline B — deep probe.** Aggregate `packagefacts` for every
@@ -5013,11 +4997,14 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    * facts (null sorts first under ascending `lastProbedAt`).
    *
    * Bail conditions:
-   *   - **Freshness window** — encountered an address present in
-   *     `previousByAddress` whose `lastProbedAt > now - freshnessWindowMs`.
-   *     Means we've caught up with deep-probed history; everything beyond
-   *     is older known territory that Pipeline B will reach if budget
-   *     allows. Returns `hitFreshWindow: true`.
+   *   - **Known territory** — encountered an address present in
+   *     `previousByAddress` (regardless of its `lastProbedAt`). Pipeline A's
+   *     only job is to discover packages NOT yet in `packagefacts`; once we
+   *     see one we already have, the rest of the paginator is older known
+   *     territory we don't need to walk. Re-walking would overwrite richer
+   *     copy-forward / Pipeline-B data with shallow facts. Returns
+   *     `hitFreshWindow: true` (legacy field name; semantics are now "hit
+   *     known territory").
    *   - **Genesis** — `hasPreviousPage: false`. Returns `wrapped: true`.
    *   - **Deadline** — `Date.now() >= deadlineMs`. Returns `deadlineHit: true`.
    *
@@ -5027,7 +5014,6 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    */
   private async runTestnetDiscoveryTick(opts: {
     previousByAddress: Map<string, PackageFact>;
-    freshnessWindowMs: number;
     deadlineMs: number;
     now: Date;
   }): Promise<{
@@ -5037,9 +5023,9 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     wrapped: boolean;
     error: Error | null;
   }> {
-    const { previousByAddress, freshnessWindowMs, deadlineMs, now } = opts;
+    const { previousByAddress, deadlineMs, now } = opts;
+    void now;
     const discovered: PackageFact[] = [];
-    const freshCutoff = now.getTime() - freshnessWindowMs;
     let cursor: string | null = null;
     let hitFreshWindow = false;
     let wrapped = false;
@@ -5054,14 +5040,14 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         // doc-comment on the reverse). Iteration order matches the
         // newest-first walk discovery expects.
         for (const info of page.nodes) {
-          // Freshness watermark — stop as soon as we see a package
-          // already deep-probed within the window. Note this is `null`-safe:
-          // a previously-discovered shallow fact has `lastProbedAt: null`
-          // which fails the `> freshCutoff` guard, so re-discovery of an
-          // un-probed fact does NOT trip the window — only deep-probed
-          // history qualifies as "caught up."
+          // Stop as soon as we see a package we already know about — Pipeline A's
+          // only job is to discover packages NOT yet in `packagefacts`. Re-walking
+          // known territory would write shallow facts that overwrite richer
+          // copy-forward / Pipeline-B output. The `hitFreshWindow` field name is
+          // retained for caller compatibility but its semantics are now simply
+          // "hit known territory."
           const prev = previousByAddress.get(info.address.toLowerCase());
-          if (prev && prev.lastProbedAt && new Date(prev.lastProbedAt).getTime() > freshCutoff) {
+          if (prev) {
             hitFreshWindow = true;
             return { discovered, hitFreshWindow, deadlineHit: false, wrapped, error: null };
           }
@@ -5323,7 +5309,6 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       // ----- Pipeline A: discovery -----
       const discovery = await this.runTestnetDiscoveryTick({
         previousByAddress,
-        freshnessWindowMs: EcosystemService.TESTNET_FRESHNESS_WINDOW_MS,
         deadlineMs,
         now,
       });
