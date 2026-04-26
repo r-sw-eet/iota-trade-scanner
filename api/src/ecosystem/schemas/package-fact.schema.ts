@@ -46,6 +46,19 @@ export class PackageFactDoc extends Document {
   @Prop({ type: FingerprintSampleDoc, default: null }) fingerprint: FingerprintSampleDoc | null;
   @Prop({ type: Date, default: null }) publishedAt: Date | null;
   @Prop({ type: Date, default: null }) lastProbedAt: Date | null;
+
+  /**
+   * Testnet workshop/tutorial-scaffold marker. Set at probe time when
+   * `modules` matches a curated signature in
+   * `testnet-tutorial-signatures.ts`. Tutorial-flagged packages keep their
+   * cheap-discoverable fields (address, deployer, modules, publishedAt,
+   * storageRebate) but skip the deep-probe pipeline (entry-fns, events,
+   * identity, tx counts, object-types) — those stay empty/zero. Always
+   * `false` on mainnet/devnet (the catalog is testnet-specific). Default
+   * `false` so old facts and non-tutorial packages decode correctly.
+   * See `plans/plan_testnet_tutorial_filter.md`.
+   */
+  @Prop({ type: Boolean, default: false, index: true }) isTutorial: boolean;
 }
 
 export const PackageFactDocSchema = SchemaFactory.createForClass(PackageFactDoc);
@@ -64,3 +77,11 @@ PackageFactDocSchema.index({ snapshotId: 1, address: 1 }, { unique: true });
  * deploy-time audits). Cheap to add now; expensive to rebuild later.
  */
 PackageFactDocSchema.index({ address: 1 });
+
+/**
+ * Compound `{ network, isTutorial, snapshotId }` index for the dashboard's
+ * hot read: "all real-builder packages in the latest snapshot". Filters
+ * out tutorial scaffolds without a collection scan. Order matches typical
+ * query selectivity (network → isTutorial → snapshotId).
+ */
+PackageFactDocSchema.index({ network: 1, isTutorial: 1, snapshotId: 1 });
