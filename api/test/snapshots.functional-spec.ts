@@ -74,4 +74,48 @@ describe('Snapshots (functional)', () => {
       expect(res.body.length).toBeGreaterThan(0);
     });
   });
+
+  describe('GET /snapshots/aggregates', () => {
+    it('returns null/empty when no snapshots exist', async () => {
+      const res = await request(app.getHttpServer()).get('/snapshots/aggregates').expect(200);
+      expect(res.body).toEqual({});
+    });
+
+    it('returns cumulative + rolling shape across two epochs', async () => {
+      await snapshotModel.create({
+        epoch: 1,
+        timestamp: new Date('2026-01-01'),
+        epochGasBurned: 10,
+        epochTransactions: 1000,
+        epochStorageNetInflow: 1,
+        epochStorageFeesIn: 10,
+        epochStorageRebatesOut: 9,
+        epochStakeRewards: 767000,
+      });
+      await snapshotModel.create({
+        epoch: 2,
+        timestamp: new Date('2026-01-02'),
+        epochGasBurned: 20,
+        epochTransactions: 2000,
+        epochStorageNetInflow: 5,
+        epochStorageFeesIn: 30,
+        epochStorageRebatesOut: 25,
+        epochStakeRewards: 767000,
+      });
+
+      const res = await request(app.getHttpServer()).get('/snapshots/aggregates').expect(200);
+      expect(res.body.asOf.epoch).toBe(2);
+      expect(res.body.cumulative).toEqual({
+        gasBurned: 30,
+        storageFeesIn: 40,
+        storageRebatesOut: 34,
+        storageNetLocked: 6,
+        stakeRewards: 1_534_000,
+        transactions: 3000,
+      });
+      expect(res.body.rolling.last7d.epochs).toBe(2);
+      expect(res.body.rolling.last7d.avgGasBurned).toBe(15);
+      expect(res.body.current.epoch).toBe(2);
+    });
+  });
 });

@@ -5,10 +5,38 @@ import { Model } from 'mongoose';
 import { Snapshot } from './schemas/snapshot.schema';
 import { IotaService } from '../iota/iota.service';
 
+export interface RollingWindow {
+  epochs: number;
+  avgGasBurned: number;
+  avgStorageNetInflow: number;
+  avgStorageFeesIn: number;
+  avgStorageRebatesOut: number;
+  avgTransactions: number;
+  avgStakeRewards: number;
+}
+
+export interface SnapshotAggregates {
+  asOf: { epoch: number; capturedAt: Date };
+  current: any;
+  cumulative: {
+    gasBurned: number;
+    storageFeesIn: number;
+    storageRebatesOut: number;
+    storageNetLocked: number;
+    stakeRewards: number;
+    transactions: number;
+  };
+  rolling: {
+    last7d: RollingWindow;
+    last30d: RollingWindow;
+  };
+}
+
 @Injectable()
 export class SnapshotService implements OnModuleInit {
   private readonly logger = new Logger(SnapshotService.name);
   private backfilling = false;
+  private aggregates: SnapshotAggregates | null = null;
 
   constructor(
     @InjectModel(Snapshot.name) private snapshotModel: Model<Snapshot>,
@@ -17,6 +45,13 @@ export class SnapshotService implements OnModuleInit {
 
   async onModuleInit() {
     if (process.env.NODE_ENV === 'test') return;
+
+    // Aggregator runs on every API process — both scanner (write side, folds
+    // on capture) and serve (read side, freshness-checked on each call).
+    this.rebuildAggregates().catch((e) =>
+      this.logger.error('Aggregate rebuild failed', e),
+    );
+
     if (process.env.API_ROLE === 'serve') return;
     const count = await this.snapshotModel.countDocuments();
     if (count === 0) {
@@ -57,14 +92,119 @@ export class SnapshotService implements OnModuleInit {
       if (existing) {
         this.logger.log(`Epoch ${data.epoch} already captured, updating...`);
         await this.snapshotModel.updateOne({ epoch: data.epoch }, data);
-        return;
+      } else {
+        await this.snapshotModel.create(data);
+        this.logger.log(`Snapshot captured for epoch ${data.epoch}`);
       }
 
-      await this.snapshotModel.create(data);
-      this.logger.log(`Snapshot captured for epoch ${data.epoch}`);
+      await this.rebuildAggregates();
     } catch (e) {
       this.logger.error('Failed to capture snapshot', e);
     }
+  }
+
+  /**
+   * Returns a fresh snapshot of the in-memory aggregates, rebuilding only when
+   * the head doc in Mongo (epoch + updatedAt) has changed since the cache was
+   * built. Designed for the web box (serve mode) where the scanner box is the
+   * one writing — the cheap freshness probe means a stale serve process picks
+   * up the scanner's writes on the next request.
+   */
+  async getAggregates(): Promise<SnapshotAggregates | null> {
+    const head = await this.snapshotModel
+      .findOne()
+      .sort({ epoch: -1 })
+      .select('epoch updatedAt')
+      .lean<{ epoch: number; updatedAt: Date }>();
+    if (!head) return null;
+
+    const stale =
+      !this.aggregates ||
+      this.aggregates.asOf.epoch !== head.epoch ||
+      this.aggregates.asOf.capturedAt.getTime() !==
+        new Date(head.updatedAt).getTime();
+    if (stale) await this.rebuildAggregates();
+    return this.aggregates;
+  }
+
+  private async rebuildAggregates(): Promise<void> {
+    const all = await this.snapshotModel
+      .find()
+      .sort({ epoch: 1 })
+      .lean();
+    if (all.length === 0) {
+      this.aggregates = null;
+      return;
+    }
+
+    const cumulative = {
+      gasBurned: 0,
+      storageFeesIn: 0,
+      storageRebatesOut: 0,
+      stakeRewards: 0,
+      transactions: 0,
+    };
+    for (const s of all) {
+      cumulative.gasBurned += s.epochGasBurned ?? 0;
+      cumulative.storageFeesIn += s.epochStorageFeesIn ?? 0;
+      cumulative.storageRebatesOut += s.epochStorageRebatesOut ?? 0;
+      cumulative.stakeRewards += s.epochStakeRewards ?? 0;
+      cumulative.transactions += s.epochTransactions ?? 0;
+    }
+
+    const head = all[all.length - 1];
+    this.aggregates = {
+      asOf: { epoch: head.epoch, capturedAt: new Date((head as any).updatedAt) },
+      current: head,
+      cumulative: {
+        ...cumulative,
+        storageNetLocked: cumulative.storageFeesIn - cumulative.storageRebatesOut,
+      },
+      rolling: {
+        last7d: this.computeRolling(all.slice(-7)),
+        last30d: this.computeRolling(all.slice(-30)),
+      },
+    };
+  }
+
+  private computeRolling(slice: any[]): RollingWindow {
+    const n = slice.length;
+    if (n === 0) {
+      return {
+        epochs: 0,
+        avgGasBurned: 0,
+        avgStorageNetInflow: 0,
+        avgStorageFeesIn: 0,
+        avgStorageRebatesOut: 0,
+        avgTransactions: 0,
+        avgStakeRewards: 0,
+      };
+    }
+    const sum = {
+      g: 0,
+      ni: 0,
+      fi: 0,
+      ro: 0,
+      t: 0,
+      sr: 0,
+    };
+    for (const s of slice) {
+      sum.g += s.epochGasBurned ?? 0;
+      sum.ni += s.epochStorageNetInflow ?? 0;
+      sum.fi += s.epochStorageFeesIn ?? 0;
+      sum.ro += s.epochStorageRebatesOut ?? 0;
+      sum.t += s.epochTransactions ?? 0;
+      sum.sr += s.epochStakeRewards ?? 0;
+    }
+    return {
+      epochs: n,
+      avgGasBurned: sum.g / n,
+      avgStorageNetInflow: sum.ni / n,
+      avgStorageFeesIn: sum.fi / n,
+      avgStorageRebatesOut: sum.ro / n,
+      avgTransactions: sum.t / n,
+      avgStakeRewards: sum.sr / n,
+    };
   }
 
   async backfillEpochFees(

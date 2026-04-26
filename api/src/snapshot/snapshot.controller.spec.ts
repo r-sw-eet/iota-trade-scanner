@@ -4,13 +4,14 @@ import { SnapshotService } from './snapshot.service';
 
 describe('SnapshotController', () => {
   let controller: SnapshotController;
-  let service: jest.Mocked<Pick<SnapshotService, 'getLatest' | 'getHistory' | 'getEpochHistory'>>;
+  let service: jest.Mocked<Pick<SnapshotService, 'getLatest' | 'getHistory' | 'getEpochHistory' | 'getAggregates'>>;
 
   beforeEach(async () => {
     service = {
       getLatest: jest.fn(),
       getHistory: jest.fn(),
       getEpochHistory: jest.fn(),
+      getAggregates: jest.fn(),
     } as any;
     const module = await Test.createTestingModule({
       controllers: [SnapshotController],
@@ -55,5 +56,11 @@ describe('SnapshotController', () => {
     const rows = [{ epoch: 3 }] as any;
     service.getEpochHistory.mockResolvedValue(rows);
     return expect(controller.getEpochHistory()).resolves.toBe(rows);
+  });
+
+  it('GET /snapshots/aggregates delegates to service.getAggregates', () => {
+    const agg = { asOf: { epoch: 5, capturedAt: new Date() } } as any;
+    service.getAggregates.mockResolvedValue(agg);
+    return expect(controller.getAggregates()).resolves.toBe(agg);
   });
 });

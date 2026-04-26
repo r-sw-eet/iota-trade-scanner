@@ -342,4 +342,158 @@ describe('SnapshotService', () => {
       expect(onProgress).toHaveBeenNthCalledWith(2, { epoch: 2, done: 2, total: 2 });
     });
   });
+
+  describe('getAggregates', () => {
+    const baseSnap = (overrides: Partial<any>) => ({
+      epoch: 1,
+      timestamp: new Date('2026-01-01'),
+      updatedAt: new Date('2026-01-01T00:30:00Z'),
+      epochGasBurned: 10,
+      epochTransactions: 1000,
+      epochStorageNetInflow: 1,
+      epochStorageFeesIn: 10,
+      epochStorageRebatesOut: 9,
+      epochStakeRewards: 767000,
+      ...overrides,
+    });
+
+    const setupHead = (head: { epoch: number; updatedAt: Date } | null) => {
+      // findOne().sort().select().lean()
+      model.findOne.mockReturnValueOnce(chain(head));
+    };
+    const setupFull = (docs: any[]) => {
+      // find().sort().lean()
+      model.find.mockReturnValueOnce(chain(docs));
+    };
+
+    it('returns null when no snapshots exist', async () => {
+      setupHead(null);
+      const res = await service.getAggregates();
+      expect(res).toBeNull();
+    });
+
+    it('builds cumulative + rolling on first call and caches the result', async () => {
+      const docs = [
+        baseSnap({ epoch: 1 }),
+        baseSnap({ epoch: 2, epochGasBurned: 20, epochStorageFeesIn: 30, epochStorageRebatesOut: 10 }),
+      ];
+      const head = { epoch: 2, updatedAt: docs[1].updatedAt };
+      setupHead(head);
+      setupFull(docs);
+
+      const agg = await service.getAggregates();
+      expect(agg!.asOf).toEqual({ epoch: 2, capturedAt: docs[1].updatedAt });
+      expect(agg!.cumulative).toEqual({
+        gasBurned: 30,
+        storageFeesIn: 40,
+        storageRebatesOut: 19,
+        storageNetLocked: 21,
+        stakeRewards: 1_534_000,
+        transactions: 2000,
+      });
+      expect(agg!.rolling.last7d.epochs).toBe(2);
+      expect(agg!.rolling.last7d.avgGasBurned).toBe(15);
+      expect(agg!.rolling.last30d.epochs).toBe(2);
+    });
+
+    it('reuses the cache when the head epoch and updatedAt are unchanged', async () => {
+      const docs = [baseSnap({ epoch: 1 })];
+      const head = { epoch: 1, updatedAt: docs[0].updatedAt };
+
+      // First call: head + full rebuild
+      setupHead(head);
+      setupFull(docs);
+      await service.getAggregates();
+
+      // Second call: only head probe, no rebuild
+      setupHead(head);
+      const before = service['aggregates'];
+      const res = await service.getAggregates();
+      expect(res).toBe(before);
+      expect(model.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebuilds when the head epoch advances', async () => {
+      const docs1 = [baseSnap({ epoch: 1 })];
+      setupHead({ epoch: 1, updatedAt: docs1[0].updatedAt });
+      setupFull(docs1);
+      await service.getAggregates();
+
+      const docs2 = [...docs1, baseSnap({ epoch: 2 })];
+      setupHead({ epoch: 2, updatedAt: docs2[1].updatedAt });
+      setupFull(docs2);
+      const res = await service.getAggregates();
+
+      expect(res!.asOf.epoch).toBe(2);
+      expect(model.find).toHaveBeenCalledTimes(2);
+    });
+
+    it('rebuilds when the head epoch is the same but updatedAt has changed (re-write)', async () => {
+      const epoch1V1 = baseSnap({ epoch: 1, epochGasBurned: 10, updatedAt: new Date('2026-01-01T00:00:00Z') });
+      setupHead({ epoch: 1, updatedAt: epoch1V1.updatedAt });
+      setupFull([epoch1V1]);
+      const first = await service.getAggregates();
+      expect(first!.cumulative.gasBurned).toBe(10);
+
+      const epoch1V2 = baseSnap({ epoch: 1, epochGasBurned: 25, updatedAt: new Date('2026-01-01T00:30:00Z') });
+      setupHead({ epoch: 1, updatedAt: epoch1V2.updatedAt });
+      setupFull([epoch1V2]);
+      const second = await service.getAggregates();
+      expect(second!.cumulative.gasBurned).toBe(25);
+      expect(model.find).toHaveBeenCalledTimes(2);
+    });
+
+    it('rolling windows clip to the available history when fewer than N epochs exist', async () => {
+      const docs = [
+        baseSnap({ epoch: 1, epochGasBurned: 10 }),
+        baseSnap({ epoch: 2, epochGasBurned: 20 }),
+        baseSnap({ epoch: 3, epochGasBurned: 30 }),
+      ];
+      setupHead({ epoch: 3, updatedAt: docs[2].updatedAt });
+      setupFull(docs);
+
+      const agg = await service.getAggregates();
+      expect(agg!.rolling.last7d.epochs).toBe(3);
+      expect(agg!.rolling.last7d.avgGasBurned).toBe(20);
+      expect(agg!.rolling.last30d.epochs).toBe(3);
+    });
+
+    it('treats missing fee fields as zero (legacy snapshots)', async () => {
+      const legacy = { epoch: 1, timestamp: new Date(), updatedAt: new Date('2026-01-01T00:00:00Z'), epochGasBurned: 5 };
+      setupHead({ epoch: 1, updatedAt: legacy.updatedAt });
+      setupFull([legacy]);
+
+      const agg = await service.getAggregates();
+      expect(agg!.cumulative.storageFeesIn).toBe(0);
+      expect(agg!.cumulative.stakeRewards).toBe(0);
+      expect(agg!.rolling.last7d.avgGasBurned).toBe(5);
+    });
+  });
+
+  describe('capture refreshes aggregates', () => {
+    it('rebuilds the aggregator after a successful create', async () => {
+      iota.captureFullSnapshot.mockResolvedValue({ epoch: 5, totalSupply: 1 } as any);
+      model.findOne.mockReturnValueOnce(chain(null));     // existing-check
+      model.find.mockReturnValueOnce(chain([{ epoch: 5, updatedAt: new Date() }]));
+      await service.capture();
+      expect(model.create).toHaveBeenCalled();
+      expect(model.find).toHaveBeenCalledTimes(1); // rebuildAggregates
+    });
+
+    it('rebuilds the aggregator after a successful update of an existing epoch', async () => {
+      iota.captureFullSnapshot.mockResolvedValue({ epoch: 5, totalSupply: 1 } as any);
+      model.findOne.mockReturnValueOnce(chain({ epoch: 5 })); // existing-check returns a doc
+      model.find.mockReturnValueOnce(chain([{ epoch: 5, updatedAt: new Date() }]));
+      await service.capture();
+      expect(model.updateOne).toHaveBeenCalled();
+      expect(model.create).not.toHaveBeenCalled();
+      expect(model.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not rebuild when the capture itself throws', async () => {
+      iota.captureFullSnapshot.mockRejectedValue(new Error('rpc down'));
+      await service.capture();
+      expect(model.find).not.toHaveBeenCalled();
+    });
+  });
 });

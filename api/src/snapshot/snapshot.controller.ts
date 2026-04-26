@@ -19,4 +19,9 @@ export class SnapshotController {
   getEpochHistory() {
     return this.snapshotService.getEpochHistory();
   }
+
+  @Get('aggregates')
+  getAggregates() {
+    return this.snapshotService.getAggregates();
+  }
 }
