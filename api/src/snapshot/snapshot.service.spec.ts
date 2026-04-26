@@ -174,6 +174,11 @@ describe('SnapshotService', () => {
         epochGasBurned: 1,
         epochTransactions: 10,
         epochStorageNetInflow: 0,
+        epochStorageFeesIn: 0,
+        epochStorageRebatesOut: 0,
+        epochStakeRewards: 0,
+        epochReferenceGasPrice: 0,
+        epochNonRefundableBalance: 0,
         gasPerTransaction: 0.1,
         storageFundTotal: 0,
       }));
@@ -211,11 +216,15 @@ describe('SnapshotService', () => {
         .mockRejectedValueOnce(new Error('boom'))
         .mockResolvedValueOnce({
           epoch: 2, epochGasBurned: 1, epochTransactions: 10,
-          epochStorageNetInflow: 0, gasPerTransaction: 0.1, storageFundTotal: 0,
+          epochStorageNetInflow: 0, epochStorageFeesIn: 0, epochStorageRebatesOut: 0,
+          epochStakeRewards: 0, epochReferenceGasPrice: 0, epochNonRefundableBalance: 0,
+          gasPerTransaction: 0.1, storageFundTotal: 0,
         })
         .mockResolvedValueOnce({
           epoch: 3, epochGasBurned: 1, epochTransactions: 10,
-          epochStorageNetInflow: 0, gasPerTransaction: 0.1, storageFundTotal: 0,
+          epochStorageNetInflow: 0, epochStorageFeesIn: 0, epochStorageRebatesOut: 0,
+          epochStakeRewards: 0, epochReferenceGasPrice: 0, epochNonRefundableBalance: 0,
+          gasPerTransaction: 0.1, storageFundTotal: 0,
         });
 
       await runBackfill();
@@ -235,11 +244,102 @@ describe('SnapshotService', () => {
       model.distinct.mockResolvedValue([]);
       iota.getEpochSummary.mockResolvedValue({
         epoch: 1, epochGasBurned: 1, epochTransactions: 10,
-        epochStorageNetInflow: 0, gasPerTransaction: 0.1, storageFundTotal: 0,
+        epochStorageNetInflow: 0, epochStorageFeesIn: 0, epochStorageRebatesOut: 0,
+        epochStakeRewards: 0, epochReferenceGasPrice: 0, epochNonRefundableBalance: 0,
+        gasPerTransaction: 0.1, storageFundTotal: 0,
       });
       await runBackfill();
       expect(iota.getEpochSummary).toHaveBeenCalledTimes(59); // 1..59
       expect(model.updateOne).toHaveBeenCalledTimes(59);
+    });
+  });
+
+  describe('backfillEpochFees', () => {
+    const richSummary = (epoch: number) => ({
+      epoch,
+      epochGasBurned: 16,
+      epochTransactions: 1_700_000,
+      epochStorageNetInflow: 6,
+      epochStorageFeesIn: 224,
+      epochStorageRebatesOut: 218,
+      epochStakeRewards: 767000,
+      epochReferenceGasPrice: 1000,
+      epochNonRefundableBalance: 0,
+      gasPerTransaction: 0.0001,
+      storageFundTotal: 35000,
+    });
+
+    it('queries only stale snapshots (missing or zero epochStakeRewards) sorted by epoch', async () => {
+      model.find.mockReturnValue(chain([{ epoch: 1 }, { epoch: 2 }]));
+      iota.getEpochSummary.mockImplementation(async (id) => richSummary(id));
+
+      const res = await service.backfillEpochFees();
+
+      const filter = model.find.mock.calls[0][0];
+      expect(filter).toEqual({
+        $or: [
+          { epochStakeRewards: { $exists: false } },
+          { epochStakeRewards: 0 },
+        ],
+      });
+      const c = model.find.mock.results[0].value;
+      expect(c.sort).toHaveBeenCalledWith({ epoch: 1 });
+      expect(c.select).toHaveBeenCalledWith('epoch');
+      expect(res).toEqual({ updated: 2, skipped: 0, failed: 0 });
+    });
+
+    it('writes only the 5 new fields, never the existing fields', async () => {
+      model.find.mockReturnValue(chain([{ epoch: 7 }]));
+      iota.getEpochSummary.mockResolvedValue(richSummary(7));
+
+      await service.backfillEpochFees();
+
+      expect(model.updateOne).toHaveBeenCalledWith(
+        { epoch: 7 },
+        {
+          $set: {
+            epochStorageFeesIn: 224,
+            epochStorageRebatesOut: 218,
+            epochStakeRewards: 767000,
+            epochReferenceGasPrice: 1000,
+            epochNonRefundableBalance: 0,
+          },
+        },
+      );
+    });
+
+    it('counts a null GraphQL response as skipped, not updated', async () => {
+      model.find.mockReturnValue(chain([{ epoch: 1 }, { epoch: 2 }, { epoch: 3 }]));
+      iota.getEpochSummary
+        .mockResolvedValueOnce(richSummary(1))
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(richSummary(3));
+
+      const res = await service.backfillEpochFees();
+      expect(res).toEqual({ updated: 2, skipped: 1, failed: 0 });
+      expect(model.updateOne).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps going on individual epoch fetch errors and counts them as failed', async () => {
+      model.find.mockReturnValue(chain([{ epoch: 1 }, { epoch: 2 }]));
+      iota.getEpochSummary
+        .mockRejectedValueOnce(new Error('boom'))
+        .mockResolvedValueOnce(richSummary(2));
+
+      const res = await service.backfillEpochFees();
+      expect(res).toEqual({ updated: 1, skipped: 0, failed: 1 });
+      expect(model.updateOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('invokes onProgress on each successful update with done/total counters', async () => {
+      model.find.mockReturnValue(chain([{ epoch: 1 }, { epoch: 2 }]));
+      iota.getEpochSummary.mockImplementation(async (id) => richSummary(id));
+      const onProgress = jest.fn();
+
+      await service.backfillEpochFees(onProgress);
+
+      expect(onProgress).toHaveBeenNthCalledWith(1, { epoch: 1, done: 1, total: 2 });
+      expect(onProgress).toHaveBeenNthCalledWith(2, { epoch: 2, done: 2, total: 2 });
     });
   });
 });

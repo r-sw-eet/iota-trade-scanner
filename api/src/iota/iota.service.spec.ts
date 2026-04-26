@@ -191,12 +191,15 @@ describe('IotaService', () => {
           epoch: {
             epochId: '41',
             totalGasFees: '2000000000',
+            totalStakeRewards: '767000000000000',
+            referenceGasPrice: '1000',
             totalCheckpoints: '100',
             totalTransactions: '1000',
             fundSize: '0',
-            fundInflow: '0',
-            fundOutflow: '0',
+            fundInflow: '3000000000',
+            fundOutflow: '2500000000',
             netInflow: '500000000',
+            storageFund: { nonRefundableBalance: '0' },
           },
         }),
       );
@@ -205,6 +208,11 @@ describe('IotaService', () => {
         epochGasBurned: 2,
         epochTransactions: 1000,
         epochStorageNetInflow: 0.5,
+        epochStorageFeesIn: 3,
+        epochStorageRebatesOut: 2.5,
+        epochStakeRewards: 767000,
+        epochReferenceGasPrice: 1000,
+        epochNonRefundableBalance: 0,
         gasPerTransaction: 2 / 1000,
       });
       expect(fetchMock.mock.calls[0][1].body).toMatch(/epoch\(id: 41\)/);
@@ -233,9 +241,14 @@ describe('IotaService', () => {
           epoch: {
             epochId: '5',
             totalGasFees: '1000000000',
+            totalStakeRewards: '767000000000000',
+            referenceGasPrice: '1000',
             totalTransactions: '500',
+            fundInflow: '4000000000',
+            fundOutflow: '2000000000',
             netInflow: '2000000000',
             fundSize: '10000000000',
+            storageFund: { nonRefundableBalance: '0' },
           },
         }),
       );
@@ -245,6 +258,11 @@ describe('IotaService', () => {
         epochGasBurned: 1,
         epochTransactions: 500,
         epochStorageNetInflow: 2,
+        epochStorageFeesIn: 4,
+        epochStorageRebatesOut: 2,
+        epochStakeRewards: 767000,
+        epochReferenceGasPrice: 1000,
+        epochNonRefundableBalance: 0,
         gasPerTransaction: 1 / 500,
         storageFundTotal: 10,
       });

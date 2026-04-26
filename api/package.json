@@ -17,7 +17,8 @@
     "test:functional": "jest --config test/jest-functional.config.js",
     "backfill:senders": "node dist/backfill-senders",
     "backfill:txcounts": "node dist/backfill-tx-counts",
-    "backfill:holders": "node dist/backfill-holders"
+    "backfill:holders": "node dist/backfill-holders",
+    "backfill:epochfees": "node dist/backfill-epoch-fees"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

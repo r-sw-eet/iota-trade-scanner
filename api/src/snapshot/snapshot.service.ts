@@ -43,7 +43,7 @@ export class SnapshotService implements OnModuleInit {
     return this.snapshotModel
       .find({ epochGasBurned: { $exists: true } })
       .sort({ epoch: 1 })
-      .select('epoch epochGasBurned epochTransactions epochStorageNetInflow gasPerTransaction storageFundTotal validatorTargetReward')
+      .select('epoch epochGasBurned epochTransactions epochStorageNetInflow epochStorageFeesIn epochStorageRebatesOut epochStakeRewards epochReferenceGasPrice epochNonRefundableBalance gasPerTransaction storageFundTotal validatorTargetReward')
       .lean()
       .exec();
   }
@@ -65,6 +65,57 @@ export class SnapshotService implements OnModuleInit {
     } catch (e) {
       this.logger.error('Failed to capture snapshot', e);
     }
+  }
+
+  async backfillEpochFees(
+    onProgress?: (info: { epoch: number; done: number; total: number }) => void,
+  ): Promise<{ updated: number; skipped: number; failed: number }> {
+    const stale = await this.snapshotModel
+      .find({
+        $or: [
+          { epochStakeRewards: { $exists: false } },
+          { epochStakeRewards: 0 },
+        ],
+      })
+      .sort({ epoch: 1 })
+      .select('epoch')
+      .lean();
+
+    let updated = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const doc of stale) {
+      const epochId = doc.epoch;
+      try {
+        const summary = await this.iotaService.getEpochSummary(epochId);
+        if (!summary) {
+          skipped++;
+          continue;
+        }
+
+        await this.snapshotModel.updateOne(
+          { epoch: epochId },
+          {
+            $set: {
+              epochStorageFeesIn: summary.epochStorageFeesIn,
+              epochStorageRebatesOut: summary.epochStorageRebatesOut,
+              epochStakeRewards: summary.epochStakeRewards,
+              epochReferenceGasPrice: summary.epochReferenceGasPrice,
+              epochNonRefundableBalance: summary.epochNonRefundableBalance,
+            },
+          },
+        );
+
+        updated++;
+        onProgress?.({ epoch: epochId, done: updated + skipped + failed, total: stale.length });
+      } catch (e) {
+        failed++;
+        this.logger.warn(`Failed to enrich epoch ${epochId}`, e);
+      }
+    }
+
+    return { updated, skipped, failed };
   }
 
   private async backfillEpochs() {
@@ -102,6 +153,11 @@ export class SnapshotService implements OnModuleInit {
                 epochGasBurned: summary.epochGasBurned,
                 epochTransactions: summary.epochTransactions,
                 epochStorageNetInflow: summary.epochStorageNetInflow,
+                epochStorageFeesIn: summary.epochStorageFeesIn,
+                epochStorageRebatesOut: summary.epochStorageRebatesOut,
+                epochStakeRewards: summary.epochStakeRewards,
+                epochReferenceGasPrice: summary.epochReferenceGasPrice,
+                epochNonRefundableBalance: summary.epochNonRefundableBalance,
                 gasPerTransaction: summary.gasPerTransaction,
                 storageFundTotal: summary.storageFundTotal,
                 validatorTargetReward: 767000,

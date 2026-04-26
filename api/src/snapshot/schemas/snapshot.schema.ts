@@ -65,6 +65,21 @@ export class Snapshot extends Document {
   epochStorageNetInflow: number;
 
   @Prop()
+  epochStorageFeesIn: number;
+
+  @Prop()
+  epochStorageRebatesOut: number;
+
+  @Prop()
+  epochStakeRewards: number;
+
+  @Prop()
+  epochReferenceGasPrice: number;
+
+  @Prop()
+  epochNonRefundableBalance: number;
+
+  @Prop()
   gasPerTransaction: number;
 }
 

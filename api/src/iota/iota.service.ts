@@ -90,58 +90,52 @@ export class IotaService {
     };
   }
 
-  async getPreviousEpochStats(currentEpoch: number) {
-    const prevId = currentEpoch - 1;
-    const data = await this.graphql(`{
-      epoch(id: ${prevId}) {
-        epochId
-        totalGasFees
-        totalCheckpoints
-        totalTransactions
-        fundSize
-        fundInflow
-        fundOutflow
-        netInflow
-      }
-    }`);
-    const e = data.epoch;
+  private readonly EPOCH_FIELDS = `
+    epochId
+    totalGasFees
+    totalStakeRewards
+    referenceGasPrice
+    totalCheckpoints
+    totalTransactions
+    fundSize
+    fundInflow
+    fundOutflow
+    netInflow
+    storageFund {
+      nonRefundableBalance
+    }
+  `;
+
+  private decodeEpoch(e: any) {
     const gasBurned = Number(e.totalGasFees) / 1_000_000_000;
     const txCount = Number(e.totalTransactions);
-    const netInflow = Number(e.netInflow) / 1_000_000_000;
     return {
       epochGasBurned: gasBurned,
       epochTransactions: txCount,
-      epochStorageNetInflow: netInflow,
+      epochStorageNetInflow: Number(e.netInflow) / 1_000_000_000,
+      epochStorageFeesIn: Number(e.fundInflow) / 1_000_000_000,
+      epochStorageRebatesOut: Number(e.fundOutflow) / 1_000_000_000,
+      epochStakeRewards: Number(e.totalStakeRewards) / 1_000_000_000,
+      epochReferenceGasPrice: Number(e.referenceGasPrice),
+      epochNonRefundableBalance: Number(e.storageFund?.nonRefundableBalance ?? 0) / 1_000_000_000,
       gasPerTransaction: txCount > 0 ? gasBurned / txCount : 0,
     };
   }
 
+  async getPreviousEpochStats(currentEpoch: number) {
+    const prevId = currentEpoch - 1;
+    const data = await this.graphql(`{ epoch(id: ${prevId}) { ${this.EPOCH_FIELDS} } }`);
+    return this.decodeEpoch(data.epoch);
+  }
+
   async getEpochSummary(epochId: number) {
-    const data = await this.graphql(`{
-      epoch(id: ${epochId}) {
-        epochId
-        totalGasFees
-        totalCheckpoints
-        totalTransactions
-        fundSize
-        fundInflow
-        fundOutflow
-        netInflow
-      }
-    }`);
+    const data = await this.graphql(`{ epoch(id: ${epochId}) { ${this.EPOCH_FIELDS} } }`);
     const e = data.epoch;
     if (!e) return null;
-    const gasBurned = Number(e.totalGasFees) / 1_000_000_000;
-    const txCount = Number(e.totalTransactions);
-    const netInflow = Number(e.netInflow) / 1_000_000_000;
-    const fundSize = Number(e.fundSize) / 1_000_000_000;
     return {
       epoch: Number(e.epochId),
-      epochGasBurned: gasBurned,
-      epochTransactions: txCount,
-      epochStorageNetInflow: netInflow,
-      gasPerTransaction: txCount > 0 ? gasBurned / txCount : 0,
-      storageFundTotal: fundSize,
+      ...this.decodeEpoch(e),
+      storageFundTotal: Number(e.fundSize) / 1_000_000_000,
     };
   }
 
@@ -165,7 +159,17 @@ export class IotaService {
       ]);
 
     // Previous epoch gas/tx data
-    let epochStats = { epochGasBurned: 0, epochTransactions: 0, epochStorageNetInflow: 0, gasPerTransaction: 0 };
+    let epochStats: ReturnType<typeof this.decodeEpoch> = {
+      epochGasBurned: 0,
+      epochTransactions: 0,
+      epochStorageNetInflow: 0,
+      epochStorageFeesIn: 0,
+      epochStorageRebatesOut: 0,
+      epochStakeRewards: 0,
+      epochReferenceGasPrice: 0,
+      epochNonRefundableBalance: 0,
+      gasPerTransaction: 0,
+    };
     try {
       epochStats = await this.getPreviousEpochStats(systemState.epoch);
     } catch (e) {
