@@ -1884,7 +1884,14 @@ describe('EcosystemService', () => {
   // ---------- capture ----------
 
   describe('capture', () => {
-    const rawStub = { packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
+    const rawStub = {
+      packages: [],
+      totalStorageRebateNanos: 0,
+      networkTxTotal: 0,
+      txRates: {},
+      partialId: null,
+      phaseTimings: { displayMetadataMs: 0, probePaginatorMs: 0, gapClosingMs: 0 },
+    };
 
     it('saves the raw snapshot returned by captureRaw, enriched with captureDurationMs', async () => {
       jest.spyOn(service as any, 'captureRaw').mockResolvedValue({ ...rawStub, partialId: null });
@@ -1961,6 +1968,23 @@ describe('EcosystemService', () => {
       jest.spyOn(service as any, 'captureRaw').mockRejectedValue(new Error('boom'));
       await service.capture();
       expect(service.isCapturing()).toBe(false);
+    });
+
+    it('emits a "Mainnet capture phases:" log line with all 5 phase durations (displayMetadata, probePaginator, gapClosing, finalize, persistClassified) when capture completes', async () => {
+      const logSpy = jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
+      jest.spyOn(service as any, 'captureRaw').mockResolvedValue({
+        ...rawStub,
+        phaseTimings: { displayMetadataMs: 12345, probePaginatorMs: 2_745_000, gapClosingMs: 0 },
+      });
+      await service.capture();
+      const phaseLogCall = logSpy.mock.calls.find((c) => typeof c[0] === 'string' && c[0].startsWith('Mainnet capture phases:'));
+      expect(phaseLogCall).toBeDefined();
+      const line = phaseLogCall![0] as string;
+      expect(line).toMatch(/displayMetadata=12s/);
+      expect(line).toMatch(/probePaginator=2745s/);
+      expect(line).toMatch(/gapClosing=0s/);
+      expect(line).toMatch(/finalize=\d+s/);
+      expect(line).toMatch(/persistClassified=\d+s/);
     });
 
     it('no-ops a concurrent capture while one is already in flight', async () => {
@@ -2585,7 +2609,14 @@ describe('EcosystemService', () => {
   // ---------- network tagging (Decision 1) ----------
 
   describe('network tagging', () => {
-    const rawStub = { packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
+    const rawStub = {
+      packages: [],
+      totalStorageRebateNanos: 0,
+      networkTxTotal: 0,
+      txRates: {},
+      partialId: null,
+      phaseTimings: { displayMetadataMs: 0, probePaginatorMs: 0, gapClosingMs: 0 },
+    };
     const origNetwork = process.env.IOTA_NETWORK;
     afterEach(() => {
       if (origNetwork === undefined) delete process.env.IOTA_NETWORK;
@@ -2843,6 +2874,8 @@ describe('EcosystemService', () => {
       totalStorageRebateNanos: 0,
       networkTxTotal: 12345,
       txRates: {},
+      partialId: null,
+      phaseTimings: { displayMetadataMs: 0, probePaginatorMs: 0, gapClosingMs: 0 },
     });
 
     it('returns aggregate stats computed from the raw snapshot (no Mongo write)', async () => {
@@ -6588,7 +6621,14 @@ describe('EcosystemService', () => {
         notifySpy.mockClear();
         jest.spyOn(service as any, 'captureRaw').mockImplementation(async () => {
           t += 105 * 60 * 1000; // 105 min
-          return { packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} };
+          return {
+            packages: [],
+            totalStorageRebateNanos: 0,
+            networkTxTotal: 0,
+            txRates: {},
+            partialId: null,
+            phaseTimings: { displayMetadataMs: 0, probePaginatorMs: 105 * 60 * 1000, gapClosingMs: 0 },
+          };
         });
         await service.capture();
         expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('CRITICAL'));
@@ -7823,7 +7863,14 @@ describe('EcosystemService', () => {
       (service as any).capturingByNetwork['testnet'] = true;
       const captureRawSpy = jest
         .spyOn(service as any, 'captureRaw')
-        .mockResolvedValue({ packages: [], totalStorageRebateNanos: 0, networkTxTotal: 0, txRates: {} });
+        .mockResolvedValue({
+          packages: [],
+          totalStorageRebateNanos: 0,
+          networkTxTotal: 0,
+          txRates: {},
+          partialId: null,
+          phaseTimings: { displayMetadataMs: 0, probePaginatorMs: 0, gapClosingMs: 0 },
+        });
       await service.capture();
       expect(captureRawSpy).toHaveBeenCalled();
       (service as any).capturingByNetwork['testnet'] = false;

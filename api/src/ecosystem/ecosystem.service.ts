@@ -1385,20 +1385,24 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         // a resume that completed on the first page) fall back to the
         // historical `create`. In both branches the final doc is tagged
         // `captureStage: 'complete'` so readers pick it up immediately.
+        const tFinalize = Date.now();
         const created = await this.finalizeMainnetSnapshot(raw, durationMs);
+        const finalizeMs = Date.now() - tFinalize;
         // Precompute + persist the classified view so the first read after
         // this capture is O(1). Failures here are non-fatal — readers fall
         // back to classify-on-demand via `classifyOrLoad`. Keeps the
         // capture cron resilient to a transient Mongo error on write.
+        let persistClassifiedMs = 0;
         try {
-          const t0 = Date.now();
+          const tClassify = Date.now();
           const view = await this.classifyFromRaw(created);
-          await this.persistClassified(created._id, view, Date.now() - t0, (created as { network?: string }).network);
+          await this.persistClassified(created._id, view, Date.now() - tClassify, (created as { network?: string }).network);
+          persistClassifiedMs = Date.now() - tClassify;
         } catch (err) {
           this.logger.warn('Post-capture classify/persist failed; readers will classify on demand', err);
         }
         this.invalidateClassifyCache();
-        return { raw, durationMs };
+        return { raw, durationMs, finalizeMs, persistClassifiedMs };
       })();
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       const hardTimeout = new Promise<never>((_, reject) => {
@@ -1410,11 +1414,31 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       });
       let raw: Awaited<ReturnType<EcosystemService['captureRaw']>>;
       let durationMs: number;
+      let finalizeMs: number;
+      let persistClassifiedMs: number;
       try {
-        ({ raw, durationMs } = await Promise.race([captureWork, hardTimeout]));
+        ({ raw, durationMs, finalizeMs, persistClassifiedMs } = await Promise.race([captureWork, hardTimeout]));
       } finally {
         if (timeoutHandle) clearTimeout(timeoutHandle);
       }
+
+      // Per-phase wall-clock breakdown — emits a single scannable line so
+      // a slow capture (like snap 42's +18min over baseline) is
+      // self-explanatory without grovelling through container logs.
+      // `displayMetadata` + `probePaginator` + `gapClosing` sum to
+      // `captureDurationMs`; `finalize` + `persistClassified` happen
+      // after that timestamp is recorded but still affect the next-cron
+      // interval.
+      const ph = raw.phaseTimings;
+      const sec = (ms: number) => Math.round(ms / 1000) + 's';
+      this.logger.log(
+        `Mainnet capture phases: ` +
+          `displayMetadata=${sec(ph.displayMetadataMs)} ` +
+          `probePaginator=${sec(ph.probePaginatorMs)} ` +
+          `gapClosing=${sec(ph.gapClosingMs)} ` +
+          `finalize=${sec(finalizeMs)} ` +
+          `persistClassified=${sec(persistClassifiedMs)}`,
+      );
 
       const durationMin = Math.round(durationMs / 60000);
       const summary =
@@ -3295,6 +3319,19 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
      * `null` when capture finished inside the first checkpoint window.
      */
     partialId: Types.ObjectId | null;
+    /**
+     * Per-phase wall-clock breakdown of `captureRaw`'s three internal
+     * stages. Logged by the outer `capture()` alongside the totals from
+     * `finalizeMainnetSnapshot` + `persistClassified` so a slow capture
+     * is self-explanatory from one summary line. `gapClosingMs` is `0`
+     * when the safety-net path didn't run (the common case — main sweep
+     * completed inside the budget without wrapping).
+     */
+    phaseTimings: {
+      displayMetadataMs: number;
+      probePaginatorMs: number;
+      gapClosingMs: number;
+    };
   }> {
     // Display metadata pre-pass: one paginated fetch of every
     // `0x2::display::Display<T>` object on chain, grouped by the inner-type
@@ -3303,7 +3340,9 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     // image_url/project_url) that would otherwise be invisible — the
     // object-prefix filter used in `probeIdentityFields` misses Display
     // because its outer type lives under `0x2`, not the package address.
+    const tDisplay = Date.now();
     const displayByPackage = await this.collectDisplayMetadata();
+    const displayMetadataMs = Date.now() - tDisplay;
 
     // Framework filter (see doc-comment above) — any `0x000…0***` package
     // not explicitly claimed by a `ProjectDefinition` is skipped silently.
@@ -3353,6 +3392,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     };
 
     const deadlineMs = captureStart.getTime() + EcosystemService.MAINNET_TICK_BUDGET_MS;
+    const tProbe = Date.now();
     const {
       probed: freshlyProbed,
       failedPackages,
@@ -3368,6 +3408,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       onCheckpoint,
       checkpointEveryN: EcosystemService.MAINNET_CHECKPOINT_EVERY_N,
     });
+    const probePaginatorMs = Date.now() - tProbe;
 
     // Gap WARN: mainnet's atomic sweep exhausted the budget without
     // wrapping. Means the walk didn't reach every package — unusual
@@ -3392,8 +3433,11 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     // cases where capacity is strained (load tests, degraded GraphQL,
     // etc.).
     let gapClosed: PackageFact[] = [];
+    let gapClosingMs = 0;
     if (wrapped && Date.now() < deadlineMs) {
+      const tGap = Date.now();
       const gc = await this.runGapClosing('mainnet', new Date(), deadlineMs, displayByPackage);
+      gapClosingMs = Date.now() - tGap;
       gapClosed = gc.probed;
       if (gapClosed.length > 0) {
         this.logger.log(
@@ -3466,6 +3510,11 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         perSecond: Math.round((networkTxTotal / secondsLive) * 100) / 100,
       },
       partialId,
+      phaseTimings: {
+        displayMetadataMs,
+        probePaginatorMs,
+        gapClosingMs,
+      },
     };
   }
 
