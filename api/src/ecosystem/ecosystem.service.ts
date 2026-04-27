@@ -4508,13 +4508,18 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   //         hit known territory; everything beyond is already in DB),
   //       * `hasPreviousPage: false` (genesis),
   //       * `Date.now() >= deadlineMs`.
-  //   - **Pipeline B — deep probe.** Aggregate `packagefacts` for every
+  //   - **Pipeline B — deep probe (lite).** Aggregate `packagefacts` for every
   //     non-tutorial address on testnet (full sweep, no staleness
   //     ordering, no cap). Each candidate goes through `probeOnePackage`
   //     — `isTutorial: false` is guaranteed by the filter, so the early-
-  //     return path can never fire and every probe runs the full
-  //     pipeline. Probed in concurrency-15 batches via Promise.allSettled;
-  //     bounded by the remaining tick budget after Pipeline A.
+  //     return path can never fire. On testnet, probeOnePackage skips the
+  //     three heaviest dynamic sub-probes (sender cursor walk, tx-count
+  //     cursor walk, object-type enumeration) — those fields are CI/
+  //     automation noise per `project_two_headline_metrics.md` and never
+  //     feed user-facing metrics. Static enrichment (entryFunctions,
+  //     eventTypes, fingerprint) is still captured. Probed in
+  //     concurrency-15 batches via Promise.allSettled; bounded by the
+  //     remaining tick budget after Pipeline A.
   //
   // The kind-union dispatcher (`tickCounter % 3` newest vs backfill) is
   // gone (Phase 2 deferred-cleanup commit, 2026-04-26): every tick is a
@@ -4590,12 +4595,23 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       } as PackageFact;
     }
 
+    // Testnet "lite probe" — skip the three heavy dynamic-noise sub-probes
+    // (per-module sender cursor walk, per-package tx-count cursor walk,
+    // per-type object enumeration) on testnet. Per
+    // `project_two_headline_metrics.md`, testnet TXs/objects/senders are
+    // dominated by CI/automation and never feed any user-facing metric.
+    // Re-probing them every 2h tick is wasted budget. Static enrichment
+    // fields (entryFunctions, eventTypes, fingerprint, events count) are
+    // still captured — they're cheap and feed classification. Mainnet
+    // keeps the full pipeline; growth deltas there are real.
+    const isTestnet = network === 'testnet';
+
     const entryFunctionsByModule = await this.fetchEntryFunctions(pkg.address);
     const moduleMetrics: ModuleMetrics[] = [];
     for (const mod of modules) {
       const emittingModule = `${pkg.address}::${mod}`;
       const { count: events, capped: eventsCapped } = await this.countEvents(emittingModule);
-      const uniqueSenders = await this.updateSendersForModule(pkg.address, mod);
+      const uniqueSenders = isTestnet ? 0 : await this.updateSendersForModule(pkg.address, mod);
       const eventTypes = events > 0 ? await this.sampleEventTypes(emittingModule) : [];
       moduleMetrics.push({
         module: mod,
@@ -4633,10 +4649,17 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         ? { sampledObjectType: objectType, identifiers }
         : null;
 
-    const { total: transactions, capped: transactionsCapped } =
-      await this.updateTxCountForPackage(pkg.address);
+    let transactions = 0;
+    let transactionsCapped = false;
+    if (!isTestnet) {
+      const tx = await this.updateTxCountForPackage(pkg.address);
+      transactions = tx.total;
+      transactionsCapped = tx.capped;
+    }
 
-    const objectTypeCounts = await this.captureObjectTypesForPackage(pkg.address);
+    const objectTypeCounts = isTestnet
+      ? []
+      : await this.captureObjectTypesForPackage(pkg.address);
     const summedObjectHolderCount = objectTypeCounts.reduce((s, e) => s + e.objectHolderCount, 0);
     const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.objectCount, 0);
 

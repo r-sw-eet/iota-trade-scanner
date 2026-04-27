@@ -8640,6 +8640,67 @@ describe('EcosystemService', () => {
       expect(fact.moduleMetrics[0].entryFunctions).toEqual(['drip']);
     });
 
+    it('probeOnePackage on testnet skips the 3 dynamic-noise sub-probes (lite mode) but still captures static enrichment', async () => {
+      // Testnet "lite probe": same package as mainnet's full pipeline minus
+      // the per-module sender cursor walk, the per-package tx-count cursor
+      // walk, and the per-type object enumeration. Static fields
+      // (entryFunctions, eventTypes, fingerprint, events count) are still
+      // captured.
+      const info = {
+        address: '0xtestnetReal',
+        storageRebate: '999',
+        modules: { nodes: [{ name: 'unique_real' }] }, // not in catalog
+        previousTransactionBlock: {
+          sender: { address: '0xBUILDER' },
+          effects: { timestamp: '2026-04-20T00:00:00Z' },
+        },
+      };
+      const fetchEntrySpy = jest
+        .spyOn(service as any, 'fetchEntryFunctions')
+        .mockResolvedValue(new Map([['unique_real', ['transfer']]]));
+      const countEventsSpy = jest
+        .spyOn(service as any, 'countEvents')
+        .mockResolvedValue({ count: 3, capped: false });
+      const sampleEventTypesSpy = jest
+        .spyOn(service as any, 'sampleEventTypes')
+        .mockResolvedValue(['Transferred']);
+      const probeIdentitySpy = jest
+        .spyOn(service as any, 'probeIdentityFields')
+        .mockResolvedValue({ identifiers: ['name: foo'], objectType: '0xtestnetReal::unique_real::T' });
+      const updateSendersSpy = jest.spyOn(service as any, 'updateSendersForModule');
+      const updateTxSpy = jest.spyOn(service as any, 'updateTxCountForPackage');
+      const captureObjSpy = jest.spyOn(service as any, 'captureObjectTypesForPackage');
+
+      const fact = await (service as any).probeOnePackage(info, new Map(), new Date(), 'testnet');
+
+      // Static enrichment: still ran.
+      expect(fetchEntrySpy).toHaveBeenCalled();
+      expect(countEventsSpy).toHaveBeenCalled();
+      expect(sampleEventTypesSpy).toHaveBeenCalled();
+      expect(probeIdentitySpy).toHaveBeenCalled();
+
+      // Dynamic-noise sub-probes: skipped on testnet.
+      expect(updateSendersSpy).not.toHaveBeenCalled();
+      expect(updateTxSpy).not.toHaveBeenCalled();
+      expect(captureObjSpy).not.toHaveBeenCalled();
+
+      // Resulting fact: dynamic fields zero, static fields populated.
+      expect(fact.isTutorial).toBe(false);
+      expect(fact.transactions).toBe(0);
+      expect(fact.transactionsCapped).toBe(false);
+      expect(fact.objectTypeCounts).toEqual([]);
+      expect(fact.objectHolderCount).toBe(0);
+      expect(fact.objectCount).toBe(0);
+      expect(fact.moduleMetrics).toHaveLength(1);
+      expect(fact.moduleMetrics[0].entryFunctions).toEqual(['transfer']);
+      expect(fact.moduleMetrics[0].eventTypes).toEqual(['Transferred']);
+      expect(fact.moduleMetrics[0].uniqueSenders).toBe(0); // skipped on testnet
+      expect(fact.fingerprint).toEqual({
+        sampledObjectType: '0xtestnetReal::unique_real::T',
+        identifiers: ['name: foo'],
+      });
+    });
+
     it('captureTestnetTick skips with "cross-process lock held" when acquire returns acquired:false', async () => {
       (service as any).acquireCaptureLock.mockResolvedValue({
         acquired: false,
