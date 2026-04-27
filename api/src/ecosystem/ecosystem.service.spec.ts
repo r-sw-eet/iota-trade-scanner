@@ -8746,17 +8746,20 @@ describe('EcosystemService', () => {
       expect(fact.moduleMetrics[0].entryFunctions).toEqual(['drip']);
     });
 
-    it('probeOnePackage on testnet runs the lite path: senders + tx counts skipped, object-types discovered via discoverObjectTypesLite (zero counts, type strings preserved for classification)', async () => {
+    it('probeOnePackage on testnet runs the lite path: countEvents + senders + tx counts skipped, sampleEventTypes runs unconditionally, object-types discovered via discoverObjectTypesLite (zero counts, type strings preserved for classification)', async () => {
       // Testnet "lite probe": same package as mainnet's full pipeline minus
-      // the per-module sender cursor walk + per-package tx-count cursor
-      // walk + per-type holder/object-count walks. The full
+      // the per-module events count + per-module sender cursor walk +
+      // per-package tx-count cursor walk + per-type holder/object-count
+      // walks. countEvents was 72% of the testnet sub-probe sum, so it's
+      // skipped; `events` falls back to 0. sampleEventTypes runs
+      // unconditionally on testnet (no `events > 0` gate, since we no
+      // longer have the count) so the "what kinds of events CAN this
+      // module emit" signal is preserved. The full
       // `captureObjectTypesForPackage` (which fires the heavy per-type
       // walks) is NOT called; instead we hit `discoverObjectTypesLite`
       // which only enumerates the KEY-able type strings — enough for
       // `match.objectTypes` classification (NFT collections etc.) but
       // skipping the work that actually dominates testnet wall-clock.
-      // Static fields (entryFunctions, eventTypes, fingerprint, events
-      // count) are still captured.
       const info = {
         address: '0xtestnetReal',
         storageRebate: '999',
@@ -8769,9 +8772,7 @@ describe('EcosystemService', () => {
       const fetchEntrySpy = jest
         .spyOn(service as any, 'fetchEntryFunctions')
         .mockResolvedValue(new Map([['unique_real', ['transfer']]]));
-      const countEventsSpy = jest
-        .spyOn(service as any, 'countEvents')
-        .mockResolvedValue({ count: 3, capped: false });
+      const countEventsSpy = jest.spyOn(service as any, 'countEvents');
       const sampleEventTypesSpy = jest
         .spyOn(service as any, 'sampleEventTypes')
         .mockResolvedValue(['Transferred']);
@@ -8798,11 +8799,12 @@ describe('EcosystemService', () => {
 
       // Static enrichment: still ran.
       expect(fetchEntrySpy).toHaveBeenCalled();
-      expect(countEventsSpy).toHaveBeenCalled();
+      // sampleEventTypes runs unconditionally on testnet (no events>0 gate).
       expect(sampleEventTypesSpy).toHaveBeenCalled();
       expect(probeIdentitySpy).toHaveBeenCalled();
 
       // Dynamic-noise sub-probes: skipped on testnet.
+      expect(countEventsSpy).not.toHaveBeenCalled();
       expect(updateSendersSpy).not.toHaveBeenCalled();
       expect(updateTxSpy).not.toHaveBeenCalled();
 
@@ -8814,8 +8816,8 @@ describe('EcosystemService', () => {
       // classification, none of the heavy per-type walks.
       expect(discoverLiteSpy).toHaveBeenCalled();
 
-      // Resulting fact: tx + object-count fields zero (skipped), type
-      // strings preserved for classification.
+      // Resulting fact: events + tx + object-count fields zero (skipped),
+      // type strings preserved for classification.
       expect(fact.isTutorial).toBe(false);
       expect(fact.transactions).toBe(0);
       expect(fact.transactionsCapped).toBe(false);
@@ -8834,6 +8836,8 @@ describe('EcosystemService', () => {
       expect(fact.moduleMetrics).toHaveLength(1);
       expect(fact.moduleMetrics[0].entryFunctions).toEqual(['transfer']);
       expect(fact.moduleMetrics[0].eventTypes).toEqual(['Transferred']);
+      expect(fact.moduleMetrics[0].events).toBe(0); // skipped on testnet
+      expect(fact.moduleMetrics[0].eventsCapped).toBe(false); // skipped on testnet
       expect(fact.moduleMetrics[0].uniqueSenders).toBe(0); // skipped on testnet
       expect(fact.fingerprint).toEqual({
         sampledObjectType: '0xtestnetReal::unique_real::T',
@@ -8841,13 +8845,14 @@ describe('EcosystemService', () => {
       });
     });
 
-    it('probeOnePackage on testnet accumulates per-sub-probe wall-clock into the supplied timings object (skips senders/txCount, records the rest)', async () => {
+    it('probeOnePackage on testnet accumulates per-sub-probe wall-clock into the supplied timings object (skips countEvents/senders/txCount, records the rest)', async () => {
       // Drives the `if (timings)` branches inside `probeOnePackage` on the
       // testnet lite path: totalPackages++, fetchEntryFunctionsMs,
-      // countEventsMs, sampleEventTypesMs (events > 0), probeIdentityFieldsMs,
-      // objectTypesMs. updateSendersForModuleMs / updateTxCountForPackageMs
-      // stay zero — those sub-probes are skipped on testnet so their timing
-      // wraps never run. probeTxEffectsMs also stays zero — identityFields
+      // sampleEventTypesMs (always — testnet has no events>0 gate),
+      // probeIdentityFieldsMs, objectTypesMs. countEventsMs /
+      // updateSendersForModuleMs / updateTxCountForPackageMs stay zero —
+      // those sub-probes are skipped on testnet so their timing wraps
+      // never run. probeTxEffectsMs also stays zero — identityFields
       // returned non-empty identifiers, so the fallback isn't called.
       const info = {
         address: '0xtestnetTimings',
@@ -8856,7 +8861,6 @@ describe('EcosystemService', () => {
         previousTransactionBlock: null,
       };
       jest.spyOn(service as any, 'fetchEntryFunctions').mockResolvedValue(new Map());
-      jest.spyOn(service as any, 'countEvents').mockResolvedValue({ count: 1, capped: false });
       jest.spyOn(service as any, 'sampleEventTypes').mockResolvedValue(['Evt']);
       jest
         .spyOn(service as any, 'probeIdentityFields')
@@ -8868,11 +8872,11 @@ describe('EcosystemService', () => {
 
       expect(timings.totalPackages).toBe(1);
       expect(timings.fetchEntryFunctionsMs).toBeGreaterThanOrEqual(0);
-      expect(timings.countEventsMs).toBeGreaterThanOrEqual(0);
       expect(timings.sampleEventTypesMs).toBeGreaterThanOrEqual(0);
       expect(timings.probeIdentityFieldsMs).toBeGreaterThanOrEqual(0);
       expect(timings.objectTypesMs).toBeGreaterThanOrEqual(0);
       // Skipped on testnet — accumulators stay at their initial zero.
+      expect(timings.countEventsMs).toBe(0);
       expect(timings.updateSendersForModuleMs).toBe(0);
       expect(timings.updateTxCountForPackageMs).toBe(0);
       // identityFields returned non-empty → fallback skipped.

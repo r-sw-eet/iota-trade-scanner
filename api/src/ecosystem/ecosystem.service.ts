@@ -4730,12 +4730,19 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       } as PackageFact;
     }
 
-    // Testnet "lite probe" — three sub-probes are downgraded:
+    // Testnet "lite probe" — four sub-probes are downgraded:
     //   1. `updateSendersForModule` — skipped entirely (per-module sender
     //      cursor walk).
     //   2. `updateTxCountForPackage` — skipped entirely (per-package tx
     //      cursor walk).
-    //   3. `captureObjectTypesForPackage` — replaced with
+    //   3. `countEvents` — skipped entirely (per-module events count).
+    //      `sampleEventTypes` runs unconditionally on testnet (no `events>0`
+    //      gate, since we no longer have the count). The "what kinds of
+    //      events CAN this module emit" signal is preserved; "how many
+    //      have fired" is dropped — pure usage metric, never feeds the
+    //      "who's building" headline. countEvents was 72% of the testnet
+    //      sub-probe sum (see scanner_log.md).
+    //   4. `captureObjectTypesForPackage` — replaced with
     //      `discoverObjectTypesLite`, which keeps the cheap struct
     //      enumeration (one GraphQL call → KEY-able type strings) and
     //      drops the heavy per-type walks (holder walk + object count
@@ -4743,12 +4750,12 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     //      strings with zero counts, so `match.objectTypes` classification
     //      (NFT collections etc.) keeps working.
     // Rationale per `project_two_headline_metrics.md`: testnet
-    // TXs / senders / object populations are dominated by CI / automation
-    // and never feed user-facing metrics. The walks were also the actual
-    // bottleneck — `countObjectsForType` re-pages every live object every
-    // tick, and testnet has 90k+ types with fat-tailed populations.
-    // Static enrichment (entryFunctions, eventTypes, fingerprint, events
-    // count, type strings) is still captured — cheap and feeds
+    // TXs / senders / events / object populations are dominated by CI /
+    // automation and never feed user-facing metrics. The walks were also
+    // the actual bottleneck — `countObjectsForType` re-pages every live
+    // object every tick, and testnet has 90k+ types with fat-tailed
+    // populations. Static enrichment (entryFunctions, eventTypes,
+    // fingerprint, type strings) is still captured — cheap and feeds
     // classification. Mainnet keeps the full pipeline; growth deltas
     // there are real.
     const isTestnet = network === 'testnet';
@@ -4760,9 +4767,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     const moduleMetrics: ModuleMetrics[] = [];
     for (const mod of modules) {
       const emittingModule = `${pkg.address}::${mod}`;
-      const tCount = Date.now();
-      const { count: events, capped: eventsCapped } = await this.countEvents(emittingModule);
-      if (timings) timings.countEventsMs += Date.now() - tCount;
+      let events = 0;
+      let eventsCapped = false;
+      if (!isTestnet) {
+        const tCount = Date.now();
+        const counted = await this.countEvents(emittingModule);
+        if (timings) timings.countEventsMs += Date.now() - tCount;
+        events = counted.count;
+        eventsCapped = counted.capped;
+      }
       let uniqueSenders = 0;
       if (!isTestnet) {
         const tSenders = Date.now();
@@ -4770,7 +4783,10 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         if (timings) timings.updateSendersForModuleMs += Date.now() - tSenders;
       }
       let eventTypes: string[] = [];
-      if (events > 0) {
+      // Testnet: always sample (no `events > 0` gate — we no longer have
+      // the count). Mainnet: keep the gate to avoid a wasted call when the
+      // module has emitted zero events ever.
+      if (isTestnet || events > 0) {
         const tSample = Date.now();
         eventTypes = await this.sampleEventTypes(emittingModule);
         if (timings) timings.sampleEventTypesMs += Date.now() - tSample;
