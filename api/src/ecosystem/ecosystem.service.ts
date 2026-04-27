@@ -4512,14 +4512,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   //     non-tutorial address on testnet (full sweep, no staleness
   //     ordering, no cap). Each candidate goes through `probeOnePackage`
   //     — `isTutorial: false` is guaranteed by the filter, so the early-
-  //     return path can never fire. On testnet, probeOnePackage skips the
-  //     three heaviest dynamic sub-probes (sender cursor walk, tx-count
-  //     cursor walk, object-type enumeration) — those fields are CI/
-  //     automation noise per `project_two_headline_metrics.md` and never
-  //     feed user-facing metrics. Static enrichment (entryFunctions,
-  //     eventTypes, fingerprint) is still captured. Probed in
-  //     concurrency-15 batches via Promise.allSettled; bounded by the
-  //     remaining tick budget after Pipeline A.
+  //     return path can never fire. On testnet, probeOnePackage skips two
+  //     heavy dynamic sub-probes (sender cursor walk + tx-count cursor
+  //     walk) — those fields are CI/automation noise per
+  //     `project_two_headline_metrics.md`. Object-type enumeration stays
+  //     enabled because it discovers static `type` strings used for
+  //     classification. Static enrichment (entryFunctions, eventTypes,
+  //     fingerprint) is also captured. Probed in concurrency-15 batches
+  //     via Promise.allSettled; bounded by the remaining tick budget
+  //     after Pipeline A.
   //
   // The kind-union dispatcher (`tickCounter % 3` newest vs backfill) is
   // gone (Phase 2 deferred-cleanup commit, 2026-04-26): every tick is a
@@ -4595,15 +4596,21 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       } as PackageFact;
     }
 
-    // Testnet "lite probe" — skip the three heavy dynamic-noise sub-probes
-    // (per-module sender cursor walk, per-package tx-count cursor walk,
-    // per-type object enumeration) on testnet. Per
-    // `project_two_headline_metrics.md`, testnet TXs/objects/senders are
-    // dominated by CI/automation and never feed any user-facing metric.
-    // Re-probing them every 2h tick is wasted budget. Static enrichment
-    // fields (entryFunctions, eventTypes, fingerprint, events count) are
-    // still captured — they're cheap and feed classification. Mainnet
-    // keeps the full pipeline; growth deltas there are real.
+    // Testnet "lite probe" — skip two heavy dynamic-noise sub-probes
+    // (per-module sender cursor walk, per-package tx-count cursor walk)
+    // on testnet. Per `project_two_headline_metrics.md`, testnet
+    // TXs/senders are dominated by CI/automation and never feed any
+    // user-facing metric. Re-probing them every 2h tick is wasted budget.
+    // `captureObjectTypesForPackage` is NOT skipped — even though its
+    // counts are testnet noise, the call also discovers the static
+    // `type` strings on each `ObjectTypeCount` entry, which the
+    // `match.objectTypes` matcher uses for classification (NFT
+    // collections etc). See plans/TODO.md → "Testnet probe efficiency"
+    // for follow-up options that recover that cost without losing the
+    // type strings (types-only mode, type caching). Static enrichment
+    // (entryFunctions, eventTypes, fingerprint, events count) is also
+    // captured — cheap and feeds classification. Mainnet keeps the full
+    // pipeline; growth deltas there are real.
     const isTestnet = network === 'testnet';
 
     const entryFunctionsByModule = await this.fetchEntryFunctions(pkg.address);
@@ -4657,9 +4664,10 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       transactionsCapped = tx.capped;
     }
 
-    const objectTypeCounts = isTestnet
-      ? []
-      : await this.captureObjectTypesForPackage(pkg.address);
+    // Always run captureObjectTypesForPackage — it discovers static
+    // `type` strings used by the `match.objectTypes` matcher, even on
+    // testnet where the dynamic count fields are noise.
+    const objectTypeCounts = await this.captureObjectTypesForPackage(pkg.address);
     const summedObjectHolderCount = objectTypeCounts.reduce((s, e) => s + e.objectHolderCount, 0);
     const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.objectCount, 0);
 

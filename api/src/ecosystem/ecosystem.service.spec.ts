@@ -8640,12 +8640,13 @@ describe('EcosystemService', () => {
       expect(fact.moduleMetrics[0].entryFunctions).toEqual(['drip']);
     });
 
-    it('probeOnePackage on testnet skips the 3 dynamic-noise sub-probes (lite mode) but still captures static enrichment', async () => {
+    it('probeOnePackage on testnet skips the 2 dynamic-noise sub-probes (lite mode) but still captures static enrichment + object types', async () => {
       // Testnet "lite probe": same package as mainnet's full pipeline minus
-      // the per-module sender cursor walk, the per-package tx-count cursor
-      // walk, and the per-type object enumeration. Static fields
-      // (entryFunctions, eventTypes, fingerprint, events count) are still
-      // captured.
+      // the per-module sender cursor walk and the per-package tx-count
+      // cursor walk. `captureObjectTypesForPackage` is NOT skipped — it
+      // discovers static `type` strings used by the `match.objectTypes`
+      // matcher (NFT collections etc.). Static fields (entryFunctions,
+      // eventTypes, fingerprint, events count) are still captured.
       const info = {
         address: '0xtestnetReal',
         storageRebate: '999',
@@ -8669,7 +8670,11 @@ describe('EcosystemService', () => {
         .mockResolvedValue({ identifiers: ['name: foo'], objectType: '0xtestnetReal::unique_real::T' });
       const updateSendersSpy = jest.spyOn(service as any, 'updateSendersForModule');
       const updateTxSpy = jest.spyOn(service as any, 'updateTxCountForPackage');
-      const captureObjSpy = jest.spyOn(service as any, 'captureObjectTypesForPackage');
+      const captureObjSpy = jest
+        .spyOn(service as any, 'captureObjectTypesForPackage')
+        .mockResolvedValue([
+          { type: '0xtestnetReal::unique_real::T', objectCount: 7, objectHolderCount: 4 },
+        ]);
 
       const fact = await (service as any).probeOnePackage(info, new Map(), new Date(), 'testnet');
 
@@ -8682,15 +8687,21 @@ describe('EcosystemService', () => {
       // Dynamic-noise sub-probes: skipped on testnet.
       expect(updateSendersSpy).not.toHaveBeenCalled();
       expect(updateTxSpy).not.toHaveBeenCalled();
-      expect(captureObjSpy).not.toHaveBeenCalled();
 
-      // Resulting fact: dynamic fields zero, static fields populated.
+      // Object-type enumeration: NOT skipped — needed for match.objectTypes
+      // classification. Counts are testnet noise but type strings feed the
+      // matcher.
+      expect(captureObjSpy).toHaveBeenCalled();
+
+      // Resulting fact: tx fields zero (skipped), object types populated.
       expect(fact.isTutorial).toBe(false);
       expect(fact.transactions).toBe(0);
       expect(fact.transactionsCapped).toBe(false);
-      expect(fact.objectTypeCounts).toEqual([]);
-      expect(fact.objectHolderCount).toBe(0);
-      expect(fact.objectCount).toBe(0);
+      expect(fact.objectTypeCounts).toEqual([
+        { type: '0xtestnetReal::unique_real::T', objectCount: 7, objectHolderCount: 4 },
+      ]);
+      expect(fact.objectHolderCount).toBe(4);
+      expect(fact.objectCount).toBe(7);
       expect(fact.moduleMetrics).toHaveLength(1);
       expect(fact.moduleMetrics[0].entryFunctions).toEqual(['transfer']);
       expect(fact.moduleMetrics[0].eventTypes).toEqual(['Transferred']);
