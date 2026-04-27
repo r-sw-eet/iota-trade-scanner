@@ -176,12 +176,21 @@ const ecosystemError = ref('')
 const activeSection = ref('network') // nav state
 const activeEcoTab = ref<'projects' | 'teams'>('projects')
 let observer: IntersectionObserver | null = null
+// Click intent vs observer race: a nav-button click sets `activeSection`
+// then triggers a smooth scroll. While that scroll animates, the
+// IntersectionObserver below fires with whatever section is still at the
+// top of the viewport (often the previous one) and overwrites the
+// click-set value — visible as the Ecosystem sub-tier flickering hidden
+// in CI Playwright. Suppress observer updates for ~1s after a click so
+// user intent wins.
+let suppressObserverUntil = 0
 
 function scrollToSection(id: string) {
   const el = document.getElementById(id)
   if (!el) return
   if (['network', 'economics', 'ecosystem', 'architecture', 'sources'].includes(id)) {
     activeSection.value = id
+    suppressObserverUntil = Date.now() + 1000
   }
   // Ecosystem section has an extra sub-tier row in the sticky nav, so reserve more space
   const offset = id === 'ecosystem' || id === 'ecosystem-projects' || id === 'ecosystem-teams' ? 112 : 72
@@ -198,6 +207,7 @@ function goToEcoTab(tab: 'projects' | 'teams') {
     const needsScroll = rect.top > 200 || rect.bottom < 200
     if (needsScroll) {
       activeSection.value = 'ecosystem'
+      suppressObserverUntil = Date.now() + 1000
       window.scrollTo({ top: rect.top + window.scrollY - 112, behavior: 'smooth' })
     }
   })
@@ -306,6 +316,9 @@ onMounted(async () => {
   await nextTick()
   observer = new IntersectionObserver(
     (entries) => {
+      // Skip while a click-driven smooth scroll is settling — see
+      // `suppressObserverUntil` comment up top.
+      if (Date.now() < suppressObserverUntil) return
       const visible = entries
         .filter(e => e.isIntersecting)
         .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
