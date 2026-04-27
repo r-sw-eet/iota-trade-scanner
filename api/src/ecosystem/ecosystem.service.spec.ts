@@ -6433,6 +6433,65 @@ describe('EcosystemService', () => {
       });
     });
 
+    describe('discoverObjectTypesLite (testnet types-only path)', () => {
+      it('returns synthesized ObjectTypeCount entries — type strings populated, all dynamic counts zero, no per-type walks invoked', async () => {
+        jest.spyOn(service as any, 'graphql').mockResolvedValueOnce({
+          object: {
+            asMovePackage: {
+              modules: {
+                nodes: [
+                  {
+                    name: 'collection',
+                    datatypes: {
+                      nodes: [
+                        { name: 'NFT', abilities: ['KEY', 'STORE'] },
+                        { name: 'EventOnly', abilities: [] }, // no KEY → skipped
+                        { name: 'AdminCap', abilities: ['KEY'] },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        });
+        const holdersSpy = jest.spyOn(service as any, 'updateHoldersForType');
+        const countSpy = jest.spyOn(service as any, 'countObjectsForType');
+
+        const result = await (service as any).discoverObjectTypesLite('0xpkg');
+
+        // Heavy per-type walks must NOT fire — that's the whole point of
+        // the lite path on testnet.
+        expect(holdersSpy).not.toHaveBeenCalled();
+        expect(countSpy).not.toHaveBeenCalled();
+
+        expect(result).toEqual([
+          {
+            type: '0xpkg::collection::NFT',
+            objectHolderCount: 0,
+            listedCount: 0,
+            objectHolderCountCapped: false,
+            objectCount: 0,
+            objectCountCapped: false,
+          },
+          {
+            type: '0xpkg::collection::AdminCap',
+            objectHolderCount: 0,
+            listedCount: 0,
+            objectHolderCountCapped: false,
+            objectCount: 0,
+            objectCountCapped: false,
+          },
+        ]);
+      });
+
+      it('returns [] when struct enumeration fails (graphql error) — testnet probe stays resilient', async () => {
+        jest.spyOn(service as any, 'graphql').mockRejectedValue(new Error('module query blew up'));
+        const result = await (service as any).discoverObjectTypesLite('0xpkg');
+        expect(result).toEqual([]);
+      });
+    });
+
     describe('countObjectsForType', () => {
       it('paginates objects(filter:{type}) until hasPreviousPage:false, summing nodes.length — uncapped', async () => {
         const gql = jest.spyOn(service as any, 'graphql')
@@ -8640,13 +8699,17 @@ describe('EcosystemService', () => {
       expect(fact.moduleMetrics[0].entryFunctions).toEqual(['drip']);
     });
 
-    it('probeOnePackage on testnet skips the 2 dynamic-noise sub-probes (lite mode) but still captures static enrichment + object types', async () => {
+    it('probeOnePackage on testnet runs the lite path: senders + tx counts skipped, object-types discovered via discoverObjectTypesLite (zero counts, type strings preserved for classification)', async () => {
       // Testnet "lite probe": same package as mainnet's full pipeline minus
-      // the per-module sender cursor walk and the per-package tx-count
-      // cursor walk. `captureObjectTypesForPackage` is NOT skipped — it
-      // discovers static `type` strings used by the `match.objectTypes`
-      // matcher (NFT collections etc.). Static fields (entryFunctions,
-      // eventTypes, fingerprint, events count) are still captured.
+      // the per-module sender cursor walk + per-package tx-count cursor
+      // walk + per-type holder/object-count walks. The full
+      // `captureObjectTypesForPackage` (which fires the heavy per-type
+      // walks) is NOT called; instead we hit `discoverObjectTypesLite`
+      // which only enumerates the KEY-able type strings — enough for
+      // `match.objectTypes` classification (NFT collections etc.) but
+      // skipping the work that actually dominates testnet wall-clock.
+      // Static fields (entryFunctions, eventTypes, fingerprint, events
+      // count) are still captured.
       const info = {
         address: '0xtestnetReal',
         storageRebate: '999',
@@ -8670,10 +8733,18 @@ describe('EcosystemService', () => {
         .mockResolvedValue({ identifiers: ['name: foo'], objectType: '0xtestnetReal::unique_real::T' });
       const updateSendersSpy = jest.spyOn(service as any, 'updateSendersForModule');
       const updateTxSpy = jest.spyOn(service as any, 'updateTxCountForPackage');
-      const captureObjSpy = jest
-        .spyOn(service as any, 'captureObjectTypesForPackage')
+      const captureObjSpy = jest.spyOn(service as any, 'captureObjectTypesForPackage');
+      const discoverLiteSpy = jest
+        .spyOn(service as any, 'discoverObjectTypesLite')
         .mockResolvedValue([
-          { type: '0xtestnetReal::unique_real::T', objectCount: 7, objectHolderCount: 4 },
+          {
+            type: '0xtestnetReal::unique_real::T',
+            objectHolderCount: 0,
+            listedCount: 0,
+            objectHolderCountCapped: false,
+            objectCount: 0,
+            objectCountCapped: false,
+          },
         ]);
 
       const fact = await (service as any).probeOnePackage(info, new Map(), new Date(), 'testnet');
@@ -8688,20 +8759,31 @@ describe('EcosystemService', () => {
       expect(updateSendersSpy).not.toHaveBeenCalled();
       expect(updateTxSpy).not.toHaveBeenCalled();
 
-      // Object-type enumeration: NOT skipped — needed for match.objectTypes
-      // classification. Counts are testnet noise but type strings feed the
-      // matcher.
-      expect(captureObjSpy).toHaveBeenCalled();
+      // Full object-type capture (with per-type walks): skipped on testnet.
+      expect(captureObjSpy).not.toHaveBeenCalled();
 
-      // Resulting fact: tx fields zero (skipped), object types populated.
+      // Lite path: discovers type strings only, returns synthesized
+      // ObjectTypeCount[] with zero counts. Enough for match.objectTypes
+      // classification, none of the heavy per-type walks.
+      expect(discoverLiteSpy).toHaveBeenCalled();
+
+      // Resulting fact: tx + object-count fields zero (skipped), type
+      // strings preserved for classification.
       expect(fact.isTutorial).toBe(false);
       expect(fact.transactions).toBe(0);
       expect(fact.transactionsCapped).toBe(false);
       expect(fact.objectTypeCounts).toEqual([
-        { type: '0xtestnetReal::unique_real::T', objectCount: 7, objectHolderCount: 4 },
+        {
+          type: '0xtestnetReal::unique_real::T',
+          objectHolderCount: 0,
+          listedCount: 0,
+          objectHolderCountCapped: false,
+          objectCount: 0,
+          objectCountCapped: false,
+        },
       ]);
-      expect(fact.objectHolderCount).toBe(4);
-      expect(fact.objectCount).toBe(7);
+      expect(fact.objectHolderCount).toBe(0);
+      expect(fact.objectCount).toBe(0);
       expect(fact.moduleMetrics).toHaveLength(1);
       expect(fact.moduleMetrics[0].entryFunctions).toEqual(['transfer']);
       expect(fact.moduleMetrics[0].eventTypes).toEqual(['Transferred']);

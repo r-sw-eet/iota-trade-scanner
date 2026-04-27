@@ -2611,11 +2611,17 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
    * on-chain objects. Failure to enumerate (GraphQL error) logs + returns
    * `[]`, keeping the broader capture pass resilient.
    */
-  private async captureObjectTypesForPackage(
-    packageAddress: string,
-    concurrency: number = 3,
-  ): Promise<ObjectTypeCount[]> {
-    let keyableTypes: string[];
+  /**
+   * Cheap half of the object-type capture: enumerate the package's KEY-able
+   * struct types via one GraphQL query, return just the type strings
+   * (`${pkg}::${module}::${StructName}`). No per-type holder/object walks.
+   *
+   * Used by `captureObjectTypesForPackage` (mainnet, full pipeline) and
+   * directly by the testnet lite path via `discoverObjectTypesLite` —
+   * testnet only needs the type strings for `match.objectTypes`
+   * classification, not the dynamic counts.
+   */
+  private async discoverObjectTypeStrings(packageAddress: string): Promise<string[]> {
     try {
       const data: any = await this.graphql(`{
         object(address: "${packageAddress}") {
@@ -2632,7 +2638,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         }
       }`);
       const mods = data?.object?.asMovePackage?.modules?.nodes ?? [];
-      keyableTypes = [];
+      const keyableTypes: string[] = [];
       for (const mod of mods) {
         const dts = mod?.datatypes?.nodes ?? [];
         for (const dt of dts) {
@@ -2641,11 +2647,40 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
           keyableTypes.push(`${packageAddress}::${mod.name}::${dt.name}`);
         }
       }
+      return keyableTypes;
     } catch (e) {
-      this.logger.warn(`captureObjectTypes: ${packageAddress} struct enumeration failed — ${(e as Error).message}`);
+      this.logger.warn(`discoverObjectTypeStrings: ${packageAddress} struct enumeration failed — ${(e as Error).message}`);
       return [];
     }
+  }
 
+  /**
+   * Testnet "types-only" object-type capture. Discovers the KEY-able type
+   * strings via `discoverObjectTypeStrings` and returns an
+   * `ObjectTypeCount[]` with all dynamic fields zeroed. Skips the heavy
+   * per-type holder + object cursor walks (`updateHoldersForType` and
+   * especially `countObjectsForType`, which re-pages every live object on
+   * every tick). The synthesized entries keep `match.objectTypes`
+   * classification working — the matcher only consumes the trailing
+   * `StructName` (see `classifyPackage` `match.objectTypes` branch).
+   */
+  private async discoverObjectTypesLite(packageAddress: string): Promise<ObjectTypeCount[]> {
+    const keyableTypes = await this.discoverObjectTypeStrings(packageAddress);
+    return keyableTypes.map((type) => ({
+      type,
+      objectHolderCount: 0,
+      listedCount: 0,
+      objectHolderCountCapped: false,
+      objectCount: 0,
+      objectCountCapped: false,
+    }));
+  }
+
+  private async captureObjectTypesForPackage(
+    packageAddress: string,
+    concurrency: number = 3,
+  ): Promise<ObjectTypeCount[]> {
+    const keyableTypes = await this.discoverObjectTypeStrings(packageAddress);
     if (keyableTypes.length === 0) return [];
 
     const results: ObjectTypeCount[] = [];
@@ -4596,21 +4631,27 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       } as PackageFact;
     }
 
-    // Testnet "lite probe" — skip two heavy dynamic-noise sub-probes
-    // (per-module sender cursor walk, per-package tx-count cursor walk)
-    // on testnet. Per `project_two_headline_metrics.md`, testnet
-    // TXs/senders are dominated by CI/automation and never feed any
-    // user-facing metric. Re-probing them every 2h tick is wasted budget.
-    // `captureObjectTypesForPackage` is NOT skipped — even though its
-    // counts are testnet noise, the call also discovers the static
-    // `type` strings on each `ObjectTypeCount` entry, which the
-    // `match.objectTypes` matcher uses for classification (NFT
-    // collections etc). See plans/TODO.md → "Testnet probe efficiency"
-    // for follow-up options that recover that cost without losing the
-    // type strings (types-only mode, type caching). Static enrichment
-    // (entryFunctions, eventTypes, fingerprint, events count) is also
-    // captured — cheap and feeds classification. Mainnet keeps the full
-    // pipeline; growth deltas there are real.
+    // Testnet "lite probe" — three sub-probes are downgraded:
+    //   1. `updateSendersForModule` — skipped entirely (per-module sender
+    //      cursor walk).
+    //   2. `updateTxCountForPackage` — skipped entirely (per-package tx
+    //      cursor walk).
+    //   3. `captureObjectTypesForPackage` — replaced with
+    //      `discoverObjectTypesLite`, which keeps the cheap struct
+    //      enumeration (one GraphQL call → KEY-able type strings) and
+    //      drops the heavy per-type walks (holder walk + object count
+    //      walk). The synthesized `ObjectTypeCount[]` carries the type
+    //      strings with zero counts, so `match.objectTypes` classification
+    //      (NFT collections etc.) keeps working.
+    // Rationale per `project_two_headline_metrics.md`: testnet
+    // TXs / senders / object populations are dominated by CI / automation
+    // and never feed user-facing metrics. The walks were also the actual
+    // bottleneck — `countObjectsForType` re-pages every live object every
+    // tick, and testnet has 90k+ types with fat-tailed populations.
+    // Static enrichment (entryFunctions, eventTypes, fingerprint, events
+    // count, type strings) is still captured — cheap and feeds
+    // classification. Mainnet keeps the full pipeline; growth deltas
+    // there are real.
     const isTestnet = network === 'testnet';
 
     const entryFunctionsByModule = await this.fetchEntryFunctions(pkg.address);
@@ -4664,10 +4705,11 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       transactionsCapped = tx.capped;
     }
 
-    // Always run captureObjectTypesForPackage — it discovers static
-    // `type` strings used by the `match.objectTypes` matcher, even on
-    // testnet where the dynamic count fields are noise.
-    const objectTypeCounts = await this.captureObjectTypesForPackage(pkg.address);
+    // Object-type capture: testnet runs the lite (types-only) variant —
+    // see comment block above. Mainnet runs the full pipeline.
+    const objectTypeCounts = isTestnet
+      ? await this.discoverObjectTypesLite(pkg.address)
+      : await this.captureObjectTypesForPackage(pkg.address);
     const summedObjectHolderCount = objectTypeCounts.reduce((s, e) => s + e.objectHolderCount, 0);
     const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.objectCount, 0);
 
