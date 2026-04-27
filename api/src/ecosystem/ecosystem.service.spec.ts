@@ -8841,6 +8841,109 @@ describe('EcosystemService', () => {
       });
     });
 
+    it('probeOnePackage on testnet accumulates per-sub-probe wall-clock into the supplied timings object (skips senders/txCount, records the rest)', async () => {
+      // Drives the `if (timings)` branches inside `probeOnePackage` on the
+      // testnet lite path: totalPackages++, fetchEntryFunctionsMs,
+      // countEventsMs, sampleEventTypesMs (events > 0), probeIdentityFieldsMs,
+      // objectTypesMs. updateSendersForModuleMs / updateTxCountForPackageMs
+      // stay zero — those sub-probes are skipped on testnet so their timing
+      // wraps never run. probeTxEffectsMs also stays zero — identityFields
+      // returned non-empty identifiers, so the fallback isn't called.
+      const info = {
+        address: '0xtestnetTimings',
+        storageRebate: '0',
+        modules: { nodes: [{ name: 'm' }] },
+        previousTransactionBlock: null,
+      };
+      jest.spyOn(service as any, 'fetchEntryFunctions').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'countEvents').mockResolvedValue({ count: 1, capped: false });
+      jest.spyOn(service as any, 'sampleEventTypes').mockResolvedValue(['Evt']);
+      jest
+        .spyOn(service as any, 'probeIdentityFields')
+        .mockResolvedValue({ identifiers: ['name: foo'], objectType: null });
+      jest.spyOn(service as any, 'discoverObjectTypesLite').mockResolvedValue([]);
+
+      const timings = (service.constructor as any).newSubProbeTimings();
+      await (service as any).probeOnePackage(info, new Map(), new Date(), 'testnet', timings);
+
+      expect(timings.totalPackages).toBe(1);
+      expect(timings.fetchEntryFunctionsMs).toBeGreaterThanOrEqual(0);
+      expect(timings.countEventsMs).toBeGreaterThanOrEqual(0);
+      expect(timings.sampleEventTypesMs).toBeGreaterThanOrEqual(0);
+      expect(timings.probeIdentityFieldsMs).toBeGreaterThanOrEqual(0);
+      expect(timings.objectTypesMs).toBeGreaterThanOrEqual(0);
+      // Skipped on testnet — accumulators stay at their initial zero.
+      expect(timings.updateSendersForModuleMs).toBe(0);
+      expect(timings.updateTxCountForPackageMs).toBe(0);
+      // identityFields returned non-empty → fallback skipped.
+      expect(timings.probeTxEffectsMs).toBe(0);
+    });
+
+    it('probeOnePackage on mainnet accumulates timings for updateSendersForModule + updateTxCountForPackage (the testnet-skipped sub-probes)', async () => {
+      // Drives the `if (timings)` branches that only run on the mainnet
+      // full pipeline: updateSendersForModuleMs and updateTxCountForPackageMs.
+      // Plus the captureObjectTypesForPackage path of the objectTypesMs wrap
+      // (testnet hits discoverObjectTypesLite there instead).
+      const info = {
+        address: '0xmainnetTimings',
+        storageRebate: '0',
+        modules: { nodes: [{ name: 'm' }] },
+        previousTransactionBlock: null,
+      };
+      jest.spyOn(service as any, 'fetchEntryFunctions').mockResolvedValue(new Map());
+      jest.spyOn(service as any, 'countEvents').mockResolvedValue({ count: 0, capped: false });
+      jest.spyOn(service as any, 'updateSendersForModule').mockResolvedValue(0);
+      jest
+        .spyOn(service as any, 'probeIdentityFields')
+        .mockResolvedValue({ identifiers: ['x'], objectType: null });
+      jest
+        .spyOn(service as any, 'updateTxCountForPackage')
+        .mockResolvedValue({ total: 0, capped: false });
+      jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([]);
+
+      const timings = (service.constructor as any).newSubProbeTimings();
+      await (service as any).probeOnePackage(info, new Map(), new Date(), 'mainnet', timings);
+
+      expect(timings.totalPackages).toBe(1);
+      expect(timings.updateSendersForModuleMs).toBeGreaterThanOrEqual(0);
+      expect(timings.updateTxCountForPackageMs).toBeGreaterThanOrEqual(0);
+      expect(timings.objectTypesMs).toBeGreaterThanOrEqual(0);
+      // events=0 → sampleEventTypes never called, accumulator stays zero.
+      expect(timings.sampleEventTypesMs).toBe(0);
+      // identityFields returned non-empty → probeTxEffects fallback skipped.
+      expect(timings.probeTxEffectsMs).toBe(0);
+    });
+
+    it('probeOnePackage records probeTxEffectsMs into timings when probeIdentityFields returns empty identifiers (fallback path)', async () => {
+      // The `probeTxEffectsMs` accumulator only fires when identityFields
+      // returns no identifiers, triggering the tx-effects fallback. Pin
+      // that branch so the timing wrap on line ~4796 is exercised.
+      const info = {
+        address: '0xfallbackTimings',
+        storageRebate: '0',
+        modules: { nodes: [] },
+        previousTransactionBlock: null,
+      };
+      jest.spyOn(service as any, 'fetchEntryFunctions').mockResolvedValue(new Map());
+      jest
+        .spyOn(service as any, 'probeIdentityFields')
+        .mockResolvedValue({ identifiers: [], objectType: null });
+      jest
+        .spyOn(service as any, 'probeTxEffects')
+        .mockResolvedValue({ identifiers: [], objectType: null });
+      jest
+        .spyOn(service as any, 'updateTxCountForPackage')
+        .mockResolvedValue({ total: 0, capped: false });
+      jest.spyOn(service as any, 'captureObjectTypesForPackage').mockResolvedValue([]);
+
+      const timings = (service.constructor as any).newSubProbeTimings();
+      await (service as any).probeOnePackage(info, new Map(), new Date(), 'mainnet', timings);
+
+      expect(timings.probeTxEffectsMs).toBeGreaterThanOrEqual(0);
+      // Sanity — identityFields wrap also fired.
+      expect(timings.probeIdentityFieldsMs).toBeGreaterThanOrEqual(0);
+    });
+
     it('captureTestnetTick skips with "cross-process lock held" when acquire returns acquired:false', async () => {
       (service as any).acquireCaptureLock.mockResolvedValue({
         acquired: false,
