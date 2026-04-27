@@ -346,6 +346,29 @@ interface PackageInfo {
   } | null;
 }
 
+/**
+ * Per-sub-probe wall-clock accumulator for `probeOnePackage`. Optional
+ * caller-supplied; populated in place. Pipeline B aggregates one of these
+ * across a tick and logs the breakdown in `Testnet sub-probe phases:`.
+ *
+ * Field naming mirrors the underlying sub-probe method names so a spike
+ * points straight at the slow path. `*Ms` is total elapsed milliseconds
+ * across all probed packages this tick (not per-package average).
+ * Mainnet-only sub-probes (`updateSendersForModule`,
+ * `updateTxCountForPackage`) stay 0 on testnet ticks.
+ */
+interface SubProbeTimings {
+  fetchEntryFunctionsMs: number;
+  countEventsMs: number;
+  sampleEventTypesMs: number;
+  updateSendersForModuleMs: number;
+  probeIdentityFieldsMs: number;
+  probeTxEffectsMs: number;
+  updateTxCountForPackageMs: number;
+  objectTypesMs: number;
+  totalPackages: number;
+}
+
 @Injectable()
 export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(EcosystemService.name);
@@ -4636,17 +4659,44 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
+   * Per-sub-probe wall-clock accumulator for `probeOnePackage`. Optional
+   * caller-supplied; when present, each sub-probe call adds its elapsed
+   * ms in place. Field naming mirrors the sub-probe method names so a
+   * spike points straight at the slow path. Used by Pipeline B to log a
+   * tick-level breakdown analogous to mainnet's 5-phase capture log.
+   */
+  static newSubProbeTimings(): SubProbeTimings {
+    return {
+      fetchEntryFunctionsMs: 0,
+      countEventsMs: 0,
+      sampleEventTypesMs: 0,
+      updateSendersForModuleMs: 0,
+      probeIdentityFieldsMs: 0,
+      probeTxEffectsMs: 0,
+      updateTxCountForPackageMs: 0,
+      objectTypesMs: 0,
+      totalPackages: 0,
+    };
+  }
+
+  /**
    * Probe one package — the full probe set `captureRaw` runs per-package.
    * Extracted so the testnet priority-sharded ticks can reuse the exact
    * shape without cloning the whole paginator. Returns a `PackageFact` with
    * `lastProbedAt: now` so the newest-tick freshness heuristic has an
    * explicit per-package watermark.
+   *
+   * `timings` (optional): if passed, each sub-probe's elapsed ms is added
+   * in place. Tutorial-early-return packages are not counted (they skip
+   * every sub-probe). Concurrency is fine — JS event loop serializes the
+   * `+=` updates across the awaiting callers; no mutex needed.
    */
   private async probeOnePackage(
     pkg: PackageInfo,
     displayByPackage: Map<string, Array<{ key: string; value: string }>>,
     now: Date = new Date(),
     network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
+    timings?: SubProbeTimings,
   ): Promise<PackageFact> {
     const deployer = pkg.previousTransactionBlock?.sender?.address?.toLowerCase() ?? null;
     const modules = (pkg.modules?.nodes || []).map((m) => m.name);
@@ -4702,14 +4752,29 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     // classification. Mainnet keeps the full pipeline; growth deltas
     // there are real.
     const isTestnet = network === 'testnet';
+    if (timings) timings.totalPackages++;
 
+    const tEntry = Date.now();
     const entryFunctionsByModule = await this.fetchEntryFunctions(pkg.address);
+    if (timings) timings.fetchEntryFunctionsMs += Date.now() - tEntry;
     const moduleMetrics: ModuleMetrics[] = [];
     for (const mod of modules) {
       const emittingModule = `${pkg.address}::${mod}`;
+      const tCount = Date.now();
       const { count: events, capped: eventsCapped } = await this.countEvents(emittingModule);
-      const uniqueSenders = isTestnet ? 0 : await this.updateSendersForModule(pkg.address, mod);
-      const eventTypes = events > 0 ? await this.sampleEventTypes(emittingModule) : [];
+      if (timings) timings.countEventsMs += Date.now() - tCount;
+      let uniqueSenders = 0;
+      if (!isTestnet) {
+        const tSenders = Date.now();
+        uniqueSenders = await this.updateSendersForModule(pkg.address, mod);
+        if (timings) timings.updateSendersForModuleMs += Date.now() - tSenders;
+      }
+      let eventTypes: string[] = [];
+      if (events > 0) {
+        const tSample = Date.now();
+        eventTypes = await this.sampleEventTypes(emittingModule);
+        if (timings) timings.sampleEventTypesMs += Date.now() - tSample;
+      }
       moduleMetrics.push({
         module: mod,
         events,
@@ -4720,11 +4785,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       });
     }
 
+    const tIdent = Date.now();
     const ident = await this.probeIdentityFields(pkg.address);
+    if (timings) timings.probeIdentityFieldsMs += Date.now() - tIdent;
     let identifiers = ident.identifiers;
     let objectType: string | null = ident.objectType;
     if (identifiers.length === 0) {
+      const tTxEff = Date.now();
       const tx = await this.probeTxEffects(pkg.address);
+      if (timings) timings.probeTxEffectsMs += Date.now() - tTxEff;
       if (tx.identifiers.length) {
         identifiers = tx.identifiers;
         if (!objectType) objectType = tx.objectType;
@@ -4749,16 +4818,20 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     let transactions = 0;
     let transactionsCapped = false;
     if (!isTestnet) {
+      const tTx = Date.now();
       const tx = await this.updateTxCountForPackage(pkg.address);
+      if (timings) timings.updateTxCountForPackageMs += Date.now() - tTx;
       transactions = tx.total;
       transactionsCapped = tx.capped;
     }
 
     // Object-type capture: testnet runs the lite (types-only) variant —
     // see comment block above. Mainnet runs the full pipeline.
+    const tObj = Date.now();
     const objectTypeCounts = isTestnet
       ? await this.discoverObjectTypesLite(pkg.address)
       : await this.captureObjectTypesForPackage(pkg.address);
+    if (timings) timings.objectTypesMs += Date.now() - tObj;
     const summedObjectHolderCount = objectTypeCounts.reduce((s, e) => s + e.objectHolderCount, 0);
     const summedObjectCount = objectTypeCounts.reduce((s, e) => s + e.objectCount, 0);
 
@@ -5256,13 +5329,15 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
     deadlineHit: boolean;
     exhaustedCandidates: boolean;
     failures: Array<{ address: string; error: string }>;
+    subProbeTimings: SubProbeTimings;
   }> {
     const { now, deadlineMs, displayByPackage } = opts;
     const concurrency = opts.concurrency ?? EcosystemService.TESTNET_DEEP_PROBE_CONCURRENCY;
     const probed: PackageFact[] = [];
     const failures: Array<{ address: string; error: string }> = [];
+    const subProbeTimings = EcosystemService.newSubProbeTimings();
     if (Date.now() >= deadlineMs) {
-      return { probed, deadlineHit: true, exhaustedCandidates: false, failures };
+      return { probed, deadlineHit: true, exhaustedCandidates: false, failures, subProbeTimings };
     }
     const candidates: Array<{ _id: string }> = await this.pkgFactModel
       .aggregate([
@@ -5273,14 +5348,14 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       ])
       .exec();
     if (candidates.length === 0) {
-      return { probed, deadlineHit: false, exhaustedCandidates: true, failures };
+      return { probed, deadlineHit: false, exhaustedCandidates: true, failures, subProbeTimings };
     }
     this.logger.log(
       `testnet deep-probe: ${candidates.length} candidate address(es) (full sweep, concurrency=${concurrency})`,
     );
     for (let i = 0; i < candidates.length; i += concurrency) {
       if (Date.now() >= deadlineMs) {
-        return { probed, deadlineHit: true, exhaustedCandidates: false, failures };
+        return { probed, deadlineHit: true, exhaustedCandidates: false, failures, subProbeTimings };
       }
       const batch = candidates.slice(i, i + concurrency);
       const results = await Promise.allSettled(
@@ -5291,7 +5366,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
             // so the outer loop can skip without recording a failure.
             return null;
           }
-          return await this.probeOnePackage(info, displayByPackage, now, 'testnet');
+          return await this.probeOnePackage(info, displayByPackage, now, 'testnet', subProbeTimings);
         }),
       );
       for (let idx = 0; idx < results.length; idx++) {
@@ -5307,7 +5382,7 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         }
       }
     }
-    return { probed, deadlineHit: false, exhaustedCandidates: true, failures };
+    return { probed, deadlineHit: false, exhaustedCandidates: true, failures, subProbeTimings };
   }
 
   /**
@@ -5494,6 +5569,25 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
         if (dp.deadlineHit) deadlineHit = true;
         this.logger.log(
           `Testnet Pipeline B done: probed=${deepProbed.length} failures=${deepProbeFailures.length} deadlineHit=${dp.deadlineHit} exhaustedCandidates=${dp.exhaustedCandidates} durationMs=${pipelineBDurationMs}`,
+        );
+        // Per-sub-probe wall-clock breakdown — analogous to mainnet's
+        // 5-phase capture log. Tells us which call inside `probeOnePackage`
+        // dominates testnet's deep-probe budget. Sums are total elapsed
+        // ms across all `dp.subProbeTimings.totalPackages` deep-probed
+        // packages this tick, NOT per-package averages — divide by
+        // `totalPackages` for the per-package figure. Mainnet-only
+        // sub-probes (`updateSendersForModule`,
+        // `updateTxCountForPackage`) stay at 0 in lite mode.
+        const sub = dp.subProbeTimings;
+        const sec = (ms: number) => Math.round(ms / 1000) + 's';
+        this.logger.log(
+          `Testnet sub-probe phases (totalPackages=${sub.totalPackages}): ` +
+            `fetchEntryFunctions=${sec(sub.fetchEntryFunctionsMs)} ` +
+            `countEvents=${sec(sub.countEventsMs)} ` +
+            `sampleEventTypes=${sec(sub.sampleEventTypesMs)} ` +
+            `probeIdentityFields=${sec(sub.probeIdentityFieldsMs)} ` +
+            `probeTxEffects=${sec(sub.probeTxEffectsMs)} ` +
+            `objectTypes=${sec(sub.objectTypesMs)}`,
         );
       } else {
         this.logger.log(`Testnet Pipeline B skipped: budget already exhausted by Pipeline A`);

@@ -7679,7 +7679,7 @@ describe('EcosystemService', () => {
         }],
         deadlineHit: true,
         exhaustedCandidates: false,
-        failures: [],
+        failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
 
       const result = await service.captureTestnetTick();
@@ -7706,7 +7706,7 @@ describe('EcosystemService', () => {
         probed: [],
         deadlineHit: false,
         exhaustedCandidates: true,
-        failures: [],
+        failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
       const errSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
 
@@ -7735,7 +7735,7 @@ describe('EcosystemService', () => {
       // Pipeline B is unreachable when deadlineHit fires before B even
       // gets a chance — so only stub for safety.
       jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
-        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
       const logGapSpy = jest.spyOn(service as any, 'logCaptureGap').mockResolvedValue(undefined);
 
@@ -7762,7 +7762,7 @@ describe('EcosystemService', () => {
         error: new Error('Query request timed out. Limit: 40s'),
       });
       jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
-        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
       jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
       const logGapSpy = jest.spyOn(service as any, 'logCaptureGap').mockResolvedValue(undefined);
@@ -7810,7 +7810,7 @@ describe('EcosystemService', () => {
         }],
         deadlineHit: false,
         exhaustedCandidates: true,
-        failures: [],
+        failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
 
       const result = await service.captureTestnetTick();
@@ -7850,7 +7850,7 @@ describe('EcosystemService', () => {
         discovered: [], hitFreshWindow: false, deadlineHit: false, wrapped: true, error: null,
       });
       jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
-        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
       jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
 
@@ -8250,7 +8250,7 @@ describe('EcosystemService', () => {
         discovered: [], hitFreshWindow: true, deadlineHit: false, wrapped: false, error: null,
       });
       jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
-        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
       jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
 
@@ -8446,7 +8446,7 @@ describe('EcosystemService', () => {
         .mockRejectedValueOnce(new Error('Query request timed out. Limit: 40s'));
       const errorSpy = jest.spyOn((service as any).logger, 'error').mockImplementation(() => {});
       const deepSpy = jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
-        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
 
       await service.captureTestnetTick();
@@ -8869,13 +8869,54 @@ describe('EcosystemService', () => {
         discovered: [], hitFreshWindow: false, deadlineHit: false, wrapped: true, error: null,
       });
       jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
-        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [],
+        probed: [], deadlineHit: false, exhaustedCandidates: true, failures: [], subProbeTimings: { fetchEntryFunctionsMs: 0, countEventsMs: 0, sampleEventTypesMs: 0, updateSendersForModuleMs: 0, probeIdentityFieldsMs: 0, probeTxEffectsMs: 0, updateTxCountForPackageMs: 0, objectTypesMs: 0, totalPackages: 0 },
       });
       jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
       (service as any).releaseCaptureLock.mockRejectedValue(new Error('mongo blip'));
       const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
       await service.captureTestnetTick();
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to release testnet capture lock'));
+    });
+
+    it('captureTestnetTick: emits a "Testnet sub-probe phases:" log line with the per-sub-probe wall-clock breakdown returned by Pipeline B', async () => {
+      seedCursor({ tickCounter: 0 });
+      const logSpy = jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
+      jest.spyOn(service as any, 'runTestnetDiscoveryTick').mockResolvedValue({
+        discovered: [], hitFreshWindow: false, deadlineHit: false, wrapped: true, error: null,
+      });
+      jest.spyOn(service as any, 'runTestnetDeepProbeTick').mockResolvedValue({
+        probed: [],
+        deadlineHit: false,
+        exhaustedCandidates: true,
+        failures: [],
+        subProbeTimings: {
+          fetchEntryFunctionsMs: 12_345,
+          countEventsMs: 678_900,
+          sampleEventTypesMs: 5_000,
+          updateSendersForModuleMs: 0, // testnet skips
+          probeIdentityFieldsMs: 7_500,
+          probeTxEffectsMs: 1_200,
+          updateTxCountForPackageMs: 0, // testnet skips
+          objectTypesMs: 4_321,
+          totalPackages: 1234,
+        },
+      });
+      jest.spyOn(service as any, 'collectDisplayMetadata').mockResolvedValue(new Map());
+
+      await service.captureTestnetTick();
+
+      const phaseLine = logSpy.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].startsWith('Testnet sub-probe phases'),
+      );
+      expect(phaseLine).toBeDefined();
+      const line = phaseLine![0] as string;
+      expect(line).toMatch(/totalPackages=1234/);
+      expect(line).toMatch(/fetchEntryFunctions=12s/);
+      expect(line).toMatch(/countEvents=679s/);
+      expect(line).toMatch(/sampleEventTypes=5s/);
+      expect(line).toMatch(/probeIdentityFields=8s/);
+      expect(line).toMatch(/probeTxEffects=1s/);
+      expect(line).toMatch(/objectTypes=4s/);
     });
   });
 
