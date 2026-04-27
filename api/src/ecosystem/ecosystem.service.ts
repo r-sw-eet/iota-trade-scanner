@@ -5307,14 +5307,19 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       const newId = new Types.ObjectId();
 
       // ----- Pipeline A: discovery -----
+      const pipelineAStart = Date.now();
       const discovery = await this.runTestnetDiscoveryTick({
         previousByAddress,
         deadlineMs,
         now,
       });
+      const pipelineADurationMs = Date.now() - pipelineAStart;
       const { discovered, hitFreshWindow, wrapped } = discovery;
       let deadlineHit = discovery.deadlineHit;
       const discoveryError = discovery.error;
+      this.logger.log(
+        `Testnet Pipeline A done: discovered=${discovered.length} hitKnown=${hitFreshWindow} wrapped=${wrapped} deadlineHit=${deadlineHit} durationMs=${pipelineADurationMs}`,
+      );
       if (discoveryError) {
         this.logger.error(
           `Testnet discovery aborted mid-walk after ${discovered.length} pkgs: ${discoveryError.message} — falling through to deep-probe with what we have`,
@@ -5353,20 +5358,23 @@ export class EcosystemService implements OnModuleInit, OnApplicationShutdown {
       // partially or in earlier ticks.
       let deepProbed: PackageFact[] = [];
       let deepProbeFailures: Array<{ address: string; error: string }> = [];
+      let pipelineBDurationMs = 0;
       if (Date.now() < deadlineMs) {
+        const pipelineBStart = Date.now();
         const dp = await this.runTestnetDeepProbeTick({
           now,
           deadlineMs,
           displayByPackage,
         });
+        pipelineBDurationMs = Date.now() - pipelineBStart;
         deepProbed = dp.probed;
         deepProbeFailures = dp.failures;
         if (dp.deadlineHit) deadlineHit = true;
-        if (deepProbed.length > 0) {
-          this.logger.log(
-            `Testnet deep-probe finished: probed=${deepProbed.length} failures=${deepProbeFailures.length} deadlineHit=${dp.deadlineHit} exhaustedCandidates=${dp.exhaustedCandidates}`,
-          );
-        }
+        this.logger.log(
+          `Testnet Pipeline B done: probed=${deepProbed.length} failures=${deepProbeFailures.length} deadlineHit=${dp.deadlineHit} exhaustedCandidates=${dp.exhaustedCandidates} durationMs=${pipelineBDurationMs}`,
+        );
+      } else {
+        this.logger.log(`Testnet Pipeline B skipped: budget already exhausted by Pipeline A`);
       }
 
       // Pipeline B writes its results into this same snapshot. Some of
